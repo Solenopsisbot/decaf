@@ -241,11 +241,9 @@ public final class Enums {
     assert_eq!(host.unknown_host_call_count(), 0);
 }
 
-/// `Enum.valueOf` on a JDK enum the runtime has no constant table for cannot
-/// check the name, so it is counted. (The JVM throws for `"BLUE"`; the bounded
-/// runtime answers a marker and counts the call, so the run is not clean.)
+/// `Enum.valueOf` on a JDK enum uses the host's exact constant table.
 #[test]
-fn enum_value_of_on_an_unknown_enum_is_counted() {
+fn enum_value_of_on_a_known_jdk_enum_is_exact() {
     let jar = build_fixture(
         "jdk-enum",
         "demo.JdkEnum",
@@ -261,13 +259,7 @@ public final class JdkEnum {
     );
     let (result, host) = execute(&jar);
     result.unwrap();
-    assert_eq!(
-        count(
-            &host,
-            "java/lang/Enum#valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;"
-        ),
-        1
-    );
+    assert_eq!(host.unknown_host_call_count(), 0);
 }
 
 /// A started thread's body does not run in the bounded runtime, so `start()`

@@ -32,27 +32,24 @@ impl<H: Host> Runtime<'_, H> {
         let jar_enum = self
             .class(&class)
             .map(|file| file.super_name == "java/lang/Enum");
-        let game_constants = game_enum_constants(&class);
+        let known = crate::enum_value_of::known_enum_values(&class);
         if is_enum_query {
-            return Ok(match (jar_enum, game_constants) {
+            return Ok(match (jar_enum, known.is_some()) {
                 (Some(is_enum), _) => Some(Value::Int(i32::from(is_enum))),
-                (None, Some(_)) => Some(Value::Int(1)),
+                (None, true) => Some(Value::Int(1)),
                 // A class the runtime does not hold keeps the host's answer.
-                (None, None) => None,
+                (None, false) => None,
             });
         }
-        match (jar_enum, game_constants) {
+        match (jar_enum, known) {
             (Some(true), _) => {
+                self.ensure_initialized(&class)?;
                 let descriptor = format!("()[L{class};");
                 self.invoke(&class, "values", &descriptor, None, &[])
                     .map(Some)
             }
             (Some(false), _) => Ok(Some(Value::Ref(None))),
-            (None, Some(constants)) => {
-                let values = constants
-                    .iter()
-                    .map(|name| Value::Ref(Some(format!("enum/{class}/{name}"))))
-                    .collect();
+            (None, Some(values)) => {
                 // A clone of `values()`: an array of the enum class.
                 Ok(Some(self.new_array_value(&format!("[L{class};"), values)))
             }

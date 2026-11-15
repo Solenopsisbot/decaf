@@ -9,6 +9,8 @@ import java.util.EnumSet;
 import java.util.EnumMap;
 import java.util.RandomAccess;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import net.minecraft.core.Direction;
 
 /**
  * {@code Class} objects are handles, one per name in a run (#156 P13b1): every producer ({@code
@@ -241,6 +243,41 @@ public class Probe {
       .append(Thread.State.class.getEnumConstants()[0]).append(":")
       .append(E.A.getDeclaringClass().getName());
     return out.toString();
+  }
+
+  static String enumFailure(Class<?> type, String name) {
+    try {
+      Enum.valueOf((Class) type, name);
+      return "ok";
+    } catch (RuntimeException error) {
+      return error.toString();
+    }
+  }
+
+  static String enumNames(Object[] values) {
+    StringBuilder out = new StringBuilder("[");
+    for (int i = 0; i < values.length; i++) {
+      if (i > 0) out.append(", ");
+      out.append(values[i]);
+    }
+    return out.append("]").toString();
+  }
+
+  /** Null/non-enum Enum.valueOf and JDK/game enum reflection re-check. */
+  public static String enumReflectionRecheck() throws Exception {
+    Object[] direction = Direction.class.getEnumConstants();
+    return enumFailure(E.class, null)
+        + "|" + enumFailure(null, "A")
+        + "|" + enumFailure(String.class, "A")
+        + "|" + (E.A.getClass().isEnum()) + "," + E.class.isEnum()
+        + "|" + enumNames(E.class.getEnumConstants())
+        + "|" + (E.class.getEnumConstants() != E.class.getEnumConstants())
+        + "|" + enumNames(TimeUnit.class.getEnumConstants())
+        + "|" + enumNames(TimeUnit.values())
+        + "|" + enumNames(Thread.State.class.getEnumConstants())
+        + "|" + enumNames(Thread.State.values())
+        + "|" + enumNames(direction)
+        + "|" + (direction != Direction.class.getEnumConstants());
   }
 
   public static String enumClasses() {
