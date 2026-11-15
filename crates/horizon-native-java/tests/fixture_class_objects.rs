@@ -163,14 +163,17 @@ fn a_jar_class_answers_from_its_class_file() {
 #[test]
 fn enum_value_of_collections_and_jdk_reflection_match_java_25() {
     let (text, unknown) = run("enumReview");
-    assert_eq!(text, "iae:iae:iae:counted:6:NEW:true:NEW:demo.Probe$E");
+    assert_eq!(
+        text,
+        "iae:iae:iae:2:a-body:B:true:[a-body, B]:{a-body=aye, B=bee}:6:NEW:true:NEW:demo.Probe$E"
+    );
     assert!(
-        unknown
+        !unknown
             .iter()
             .any(|(call, _)| call.contains("java/util/EnumSet"))
     );
     assert!(
-        unknown
+        !unknown
             .iter()
             .any(|(call, _)| call.contains("java/util/EnumMap"))
     );

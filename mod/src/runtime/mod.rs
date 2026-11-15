@@ -178,6 +178,7 @@ mod parked_threads;
 mod server_values;
 mod unmodifiable_sublist;
 pub use parked_threads::ParkedThread;
+mod enum_collections;
 mod priority_queue;
 mod reference_identity;
 mod references;
@@ -5870,7 +5871,19 @@ impl Host for StdHost {
                 "java/lang/Enum",
                 "valueOf",
                 "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
-            ) => self.unknown_host_call(r),
+            ) => {
+                let class = class_binary_name(Self::argument(r, args, 0)?).replace('.', "/");
+                let name = expect_string(Self::argument(r, args, 1)?);
+                if name.is_empty() {
+                    return Err(NativeError::Metadata(
+                        "java/lang/Enum.valueOf received an empty name".into(),
+                    ));
+                }
+                if game_enum_constants(&class).is_none() {
+                    self.unknown_host_call(r)?;
+                }
+                Ok(Value::Ref(Some(format!("enum/{class}/{name}"))))
+            }
             // UUIDs are common in loader metadata, player identity, and
             // registration diagnostics. Keep them as canonical markers so
             // equality/string formatting is deterministic without a JVM.
@@ -12335,6 +12348,7 @@ fn is_set_owner(owner: &str) -> bool {
                 | "java/util/concurrent/CopyOnWriteArraySet"
                 | "java/util/concurrent/ConcurrentSkipListSet"
                 | "java/util/concurrent/ConcurrentHashMap$KeySetView"
+                | "java/util/EnumSet"
                 | "com/google/common/collect/ImmutableSet"
         )
 }
@@ -12353,6 +12367,7 @@ fn is_map_owner(owner: &str) -> bool {
                 | "java/util/TreeMap"
                 | "java/util/IdentityHashMap"
                 | "java/util/WeakHashMap"
+                | "java/util/EnumMap"
                 | "java/util/Hashtable"
                 | "java/util/Properties"
                 | "java/util/concurrent/ConcurrentMap"
@@ -26594,6 +26609,11 @@ impl<H: Host> Runtime<'_, H> {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
+                        self.invoke_enum_collection(&r, receiver.as_ref(), &args)
+                    ) {
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
                         self.invoke_jdk_skeleton(&r, op, receiver.as_ref(), &args)
                     ) {
                         // A JDK skeleton's body or a JDK interface default the
@@ -26679,8 +26699,8 @@ impl<H: Host> Runtime<'_, H> {
                         at,
                         self.invoke_immutable_collection(&r, op, receiver.as_ref(), &args)
                     ) {
-                        // `Set.of`/`Map.of` and `IdentityHashMap`
-                        // (`immutable_collections.rs`).
+                        // Set.of/Map.of and IdentityHashMap
+                        // (immutable_collections.rs).
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,

@@ -62,9 +62,11 @@ impl<H: Host> Runtime<'_, H> {
                     Some(constants) if !constants.contains(&name.as_str()) => {
                         Err(no_enum_constant(&class, &name))
                     }
-                    // A known game constant, or a class without a table: the
-                    // host answers (and counts the unchecked one).
-                    _ => Ok(None),
+                    // A known game constant is checked above. A JDK enum
+                    // outside the bounded table is counted rather than
+                    // fabricating a marker.
+                    Some(_) => self.host.unknown_operand_call(r).map(Some),
+                    None => self.host.unknown_operand_call(r).map(Some),
                 };
             }
         };
