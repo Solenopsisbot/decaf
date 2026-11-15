@@ -1124,6 +1124,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.modelled_to_string(value)
     }
 
+    fn modelled_to_string_checked(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        self.inner.modelled_to_string_checked(value)
+    }
+
     fn mutable_collection_entries(&self, value: &Value) -> Option<Vec<Value>> {
         self.inner.mutable_collection_entries(value)
     }
@@ -1399,6 +1403,21 @@ impl<H: Host> Host for GameHookHost<'_, H> {
             .note_entrypoint_constructed(kind, class, instance);
     }
 
+    fn fabric_entrypoints(&self, kind: &str) -> Vec<(String, String)> {
+        self.inner.fabric_entrypoints(kind)
+    }
+
+    fn fabric_entrypoint_object(
+        &self,
+        kind: &str,
+        class: &str,
+        requested: &str,
+        ordinal: usize,
+    ) -> Option<Value> {
+        self.inner
+            .fabric_entrypoint_object(kind, class, requested, ordinal)
+    }
+
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         // An instance-field read the callbacks never wrote reaches the host
         // too. A Mixin `@Shadow` field is the game object's own field, which
@@ -1567,6 +1586,43 @@ impl<H: Host> Host for GameHookHost<'_, H> {
 
     fn record_throwable(&mut self, marker: &str, message: Option<String>) {
         self.inner.record_throwable(marker, message);
+    }
+
+    fn throwable_suppressed(&self, marker: &str) -> Option<Vec<Value>> {
+        self.inner.throwable_suppressed(marker)
+    }
+
+    fn record_throwable_suppressed(&mut self, marker: &str, value: Value) {
+        self.inner.record_throwable_suppressed(marker, value);
+    }
+
+    fn record_throwable_cause(&mut self, marker: &str, cause: Value) {
+        self.inner.record_throwable_cause(marker, cause);
+    }
+
+    fn record_wrapped_cause(&mut self, class: &str, message: Option<&str>, cause: Value) {
+        self.inner.record_wrapped_cause(class, message, cause);
+    }
+
+    fn take_wrapped_cause(&mut self, class: &str, message: &Option<String>) -> Option<Value> {
+        self.inner.take_wrapped_cause(class, message)
+    }
+
+    fn record_wrapped_suppressed(&mut self, class: &str, message: Option<&str>, value: Value) {
+        self.inner.record_wrapped_suppressed(class, message, value);
+    }
+
+    fn take_wrapped_suppressed(&mut self, class: &str, message: &Option<String>) -> Vec<Value> {
+        self.inner.take_wrapped_suppressed(class, message)
+    }
+
+    fn record_fabric_entrypoint_failure(&mut self, kind: &str, class: &str, cause: Value) {
+        self.inner
+            .record_fabric_entrypoint_failure(kind, class, cause);
+    }
+
+    fn take_fabric_entrypoint_failure(&mut self, kind: &str, class: &str) -> Option<Value> {
+        self.inner.take_fabric_entrypoint_failure(kind, class)
     }
 
     fn persistent_class_state(&self) -> (BTreeMap<String, Value>, BTreeSet<String>) {

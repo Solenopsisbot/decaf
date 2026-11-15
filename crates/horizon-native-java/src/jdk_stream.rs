@@ -113,9 +113,13 @@ pub(crate) fn comparator_instance(
         return None;
     }
     match (r.name.as_str(), r.descriptor.as_str()) {
-        ("reversed", "()Ljava/util/Comparator;") => {
-            Some(comparator(&format!("reverse:{}", escaped(&[receiver]))))
-        }
+        // `ReverseComparator2.reversed()` answers the comparator it reverses, and
+        // `Collections.reverseOrder().reversed()` is `naturalOrder()`: reversing a reversal is
+        // the original, never one more level to recurse through (#250).
+        ("reversed", "()Ljava/util/Comparator;") => Some(
+            reversed_inner(receiver)
+                .unwrap_or_else(|| comparator(&format!("reverse:{}", escaped(&[receiver])))),
+        ),
         ("thenComparing", "(Ljava/util/Comparator;)Ljava/util/Comparator;") => {
             let other = args.first()?;
             Some(comparator(&format!("then:{}", escaped(&[receiver, other]))))
@@ -133,6 +137,14 @@ pub(crate) fn comparator_instance(
         }
         _ => None,
     }
+}
+
+/// The comparator a `reverse:` marker reverses.
+fn reversed_inner(comparator: &Value) -> Option<Value> {
+    let body = expect_ref(comparator)?
+        .strip_prefix(COMPARATOR_PREFIX)?
+        .strip_prefix("reverse:")?;
+    operands(body).ok()?.into_iter().next()
 }
 
 /// An integral boxed or primitive value, widened to `long`.
@@ -251,6 +263,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         a: &Value,
         b: &Value,
     ) -> Result<i32, NativeError> {
+        // One level of a composed comparator (#250): a chain as deep as a jar builds it ends
+        // in a `StackOverflowError`, as Java's lambda chain does.
+        let _level = crate::host_recursion::enter()?;
         // `sorted(null)` and `List.sort(null)` mean natural order.
         let Some(marker) = expect_ref(comparator).cloned() else {
             return self.natural_order(a, b);

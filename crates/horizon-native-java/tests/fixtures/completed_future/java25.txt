@@ -1,0 +1,10 @@
+true|ab|abc|true|abc
+x1|y|true
+CompletionException:IllegalStateException:bad|ExecutionException:IllegalStateException:bad|CompletionException|true|recovered:bad|IllegalStateException|true|bad|wc|boom
+false|false|x|false
+CompletionException|IllegalStateException|wrapped
+java.util.concurrent.CompletableFuture@<identity>[Completed normally]
+true
+a
+z|false
+late|true

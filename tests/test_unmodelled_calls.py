@@ -303,6 +303,7 @@ class UnmodelledCallsTests(unittest.TestCase):
                 self.assertEqual(TOOL.main([
                     "--corpus", f"wide={root}", "--probe", str(probe),
                     "--dependency-mode", "both", "--jobs", "1",
+                    "--allow-missing-fabric-oracle",
                 ]), 0)
             report = json.loads(output.getvalue())
         rows = report["corpora"]["wide"]["rows"]
@@ -315,6 +316,21 @@ class UnmodelledCallsTests(unittest.TestCase):
         self.assertEqual(report["totals"]["alone"]["wide"]["ran-hollow"], 1)
         self.assertNotIn("refused", report["totals"]["closure"]["wide"])
         self.assertEqual(len(report["corpora"]["wide"]["closure_regressions"]), 1)
+
+    def test_closure_mode_without_the_fabric_oracle_stops_loudly(self):
+        """A missing loader jar must not pass for a census where every Fabric closure row refuses."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._jar(root, "app.jar", "app")
+            probe = root / "probe"
+            probe.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            probe.chmod(0o755)
+            errors = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+                code = TOOL.main(["--corpus", f"wide={root}", "--probe", str(probe),
+                                  "--dependency-mode", "closure", "--jobs", "1"])
+        self.assertEqual(code, 2)
+        self.assertIn("--fabric-loader", errors.getvalue())
 
     def test_dependency_failure_is_a_regression_outside_closure_totals(self):
         rows = [

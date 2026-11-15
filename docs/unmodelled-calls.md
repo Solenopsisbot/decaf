@@ -35,6 +35,11 @@ request one mode. A missing or version-incompatible required provider is refused
 as `missing dependency X`; it is never treated as a host model. Nested
 `META-INF/jars/` and NeoForge Jar-in-Jar providers are included in the closure.
 
+Fabric version ranges are decided by the real Fabric Loader 0.19.5 (`tools/FabricPredicateOracle.java`),
+so closure mode over a Fabric corpus needs that jar: pass `--fabric-loader PATH` unless it sits in a
+corpus or a default dependency directory. Without it the census stops with an error instead of
+refusing every Fabric closure row; `--allow-missing-fabric-oracle` keeps the old behaviour for tests.
+
 `tools/unmodelled_calls.py` prints and can save, per corpus, one row per jar
 (`verdict`, `unknown`, `calls`) and the ranked table. A single jar can be reproduced by
 hand:

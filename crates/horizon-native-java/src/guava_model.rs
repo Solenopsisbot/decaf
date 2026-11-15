@@ -310,6 +310,84 @@ impl<H: Host> Runtime<'_, H> {
             {
                 self.invoke_immutable_of(r, args)
             }
+            "com/google/common/collect/ImmutableMap"
+                if r.name == "builder"
+                    && r.descriptor == "()Lcom/google/common/collect/ImmutableMap$Builder;" =>
+            {
+                Ok(Some(self.new_object("guava-immutable-map-builder")))
+            }
+            "com/google/common/collect/ImmutableMap$Builder" => {
+                let Some(receiver) = receiver else {
+                    return Ok(None);
+                };
+                let Some(marker) = crate::jar_object::object_key(receiver).map(str::to_owned)
+                else {
+                    return Ok(None);
+                };
+                let map_field = format!("{marker}|guava#builder-map");
+                match r.name.as_str() {
+                    "put" if args.len() == 2 => {
+                        let map = match self.fields.get(&map_field).cloned() {
+                            Some(map) => map,
+                            None => {
+                                let Some(map) = self.host.empty_mutable_collection("map") else {
+                                    return Ok(None);
+                                };
+                                self.fields.insert(map_field.clone(), map.clone());
+                                map
+                            }
+                        };
+                        let existing = runtime_collection_values(&*self.host, &map)?;
+                        if let Some(index) = existing
+                            .iter()
+                            .step_by(2)
+                            .position(|key| self.java_equals(key, &args[0]).unwrap_or(false))
+                        {
+                            let old_value = &existing[index * 2 + 1];
+                            return Err(thrown(
+                                "java/lang/IllegalArgumentException",
+                                Some(format!(
+                                    "Multiple entries with same key: {}={} and {}={}",
+                                    crate::value_text(&args[0]),
+                                    crate::value_text(&args[1]),
+                                    crate::value_text(&args[0]),
+                                    crate::value_text(old_value),
+                                )),
+                            ));
+                        }
+                        self.host.invoke_instance(
+                            &MethodRef {
+                                owner: "java/util/Map".into(),
+                                name: "put".into(),
+                                descriptor:
+                                    "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
+                                        .into(),
+                            },
+                            &map,
+                            args,
+                        )?;
+                        Ok(Some(receiver.clone()))
+                    }
+                    "build"
+                        if args.is_empty()
+                            && (r.descriptor == "()Lcom/google/common/collect/ImmutableMap;"
+                                || r.descriptor == "()Ljava/util/Map;") =>
+                    {
+                        let Some(map) = self.fields.get(&map_field) else {
+                            return Ok(Some(collection_value("map", &[])));
+                        };
+                        let values = runtime_collection_values(&*self.host, map)?;
+                        Ok(Some(
+                            self.host
+                                .immutable_collection("map", values)
+                                .ok_or_else(|| {
+                                    NativeError::Metadata("immutable map host missing".into())
+                                })?,
+                        ))
+                    }
+                    _ => Ok(None),
+                }
+            }
             TYPE_TOKEN => self.invoke_type_token(r, receiver, args),
             "com/google/common/cache/CacheBuilder" => self.invoke_cache_builder(r, receiver, args),
             "com/google/common/cache/CacheLoader" => match (r.name.as_str(), r.descriptor.as_str())
@@ -348,6 +426,94 @@ impl<H: Host> Runtime<'_, H> {
                     && r.descriptor == "()Ljava/util/concurrent/ConcurrentMap;" =>
             {
                 Ok(Some(collection_value("map", &[])))
+            }
+            "com/google/common/collect/Maps"
+                if r.name == "newIdentityHashMap"
+                    && r.descriptor == "()Ljava/util/IdentityHashMap;" =>
+            {
+                Ok(self
+                    .host
+                    .empty_mutable_collection("java/util/IdentityHashMap"))
+            }
+            // `Maps.immutableEnumMap` copies the supplied map into an
+            // immutable map. The host map representation already preserves
+            // the key/value pairs and lookup contract used by ImmutableMap.
+            "com/google/common/collect/Maps"
+                if r.name == "immutableEnumMap"
+                    && (r.descriptor
+                        == "(Ljava/util/Map;)Lcom/google/common/collect/ImmutableMap;"
+                        || r.descriptor == "(Ljava/util/Map;)Ljava/util/Map;") =>
+            {
+                let Some(source) = args.first() else {
+                    return Ok(None);
+                };
+                let values = runtime_collection_values(&*self.host, source)?;
+                if !values.len().is_multiple_of(2) {
+                    return Ok(None);
+                }
+                let mut ordered = values;
+                for key in ordered.iter().step_by(2) {
+                    let known = self.enum_ordinal_of(key).or_else(|| {
+                        crate::expect_ref(key)
+                            .and_then(|marker| self.declared_enum_ordinal(marker).ok().flatten())
+                            .and_then(|value| match value {
+                                Value::Int(ordinal) => Some(ordinal),
+                                _ => None,
+                            })
+                    });
+                    if known.is_none() {
+                        return Ok(None);
+                    }
+                }
+                let mut pairs = ordered
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|[key, value]| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>();
+                pairs.sort_by_key(|(key, _)| {
+                    self.enum_ordinal_of(key)
+                        .or_else(|| {
+                            crate::expect_ref(key)
+                                .and_then(|marker| {
+                                    self.declared_enum_ordinal(marker).ok().flatten()
+                                })
+                                .and_then(|value| match value {
+                                    Value::Int(ordinal) => Some(ordinal),
+                                    _ => None,
+                                })
+                        })
+                        .unwrap_or(i32::MAX)
+                });
+                ordered.clear();
+                for (key, value) in pairs {
+                    ordered.extend([key, value]);
+                }
+                Ok(Some(
+                    self.host
+                        .immutable_collection("map", ordered)
+                        .ok_or_else(|| {
+                            NativeError::Metadata("immutable map host missing".into())
+                        })?,
+                ))
+            }
+            // Guava's queue factory returns a fresh mutable
+            // `ConcurrentLinkedQueue`; the single-threaded host uses its
+            // ordinary mutable list table for the same FIFO operations.
+            "com/google/common/collect/Queues"
+                if r.name == "newConcurrentLinkedQueue"
+                    && r.descriptor == "()Ljava/util/concurrent/ConcurrentLinkedQueue;" =>
+            {
+                Ok(self
+                    .host
+                    .empty_mutable_collection("java/util/concurrent/ConcurrentLinkedQueue"))
+            }
+            "com/google/common/collect/Sets"
+                if r.name == "newIdentityHashSet" && r.descriptor == "()Ljava/util/Set;" =>
+            {
+                Ok(self
+                    .host
+                    .empty_mutable_collection("java/util/Collections$SetFromMap"))
             }
             "com/google/common/collect/MapMaker" => self.invoke_map_maker(r, receiver, args),
             _ => Ok(None),

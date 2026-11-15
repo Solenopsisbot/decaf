@@ -305,6 +305,9 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     pub(crate) fn java_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
+        // One level of a nested `hashCode` (#250): a list holding itself recurses on the JVM
+        // too, and ends in a `StackOverflowError` the jar can catch.
+        let _level = crate::host_recursion::enter()?;
         match self.equality_of(value) {
             Equality::Null => Ok(Some(0)),
             Equality::Identity
@@ -415,8 +418,91 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
+    /// `Arrays.deepHashCode(array)`: `1`, then `31 * h + e`, where `e` is a nested `Object[]`'s
+    /// own deep hash, a primitive array's `Arrays.hashCode`, or `Objects.hashCode(element)`.
+    /// `None` where a part is unknown.
+    fn deep_hash(&mut self, array: &Value) -> Result<Option<i32>, NativeError> {
+        if *array == Value::Ref(None) {
+            return Ok(Some(0));
+        }
+        let _level = crate::host_recursion::enter()?;
+        let Ok(elements) = self.array(array).cloned() else {
+            return Ok(None);
+        };
+        let mut hash = 1_i32;
+        for element in &elements {
+            let part = match array_shape(element) {
+                ArrayShape::NotArray => self.java_hash(element)?,
+                ArrayShape::Objects => self.deep_hash(element)?,
+                ArrayShape::Primitive(kind) => {
+                    let Ok(values) = self.array(element) else {
+                        return Ok(None);
+                    };
+                    primitive_array_hash(kind, values)
+                }
+            };
+            let Some(part) = part else {
+                return Ok(None);
+            };
+            hash = hash.wrapping_mul(31).wrapping_add(part);
+        }
+        Ok(Some(hash))
+    }
+
+    /// `Arrays.deepToString(array)`: `[e, e...]`, a nested `Object[]` printed the same way
+    /// unless it is already being printed further up (`[...]`), a primitive array as
+    /// `Arrays.toString` prints it, anything else `String.valueOf`. `path` holds the arrays
+    /// being printed. `None` where a part is unknown (a `float[]`/`double[]`'s text).
+    fn deep_text(
+        &mut self,
+        array: &Value,
+        path: &mut Vec<String>,
+    ) -> Result<Option<String>, NativeError> {
+        if *array == Value::Ref(None) {
+            return Ok(Some("null".into()));
+        }
+        let _level = crate::host_recursion::enter()?;
+        let Some(key) = crate::host_array::array_key(array).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let Ok(elements) = self.array(array).cloned() else {
+            return Ok(None);
+        };
+        path.push(key);
+        let mut parts = Vec::with_capacity(elements.len());
+        for element in &elements {
+            let part = match array_shape(element) {
+                ArrayShape::NotArray if *element == Value::Ref(None) => Some("null".to_owned()),
+                ArrayShape::NotArray => {
+                    Some(self.value_of_text(element, "Ljava/lang/Object;", "", "")?)
+                }
+                ArrayShape::Objects => {
+                    let nested = crate::host_array::array_key(element).unwrap_or_default();
+                    if path.iter().any(|on| on == nested) {
+                        Some("[...]".to_owned())
+                    } else {
+                        self.deep_text(element, path)?
+                    }
+                }
+                ArrayShape::Primitive(kind) => match self.array(element) {
+                    Ok(values) => primitive_array_text(kind, values),
+                    Err(_) => None,
+                },
+            };
+            let Some(part) = part else {
+                path.pop();
+                return Ok(None);
+            };
+            parts.push(part);
+        }
+        path.pop();
+        Ok(Some(format!("[{}]", parts.join(", "))))
+    }
+
     /// `a.equals(b)` for a non-null `a`, as the JVM runs it.
     pub(crate) fn java_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
+        // One level of a nested `equals` (#250).
+        let _level = crate::host_recursion::enter()?;
         if let Some(equal) = self.subclass_token_equals(a, b) {
             return match equal {
                 Some(equal) => Ok(equal),
@@ -845,6 +931,23 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 return Ok(Some(Value::Int(hash)));
             }
+            // `Arrays.deepHashCode`/`deepToString` (Java 25's bodies): a nested `Object[]` is
+            // walked, which a cycle makes endless on the JVM (`StackOverflowError`), and here
+            // too (`host_recursion.rs`), except where `deepToString` prints `[...]` (#250).
+            ("java/util/Arrays", "deepHashCode", "([Ljava/lang/Object;)I") => {
+                let [array] = args else { return Ok(None) };
+                return match self.deep_hash(array)? {
+                    Some(hash) => Ok(Some(Value::Int(hash))),
+                    None => self.host.unknown_operand_call(r).map(Some),
+                };
+            }
+            ("java/util/Arrays", "deepToString", "([Ljava/lang/Object;)Ljava/lang/String;") => {
+                let [array] = args else { return Ok(None) };
+                return match self.deep_text(array, &mut Vec::new())? {
+                    Some(text) => Ok(Some(Value::Ref(Some(text)))),
+                    None => self.host.unknown_operand_call(r).map(Some),
+                };
+            }
             ("java/lang/System", "identityHashCode", "(Ljava/lang/Object;)I") => {
                 let [value] = args else { return Ok(None) };
                 if *value == Value::Ref(None) {
@@ -1135,6 +1238,80 @@ pub(crate) struct RuntimeNested<'a, 'r, 'f, H: Host> {
     method: &'f str,
 }
 
+/// What an element of an array is, for `Arrays.deepHashCode`/`deepToString`.
+enum ArrayShape {
+    NotArray,
+    /// An `Object[]` (or any reference array), walked deeply.
+    Objects,
+    /// A primitive array, by its element descriptor (`I`, `J`...).
+    Primitive(u8),
+}
+
+fn array_shape(value: &Value) -> ArrayShape {
+    let Some(key) = crate::host_array::array_key(value) else {
+        return ArrayShape::NotArray;
+    };
+    // A shared empty array's class is unknown, but empty either way: `[]`, hash `1`.
+    if crate::host_array::is_shared_empty(key) {
+        return ArrayShape::Objects;
+    }
+    match crate::host_array::class_of_key(key).as_bytes() {
+        [
+            b'[',
+            kind @ (b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D'),
+        ] => ArrayShape::Primitive(*kind),
+        _ => ArrayShape::Objects,
+    }
+}
+
+/// `Arrays.hashCode(<primitive>[])`: `1`, then `31 * h + Type.hashCode(e)`.
+fn primitive_array_hash(kind: u8, values: &[Value]) -> Option<i32> {
+    let mut hash = 1_i32;
+    for value in values {
+        let part = match (kind, value) {
+            (b'Z', Value::Int(flag)) => {
+                if *flag != 0 {
+                    1231
+                } else {
+                    1237
+                }
+            }
+            (b'B' | b'C' | b'S' | b'I', Value::Int(int)) => *int,
+            (b'J', Value::Long(long)) => long_hash(*long),
+            // `Float.floatToIntBits`: one NaN.
+            (b'F', Value::Float(float)) => {
+                if float.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    (*float as f32).to_bits() as i32
+                }
+            }
+            (b'D', Value::Float(double)) => double_hash(*double),
+            _ => return None,
+        };
+        hash = hash.wrapping_mul(31).wrapping_add(part);
+    }
+    Some(hash)
+}
+
+/// `Arrays.toString(<primitive>[])`; `None` for a `float[]`/`double[]`, whose elements'
+/// `Float.toString`/`Double.toString` this does not reproduce.
+fn primitive_array_text(kind: u8, values: &[Value]) -> Option<String> {
+    let parts = values
+        .iter()
+        .map(|value| {
+            Some(match (kind, value) {
+                (b'Z', Value::Int(flag)) => (*flag != 0).to_string(),
+                (b'B' | b'S' | b'I', Value::Int(int)) => int.to_string(),
+                (b'C', Value::Int(unit)) => char::from_u32(*unit as u32)?.to_string(),
+                (b'J', Value::Long(long)) => long.to_string(),
+                _ => return None,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("[{}]", parts.join(", ")))
+}
+
 /// `a == b` as a collection's shortcut reads it: two handles only where the
 /// same object is proved (`HostRef::same_object`), since equal keys may be two
 /// objects; any other value by equality (a `float` never, for `NaN`).
@@ -1165,6 +1342,8 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
     }
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        // One level of a nested `String.valueOf` (#250): a cycle ends in a `StackOverflowError`.
+        let _level = crate::host_recursion::enter()?;
         // A `Class`'s row asks here (`host_class.rs`): the runtime holds the
         // class file that says whether it is an interface.
         if let Some(name) = crate::host_class::handle_name(value) {

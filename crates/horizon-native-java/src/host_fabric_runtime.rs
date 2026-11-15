@@ -124,6 +124,17 @@ pub(crate) fn env_type_ordinal(value: &Value) -> Option<i32> {
 }
 
 /// `values()` of an enum whose constants are this module's handles.
+/// Fabric's canonical biome modification phase singleton.
+pub(crate) fn modification_phase(name: &str) -> Option<Value> {
+    const PHASES: &[&str] = &["ADDITIONS", "REMOVALS", "REPLACEMENTS", "POST_PROCESSING"];
+    PHASES.contains(&name).then(|| {
+        Value::Host(HostRef::of_values(
+            HostKind::FabricModificationPhase,
+            &[text(name)],
+        ))
+    })
+}
+
 pub(crate) fn enum_values(owner: &str) -> Option<Vec<Value>> {
     (owner == ENV_TYPE).then(|| ENV_TYPES.iter().filter_map(|name| env_type(name)).collect())
 }
@@ -135,6 +146,10 @@ pub(crate) struct ContainerParts {
     /// The entry as `fabric.mod.json` names it.
     pub(crate) class: String,
     pub(crate) provider: String,
+    /// Declaration ordinal within the loader's entrypoint storage. Duplicate
+    /// declarations are separate `NewEntry` instances in Fabric, so this is
+    /// part of the handle key even when all text fields match.
+    pub(crate) ordinal: usize,
     /// The type `getEntrypointContainers` was asked for (internal name).
     pub(crate) requested: Option<String>,
 }
@@ -149,6 +164,7 @@ pub(crate) fn entrypoint_container(parts: &ContainerParts) -> Value {
             text(&parts.class),
             text(&parts.provider),
             Value::Ref(parts.requested.clone()),
+            Value::Int(parts.ordinal as i32),
         ],
     ))
 }
@@ -163,11 +179,13 @@ pub(crate) fn entrypoint_container_parts(value: &Value) -> Option<ContainerParts
                     Value::Ref(Some(class)),
                     Value::Ref(Some(provider)),
                     Value::Ref(requested),
+                    Value::Int(ordinal),
                 ] => Some(ContainerParts {
                     kind: kind.clone(),
                     class: class.clone(),
                     provider: provider.clone(),
                     requested: requested.clone(),
+                    ordinal: (*ordinal).try_into().ok()?,
                 }),
                 _ => None,
             }
@@ -362,6 +380,7 @@ mod tests {
                 class: class.clone(),
                 provider: provider.clone(),
                 requested: (index % 2 == 0).then(|| provider.clone()),
+                ordinal: index,
             };
             let container = entrypoint_container(&parts);
             assert_eq!(entrypoint_container_parts(&container), Some(parts.clone()));

@@ -72,7 +72,7 @@ public class Probe {
     p("forged_style_instanceof", (fs instanceof Style) + "," + (fs instanceof String));
     p("forged_class", fm.getClass().getName());
     try { Object c = (KeyMapping.Category) fc; p("forged_cast", "ok"); } catch (ClassCastException x) { p("forged_cast", "CCE"); }
-    try { Object v = "client/vec3/1.0,2.0,3.0"; p("forged_vec3_cast", ((net.minecraft.world.phys.Vec3) v).toString()); } catch (ClassCastException x) { p("forged_vec3_cast", "CCE"); }
+    try { Object v = "client/Vec3"; p("forged_vec3_cast", ((net.minecraft.world.phys.Vec3) v).toString()); } catch (ClassCastException x) { p("forged_vec3_cast", "CCE"); }
     TextColor tg2 = TextColor.fromLegacyFormat(ChatFormatting.GOLD);
     var ig = new IdentityHashMap<Object, Integer>(); ig.put(tg, 1); ig.put(tg2, 2);
     var ib = new IdentityHashMap<Object, Integer>(); ib.put(bold, 1); ib.put(bold.withBold(true), 2);
@@ -89,6 +89,16 @@ public class Probe {
   /** A jar's own `new Category(id)` against the registered one (Java `cat_equals_new=true`). */
   public static String newCategory() {
     return String.valueOf(KeyMapping.Category.MISC.equals(new KeyMapping.Category(Identifier.withDefaultNamespace("misc"))));
+  }
+
+  public static String nullCategory() {
+    return String.valueOf(new KeyMapping("null", 0, null).getCategory());
+  }
+
+  public static String ownCategorySet() {
+    KeyMapping.Category a = new KeyMapping.Category(Identifier.withDefaultNamespace("same"));
+    KeyMapping.Category b = new KeyMapping.Category(Identifier.withDefaultNamespace("same"));
+    return String.valueOf(new HashSet<Object>(List.of(a, b)).size());
   }
 
   /** A mapping returns the exact Category object passed to its constructor. */

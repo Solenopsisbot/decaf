@@ -137,10 +137,28 @@ impl StdHost {
         else {
             return;
         };
-        if let Some(id) = document.get("id").and_then(serde_json::Value::as_str) {
-            self.fabric_metadata
-                .entry(id.to_owned())
-                .or_insert(document);
+        if let Some(id) = document
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        {
+            self.fabric_metadata.entry(id.clone()).or_insert(document);
+            // Linked and nested Fabric jars contribute their declared
+            // entrypoints to the same loader storage. Keep declaration order
+            // within a provider; the host sorts providers by mod id below.
+            for (kind, entries) in &jar.fabric_entrypoints {
+                for entry in entries {
+                    let row = FabricEntrypointContainer {
+                        kind: kind.clone(),
+                        class: entry.class.clone(),
+                        provider: id.clone(),
+                    };
+                    // EntrypointStorage.add appends a fresh Entry for every
+                    // declaration. Fabric does not deduplicate identical
+                    // kind/class/provider rows.
+                    self.fabric_entrypoint_containers.push(row);
+                }
+            }
         }
     }
 
@@ -248,7 +266,15 @@ impl StdHost {
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
             ("net/fabricmc/loader/api/FabricLoader", "getAllMods", "()Ljava/util/Collection;") => {
                 let containers = self.fabric_containers();
-                Some(Ok(collection_value("list", &containers)))
+                // Fabric calls Collections.unmodifiableList(mods) inside
+                // getAllMods, so each query makes a fresh wrapper over the
+                // same loader-owned list. The private backing list is not
+                // exposed to the jar; the view exists only to preserve the
+                // JDK wrapper class and identity contract.
+                let source = self.fresh_list(containers);
+                Some(Ok(self
+                    .unmodifiable_view("list", &source)
+                    .expect("fresh list is a host collection")))
             }
             (MOD_METADATA, ..) => {
                 let id = loader::metadata_id(receiver)?;

@@ -281,6 +281,29 @@ impl<H: Host> Runtime<'_, H> {
                 None => self.count_cast(value, target),
             };
         }
+        // A jar object (or jar enum constant) cast to a JDK type or an array
+        // (#242): its class chain decides, the held class files up to the
+        // class it leaves the jar at and Java 25's table above, as the JVM's
+        // `checkcast` does. A chain that leaves through a class the runtime
+        // does not hold, or a Mixin that could add the interface, is counted.
+        if (target.starts_with('[') || crate::runtime::jdk_closure::in_jdk_package(target))
+            && self.class(target).is_none()
+            && let Some(class) = self.cast_object_class(value)
+        {
+            let verdict = if target.starts_with('[') {
+                // A jar class is never an array class.
+                Verdict::No
+            } else {
+                let is_interface =
+                    host_ref::ClassHierarchy::is_interface(&host_ref::JdkHierarchy, target);
+                self.hierarchy_verdict(&class, target, is_interface)
+            };
+            return match verdict {
+                Verdict::Yes => Ok(()),
+                Verdict::No => Err(class_cast_exception(&class, target)),
+                Verdict::Unknown => self.count_cast(value, target),
+            };
+        }
         let Some(target_file) = self.class(target) else {
             // A plain `String` (`"hcoll:java/util/ArrayList#neutral0"`) cast
             // to a JDK type: `String` is final and its supertypes
@@ -514,9 +537,9 @@ impl<H: Host> Runtime<'_, H> {
     /// call.
     ///
     /// Named limit: a JDK target (`java/`, `javax/`, `jdk/`) keeps the
-    /// uncounted `false`, as before. The JDK models answer for the JDK
-    /// objects they build, and an opaque marker against a JDK interface
-    /// is left for a later change.
+    /// uncounted `false` for anything but a jar object (whose chain decides,
+    /// #242). The JDK models answer for the JDK objects they build, and an
+    /// opaque marker against a JDK interface is left for a later change.
     pub(super) fn instance_of_is_guess(&self, value: &Value, target: &str) -> bool {
         let marker = match value {
             Value::Ref(Some(marker)) => marker.as_str(),
@@ -535,6 +558,20 @@ impl<H: Host> Runtime<'_, H> {
         // Java 25's table cannot tell (a class outside it).
         if let Some(verdict) = self.jdk_object_instance_of(value, target) {
             return verdict.is_none();
+        }
+        // A jar object against a JDK type: a guess exactly where its cast is
+        // counted (#242), the chain leaving through a class or interface no
+        // table describes.
+        if crate::runtime::jdk_closure::in_jdk_package(target)
+            && self.class(target).is_none()
+            && let Some(class) = self.cast_object_class(value)
+        {
+            let is_interface =
+                host_ref::ClassHierarchy::is_interface(&host_ref::JdkHierarchy, target);
+            return matches!(
+                self.hierarchy_verdict(&class, target, is_interface),
+                Verdict::Unknown
+            );
         }
         if ["java/", "javax/", "jdk/"]
             .iter()
@@ -564,6 +601,23 @@ impl<H: Host> Runtime<'_, H> {
         // known not to be a game or loader type; one whose chain reaches a
         // game class is not.
         !matches!(self.cast_verdict(value, target, None).0, Verdict::No)
+    }
+
+    /// The held class of a jar object (an object handle) or of a jar enum
+    /// constant (`enum/<class>/<NAME>`); `None` for any other value, a
+    /// `String` spelling a class name included.
+    fn cast_object_class(&self, value: &Value) -> Option<String> {
+        let class = match value {
+            Value::Host(handle) if crate::runtime::jar_object::is_object_handle(handle) => {
+                crate::runtime::jar_object::object_class(value)?
+            }
+            Value::Ref(Some(marker)) => marker
+                .strip_prefix("enum/")
+                .and_then(|rest| rest.rsplit_once('/'))
+                .map(|(class, _)| class)?,
+            _ => return None,
+        };
+        self.class(class).is_some().then(|| class.to_owned())
     }
 
     /// The class of a jar (or linked) object or enum constant marker, as
@@ -703,10 +757,11 @@ impl<H: Host> Runtime<'_, H> {
     /// Walk `class`'s superclasses and interfaces for `target`.
     ///
     /// Leaving the classes the runtime holds is definitive for a JDK class
-    /// (it never extends or implements a jar type) and for a class target (a
-    /// game or library class cannot extend a jar class); for an interface
-    /// target a Mixin may add the interface to the game superclass, so the
-    /// answer is unknown.
+    /// (it never extends or implements a jar type) and for a jar class target
+    /// (a game or library class cannot extend a jar class). It is unknown for
+    /// a JDK class target that is not final (the unheld class may extend it)
+    /// and for an interface target (a Mixin may add the interface to the game
+    /// superclass).
     fn hierarchy_verdict(
         &self,
         class: &str,
@@ -739,7 +794,19 @@ impl<H: Host> Runtime<'_, H> {
                         None => Verdict::Unknown,
                     };
                 }
+                // Every class is an `Object`, held or not.
+                if target == "java/lang/Object" {
+                    return Verdict::Yes;
+                }
                 if target_is_interface == Some(false) {
+                    // A JDK class target may be any superclass of the unheld
+                    // class (a `missing.Base extends Number`): only a final
+                    // one in Java 25's table is proved out (#267 review).
+                    if crate::runtime::jdk_closure::in_jdk_package(target)
+                        && !crate::runtime::jdk_closure::class(target).is_some_and(|class| class.is_final)
+                    {
+                        return Verdict::Unknown;
+                    }
                     return Verdict::No;
                 }
                 return Verdict::Unknown;
@@ -795,6 +862,16 @@ impl<H: Host> Runtime<'_, H> {
             }
             match self.class(&current) {
                 Some(file) => queue.extend(file.interface_names()),
+                // A JDK interface never extends a type outside the JDK, and
+                // Java 25's table decides a JDK target (#242).
+                None if current.starts_with("java/")
+                    && (!crate::runtime::jdk_closure::in_jdk_package(target)
+                        || host_ref::ClassHierarchy::is_instance(
+                            &host_ref::JdkHierarchy,
+                            &current,
+                            target,
+                        )
+                        .is_some()) => {}
                 None if !held_target => return true,
                 None if !PLATFORM.iter().any(|prefix| current.starts_with(prefix)) => {
                     return true;

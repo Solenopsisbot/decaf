@@ -42,7 +42,11 @@ const SCHEDULED_EXECUTOR_TYPES: &[&str] = &[
     "java/util/concurrent/Executor",
     "java/lang/AutoCloseable",
 ];
-const FUTURE_TYPES: &[&str] = &["java/util/concurrent/Future"];
+const FUTURE_TYPES: &[&str] = &[
+    "java/util/concurrent/Future",
+    "java/util/concurrent/CompletionStage",
+    "java/util/concurrent/CompletableFuture",
+];
 const SCHEDULED_FUTURE_TYPES: &[&str] = &[
     "java/util/concurrent/ScheduledFuture",
     "java/util/concurrent/Future",

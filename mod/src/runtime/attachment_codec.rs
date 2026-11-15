@@ -227,6 +227,11 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn encode_node(&mut self, marker: &str, value: &Value) -> Coded<Nbt> {
+        // One level per nested codec (`flatXmap` over `flatXmap`, as deep as a jar builds it,
+        // #250): past the thread's stack, outside the model (counted), never a native overflow.
+        let Ok(_level) = crate::runtime::host_recursion::enter() else {
+            return Coded::Unmodelled("codec nested deeper than the thread's stack holds".into());
+        };
         match self.codec_node(marker) {
             // Only a tag object: a `String` spelling one's key is no tag.
             Some(CodecNode::CompoundTag) => match crate::runtime::jar_object::object_key(value) {
@@ -256,6 +261,11 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn decode_node(&mut self, marker: &str, tag: &Nbt) -> Coded<Value> {
+        // One level per nested codec (`flatXmap` over `flatXmap`, as deep as a jar builds it,
+        // #250): past the thread's stack, outside the model (counted), never a native overflow.
+        let Ok(_level) = crate::runtime::host_recursion::enter() else {
+            return Coded::Unmodelled("codec nested deeper than the thread's stack holds".into());
+        };
         match self.codec_node(marker) {
             Some(CodecNode::CompoundTag) => match tag {
                 Nbt::Compound(_) => Coded::Ok(self.nbt_alloc(tag)),

@@ -326,3 +326,19 @@ fn get_mod_container_finds_every_listed_container() {
         "{ids:?}"
     );
 }
+
+#[test]
+fn all_mods_is_the_loader_owned_unmodifiable_wrapper() {
+    let run = build("all-mods-collection");
+    let mut host = host(&run, Some("26.3"));
+    assert_eq!(
+        text(&run, &mut host, "allModsCollection"),
+        "java.util.Collections$UnmodifiableRandomAccessList,same=false,unmodifiable"
+    );
+    assert_eq!(
+        host.unknown_host_call_count(),
+        0,
+        "{:?}",
+        host.unknown_host_calls()
+    );
+}

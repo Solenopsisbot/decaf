@@ -244,6 +244,14 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(text) = self.library_to_string(value, class, method)? {
             return Ok(Some(Value::Ref(Some(text))));
         }
+        // A collection the host made prints through its model (`AbstractCollection.toString`),
+        // and a cycle in it ends in a `StackOverflowError`, as Java's does (#250); before, this
+        // fell through to `Object.toString`, which the host counts.
+        if self.host_collection_kind(value).is_some()
+            && let Some(text) = self.host.modelled_to_string_checked(value)?
+        {
+            return Ok(Some(Value::Ref(Some(text))));
+        }
         self.host
             .invoke_instance(&object_to_string(), value, &[])
             .map(Some)
@@ -274,7 +282,7 @@ impl<H: Host> Runtime<'_, H> {
                 Some(_) => return Ok("null".into()),
                 None => {}
             }
-            if let Some(text) = self.host.modelled_to_string(value) {
+            if let Some(text) = self.host.modelled_to_string_checked(value)? {
                 return Ok(text);
             }
             // No model prints it: a `String` is its own text, anything else

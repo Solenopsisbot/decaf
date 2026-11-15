@@ -105,6 +105,8 @@ fn client_kind(rest: &str) -> HostKind {
         name if key.is_empty() && CLIENT_SINGLETONS.contains(&name) => HostKind::GameSingleton,
         "item" | "block" | "mob-effect" | "effect-holder" => HostKind::GameRegistryObject,
         "style" | "text-color" | "vec3" | "awt-color" => HostKind::GameValue,
+        "input-key" => HostKind::GameValue,
+        "stack" if key == "empty" => HostKind::GameValue,
         // `stack`, `effect`, and the per-frame `gui-graphics`, `pose`,
         // `delta-tracker`, `tooltip-context`.
         _ => HostKind::GameTransient,
@@ -195,7 +197,10 @@ pub(crate) fn server_value(marker: String) -> Value {
 pub(crate) fn handle_only_class(class: &str) -> bool {
     matches!(
         class,
-        "net/minecraft/network/chat/Style"
+        "com/mojang/blaze3d/platform/InputConstants$Key"
+            | "net/minecraft/client/KeyMapping"
+            | "net/minecraft/world/item/ItemStack"
+            | "net/minecraft/network/chat/Style"
             | "net/minecraft/network/chat/TextColor"
             | "net/minecraft/client/KeyMapping$Category"
             | "net/minecraft/world/phys/Vec3"
@@ -400,6 +405,7 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         (_, "key-category") => &["net/minecraft/client/KeyMapping$Category"],
         (true, "vec3") => &["net/minecraft/world/phys/Vec3"],
         (true, "awt-color") => &["java/awt/Color"],
+        (true, "input-key") => &["com/mojang/blaze3d/platform/InputConstants$Key"],
         (true, "options") => &["net/minecraft/client/Options"],
         (true, "font") => &["net/minecraft/client/gui/Font"],
         (true, "gui") => &["net/minecraft/client/gui/Gui"],
@@ -407,6 +413,56 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         // is sure until then.
         _ => &[],
     }
+}
+
+fn input_key_fields(key: &str) -> Option<(&str, i32)> {
+    let rest = key.strip_prefix("client/input-key/")?;
+    let (kind, value) = rest.split_once('/')?;
+    Some((kind, value.parse().ok()?))
+}
+
+fn input_key_name(key: &str) -> Option<String> {
+    let (kind, value) = input_key_fields(key)?;
+    if kind == "KEYBOARD" && value == 0 {
+        return Some("key.keyboard.unknown".into());
+    }
+    if kind == "MOUSE" {
+        return Some(match value {
+            1 => "key.mouse.left".into(),
+            2 => "key.mouse.middle".into(),
+            3 => "key.mouse.right".into(),
+            n => format!("key.mouse.{n}"),
+        });
+    }
+    Some(match value {
+        4 => "key.keyboard.a".into(),
+        5 => "key.keyboard.b".into(),
+        6 => "key.keyboard.c".into(),
+        7 => "key.keyboard.d".into(),
+        8 => "key.keyboard.e".into(),
+        9 => "key.keyboard.f".into(),
+        10 => "key.keyboard.g".into(),
+        11 => "key.keyboard.h".into(),
+        12 => "key.keyboard.i".into(),
+        13 => "key.keyboard.j".into(),
+        14 => "key.keyboard.k".into(),
+        15 => "key.keyboard.l".into(),
+        16 => "key.keyboard.m".into(),
+        17 => "key.keyboard.n".into(),
+        18 => "key.keyboard.o".into(),
+        19 => "key.keyboard.p".into(),
+        20 => "key.keyboard.q".into(),
+        21 => "key.keyboard.r".into(),
+        22 => "key.keyboard.s".into(),
+        23 => "key.keyboard.t".into(),
+        24 => "key.keyboard.u".into(),
+        25 => "key.keyboard.v".into(),
+        26 => "key.keyboard.w".into(),
+        27 => "key.keyboard.x".into(),
+        28 => "key.keyboard.y".into(),
+        29 => "key.keyboard.z".into(),
+        n => format!("key.keyboard.{n}"),
+    })
 }
 
 /// `equals` of an object with one identity per key: the same object exactly
@@ -461,6 +517,9 @@ pub(crate) const ENTITY_METHODS: Methods = Methods {
 pub(crate) const VALUE_METHODS: Methods = Methods {
     to_string: |handle, _| {
         let key = handle.key();
+        if let Some(name) = input_key_name(key) {
+            return Ok(Some(name));
+        }
         Ok(crate::client_values::to_string(key).or_else(|| crate::server_values::to_string(key)))
     },
     hash_code: |handle, _| {
@@ -511,7 +570,10 @@ pub(crate) const VALUE_METHODS: Methods = Methods {
 /// constants and `LevelResource`'s are (`client_values::canonical`,
 /// `server_values::canonical`); any other value is per producer.
 pub(crate) fn value_canonical(key: &str) -> bool {
-    crate::client_values::canonical(key) || crate::server_values::canonical(key)
+    crate::client_values::canonical(key)
+        || crate::server_values::canonical(key)
+        || key.starts_with("client/input-key/")
+        || key == "client/stack/empty"
 }
 
 /// A registry entry (`Item`, `Block`, `BlockState`, `GameRule`...): identity

@@ -88,10 +88,11 @@ use mod_api::{
     LevelTickPostEvent, LevelTickPreEvent, LevelUnloadEvent, LivingDamagePostEvent,
     LivingDeathEvent, LivingDeathPostEvent, LivingIncomingDamageEvent, PlayerChangedDimensionEvent,
     PlayerCloneEvent, PlayerDestroyedBlockEvent, PlayerDiedEvent, PlayerLoggedInEvent,
-    PlayerLoggedOutEvent, PlayerRef, PlayerRespawnedEvent, RegisterCommandsEvent,
-    RegistrationContext, RightClickBlockEvent, RightClickItemEvent, RunModCommandEvent,
-    ServerAboutToStartEvent, ServerHost, ServerStartedEvent, ServerStartingEvent,
-    ServerStoppedEvent, ServerStoppingEvent, ServerTickEvent, ServerTickPhase, Text,
+    PlayerLoggedOutEvent, PlayerRef, PlayerRespawnedEvent, PlayerTickPostEvent, PlayerTickPreEvent,
+    RegisterCommandsEvent, RegistrationContext, RightClickBlockEvent, RightClickItemEvent,
+    RunModCommandEvent, ServerAboutToStartEvent, ServerHost, ServerStartedEvent,
+    ServerStartingEvent, ServerStoppedEvent, ServerStoppingEvent, ServerTickEvent, ServerTickPhase,
+    Text,
 };
 use runtime::brigadier::{
     self, ArgumentKind, CommandInvocation as RuntimeInvocation, CommandMessage, CommandOutcome,
@@ -794,6 +795,57 @@ impl Hooks for HorizonJava {
                 vec![has_time_supplier()],
             ))
         });
+    }
+
+    /// NeoForge's `PlayerTickEvent.Pre`: the exact head of `Player.tick` on the server. The
+    /// pinned hook is listen-only, so a Mixin callback that asks to cancel was refused at load.
+    /// The pinned game may still emit this for the narrow spectator/unloaded-chunk case fixed by
+    /// ari #4520; until a pin bump, those firings remain callbacks with a documented departure.
+    fn player_tick_pre(&self, host: HostSide<'_>, event: &mut PlayerTickPreEvent) {
+        let HostSide::Server(host) = host else {
+            return;
+        };
+        let spectator = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            event.player.is_spectator(host)
+        }))
+        .ok()
+        .flatten()
+        .unwrap_or(true);
+        let player = event.player;
+        self.game_hooks(Some(host), "java_base_player_tick_head", |state| {
+            Some((
+                Some(game_hooks::player(state, player.uuid(), 0)?),
+                Vec::new(),
+            ))
+        });
+        if spectator {
+            game_hooks::note_spectator(&mut self.lock(), "java_base_player_tick_head");
+        }
+    }
+
+    /// NeoForge's `PlayerTickEvent.Post`: the pinned fork's player-tick post location on the
+    /// server, with the same player identity as `player_tick_pre`. The fork currently fires this
+    /// after the remainder of `ServerPlayer.doTick`; the bridge runs and counts that departure.
+    fn player_tick_post(&self, host: HostSide<'_>, event: &mut PlayerTickPostEvent) {
+        let HostSide::Server(host) = host else {
+            return;
+        };
+        let spectator = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            event.player.is_spectator(host)
+        }))
+        .ok()
+        .flatten()
+        .unwrap_or(true);
+        let player = event.player;
+        self.game_hooks(Some(host), "java_base_player_tick_tail", |state| {
+            Some((
+                Some(game_hooks::player(state, player.uuid(), 0)?),
+                Vec::new(),
+            ))
+        });
+        if spectator {
+            game_hooks::note_spectator(&mut self.lock(), "java_base_player_tick_tail");
+        }
     }
 
     /// A server level's tick starts (Fabric's `START_LEVEL_TICK`, NeoForge's

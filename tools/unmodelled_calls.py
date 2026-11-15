@@ -389,6 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="path to the real Fabric Loader 0.19.5 jar")
     parser.add_argument("--dependency-mode", choices=("both", "alone", "closure"),
                         default="both", help="run alone, closure, or both (default: both)")
+    parser.add_argument("--allow-missing-fabric-oracle", action="store_true",
+                        help="run closure mode even without the Fabric Loader oracle; every Fabric "
+                             "closure row is then refused (only for tests and partial machines)")
     return parser
 
 
@@ -433,6 +436,15 @@ def main(argv: list[str] | None = None) -> int:
                 fabric_oracle.evaluate(pairs)
             except FabricOracleUnavailable as error:
                 fabric_oracle_error = str(error)
+        # Without the oracle every Fabric closure row refuses, which reads like a census result
+        # but only says the loader jar was not found (arcweld ran like that for a day). Stop
+        # loudly instead, unless the caller asked for it.
+        if (fabric_oracle_error and args.dependency_mode != "alone"
+                and not args.allow_missing_fabric_oracle):
+            print(f"error: closure mode needs the Fabric Loader oracle: {fabric_oracle_error}; "
+                  f"pass --fabric-loader PATH (or --dependency-mode alone, or "
+                  f"--allow-missing-fabric-oracle)", file=sys.stderr)
+            return 2
 
     report: dict[str, dict] = {}
     for name, directory in corpora:
