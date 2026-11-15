@@ -24111,14 +24111,10 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }
-        let constants = game_enum_constants(&r.owner)?;
+        let values = crate::runtime::enum_value_of::known_enum_values(&r.owner)?;
         if r.descriptor != format!("()[L{};", r.owner) {
             return None;
         }
-        let values = constants
-            .iter()
-            .map(|name| Value::Ref(Some(format!("enum/{}/{name}", r.owner))))
-            .collect::<Vec<_>>();
         Some(self.new_array_value(&format!("[L{};", r.owner), values))
     }
 
