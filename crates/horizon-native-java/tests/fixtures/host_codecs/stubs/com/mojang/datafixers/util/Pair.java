@@ -11,4 +11,6 @@ public class Pair<F, S> implements com.mojang.datafixers.kinds.App<Object, F> {
     public S getSecond() { return null; }
 
     public Pair<S, F> swap() { return null; }
+    public <F2> Pair<F2, S> mapFirst(java.util.function.Function<? super F, ? extends F2> f) { return null; }
+    public <S2> Pair<F, S2> mapSecond(java.util.function.Function<? super S, ? extends S2> f) { return null; }
 }

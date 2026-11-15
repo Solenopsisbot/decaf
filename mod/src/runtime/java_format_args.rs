@@ -13,8 +13,8 @@ use crate::runtime::java_format::{self, Arg};
 impl<H: Host> Runtime<'_, H> {
     /// `String.format(locale, format, args)`'s text, or `None` when the
     /// formatter cannot answer it exactly. `locale` is `None` for the
-    /// overloads without one (the default locale, which the bounded host
-    /// treats as `en_US`).
+    /// overloads without one (the player's default FORMAT locale, which the
+    /// bounded host cannot provide).
     pub(crate) fn java_format(
         &mut self,
         locale: Option<&Value>,
@@ -26,6 +26,10 @@ impl<H: Host> Runtime<'_, H> {
         {
             return None;
         }
+        // The player's default FORMAT locale is outside the bounded host.
+        // Keep only conversions whose output cannot observe it; grouping,
+        // floating-point decimal symbols, and `%s` of a localized host value
+        // are counted instead of silently using US symbols.
         // The parameter is a `String`, so any reference is its text; a null
         // format throws.
         let Value::Ref(Some(format)) = format else {
@@ -37,6 +41,9 @@ impl<H: Host> Runtime<'_, H> {
             Value::Ref(None) => None,
             array => Some(self.array(array).ok()?.clone()),
         };
+        if locale.is_none() && default_locale_sensitive(format, args.as_deref()) {
+            return None;
+        }
         let args = args.map(|values| {
             values
                 .iter()
@@ -49,6 +56,22 @@ impl<H: Host> Runtime<'_, H> {
     /// One element of the `Object[]`, classed as `Object.getClass` would
     /// class it (`class_of_value`).
     fn format_arg(&mut self, value: &Value) -> Arg {
+        // Java dispatches %s on Formattable through the jar object's
+        // formatTo(Formatter, flags, width, precision), not toString(). The
+        // bounded runtime does not yet execute that callback, so refuse the
+        // whole format rather than silently printing the wrong text. A jar
+        // object whose class chain can't be settled (`None`, a superclass or
+        // interface the runtime doesn't hold) might be Formattable too. No
+        // 26.3 game class implements it, and the JDK table settles JDK classes.
+        if let Value::Host(handle) = value
+            && let Some(class) = handle.class()
+            && match self.class_known_instance_of(class, "java/util/Formattable") {
+                Some(known) => known,
+                None => handle.kind() == crate::runtime::host_ref::HostKind::JarObject,
+            }
+        {
+            return Arg::Opaque;
+        }
         let marker = match value {
             Value::Ref(None) => return Arg::Null,
             Value::Int(value) => return Arg::Int(*value),
@@ -88,6 +111,48 @@ impl<H: Host> Runtime<'_, H> {
             None => Arg::Opaque,
         }
     }
+}
+
+/// Whether a no-locale format can observe the player's default FORMAT locale.
+fn default_locale_sensitive(format: &str, args: Option<&[Value]>) -> bool {
+    let localized = args.is_some_and(|values| {
+        values.iter().any(|value| {
+            matches!(value, Value::Host(_))
+                && crate::runtime::host_jdk_constant::locale_parts(value).is_some()
+        })
+    });
+    let bytes = format.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'%' {
+            at += 1;
+            continue;
+        }
+        at += 1;
+        if at >= bytes.len() {
+            break;
+        }
+        if bytes[at] == b'%' || bytes[at] == b'n' {
+            at += 1;
+            continue;
+        }
+        let mut grouped = false;
+        while at < bytes.len() && !bytes[at].is_ascii_alphabetic() {
+            grouped |= bytes[at] == b',';
+            at += 1;
+        }
+        let Some(&conversion) = bytes.get(at) else {
+            break;
+        };
+        if grouped
+            || matches!(conversion, b'e' | b'E' | b'f' | b'F' | b'g' | b'G')
+            || (localized && matches!(conversion, b's' | b'S'))
+        {
+            return true;
+        }
+        at += 1;
+    }
+    false
 }
 
 /// A boxed primitive's marker as its argument.

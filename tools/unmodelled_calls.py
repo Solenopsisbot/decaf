@@ -42,6 +42,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -150,6 +151,20 @@ def fabric_pairs(index: dict[str, list]) -> set[tuple[str, str]]:
                 for candidate in index.get(dependency.lower(), []):
                     pairs.add((predicate, candidate.declaration.version))
     return pairs
+
+
+def provider_dir_jars(directory: Path, corpus_name: str) -> list[hybrid_pack.PackJar]:
+    """Read explicit providers, keeping each loader's metadata family separate."""
+    marker = "META-INF/neoforge.mods.toml" if corpus_name == "neoforge" else "fabric.mod.json"
+    jars = []
+    for jar in ledger.corpus_jars([directory]):
+        try:
+            with zipfile.ZipFile(jar.path) as archive:
+                if marker in archive.namelist():
+                    jars.append(jar)
+        except (OSError, zipfile.BadZipFile):
+            continue
+    return jars
 
 
 def parse_corpus(value: str) -> tuple[str, Path]:
@@ -319,7 +334,7 @@ def result_row(jar: Path, kind: str, result: dict, deps: list[Path],
             row["failed"] = [str(item)[:400] for item in result["failed"]]
         if jar_role:
             row["role"] = jar_role
-        for field in ("client_keys", "hud_layers", "listeners", "unfired", "refused", "frame"):
+        for field in ("client_keys", "hud_layers", "listeners", "unfired", "refused", "frame", "commands"):
             if field in result:
                 row[field] = result[field]
         return row
@@ -389,6 +404,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="path to the real Fabric Loader 0.19.5 jar")
     parser.add_argument("--dependency-mode", choices=("both", "alone", "closure"),
                         default="both", help="run alone, closure, or both (default: both)")
+    parser.add_argument("--provider-dir", type=Path, action="append", default=[],
+                        help="providers-only directory for closure dependencies; rows are never scanned")
     parser.add_argument("--allow-missing-fabric-oracle", action="store_true",
                         help="run closure mode even without the Fabric Loader oracle; every Fabric "
                              "closure row is then refused (only for tests and partial machines)")
@@ -403,11 +420,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"missing probe binary {probe}", file=sys.stderr)
         return 1
 
-    # Providers live in the corpora under test and in the pools the mega corpus
-    # was fetched with, exactly as `java_mod_server_ledger.DEFAULT_DEP_DIRS`.
+    # Providers live in the corpora under test, the pools the mega corpus was
+    # fetched with, and explicit providers-only directories. Explicit provider
+    # directories are indexed but never scanned as census rows.
     # A NeoForge jar resolves inside the NeoForge corpus only: the Fabric corpora
     # carry Fabric builds of the same libraries (TerraBlender, GlitchCore), and
     # linking those beside a NeoForge mod measures the wrong class path.
+    provider_dirs_arg = [path.resolve() for path in args.provider_dir]
     indexes: dict[str, dict] = {}
     for name, directory in corpora:
         if name in indexes:
@@ -418,7 +437,14 @@ def main(argv: list[str] | None = None) -> int:
             provider_dirs = [path for other, path in corpora if other != "neoforge"]
             provider_dirs += [path for path in ledger.DEFAULT_DEP_DIRS
                               if str(path) not in {str(d) for d in provider_dirs}]
-        indexes[name] = ledger.provider_index(ledger.corpus_jars(provider_dirs))
+        index_jars = ledger.corpus_jars(provider_dirs)
+        seen = {jar.path.resolve() for jar in index_jars}
+        for provider_dir in provider_dirs_arg:
+            for jar in provider_dir_jars(provider_dir, name):
+                if jar.path.resolve() not in seen:
+                    index_jars.append(jar)
+                    seen.add(jar.path.resolve())
+        indexes[name] = ledger.provider_index(index_jars)
 
     fabric_oracle: FabricPredicateOracle | None = None
     fabric_oracle_error = ""

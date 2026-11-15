@@ -15,9 +15,17 @@ use zip::write::SimpleFileOptions;
 const SOURCE: &str = r#"
 package demo;
 
+import java.util.Formattable;
+import java.util.Formatter;
 import java.util.Locale;
 
 public final class FormatEntrypoint {
+  private static final class F implements Formattable {
+    @Override public void formatTo(Formatter formatter, int flags, int width, int precision) {
+      formatter.format("<F:%d:%d:%d>", flags, width, precision);
+    }
+  }
+
   public static String boxes() {
     return String.format("%b %b %B|%x %c %s", Boolean.FALSE, Boolean.TRUE, null, (short) -2, 'x', 7L);
   }
@@ -30,6 +38,10 @@ public final class FormatEntrypoint {
     System.out.printf("%s=%,d%n", "ticks", 1234567);
     System.out.printf(Locale.US, "[%-7.2f]%n", -0.0);
     return "done";
+  }
+
+  public static String formattable() {
+    return String.format("%s|%b|%s", new F(), true, null);
   }
 
   public static String unmodelled() {
@@ -61,10 +73,12 @@ fn jar(tag: &str) -> NativeJar {
     assert!(status.success(), "javac failed");
     let jar_path = root.join("format.jar");
     let mut zip = zip::ZipWriter::new(fs::File::create(&jar_path).unwrap());
-    zip.start_file("demo/FormatEntrypoint.class", SimpleFileOptions::default())
-        .unwrap();
-    zip.write_all(&fs::read(root.join("classes/demo/FormatEntrypoint.class")).unwrap())
-        .unwrap();
+    for class in ["FormatEntrypoint.class", "FormatEntrypoint$F.class"] {
+        zip.start_file(format!("demo/{class}"), SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&fs::read(root.join("classes/demo").join(class)).unwrap())
+            .unwrap();
+    }
     zip.finish().unwrap();
     NativeJar::from_path(&jar_path).unwrap()
 }
@@ -109,8 +123,22 @@ fn printf_writes_the_text_and_returns_its_stream() {
     // javac pops the `PrintStream` `printf` returns; the method only reaches
     // its `return` if the call pushed one.
     assert_eq!(call(&jar, &mut host, "printed"), text("done"));
-    assert_eq!(host.take_stdout(), "ticks=1,234,567\n[-0.00  ]\n");
-    assert_eq!(host.unknown_host_call_count(), 0);
+    // The first printf uses the player's default FORMAT locale for %,d. The
+    // bounded host cannot provide that locale, so it is counted and writes no text;
+    // the explicit Locale.US call remains exact.
+    assert_eq!(host.take_stdout(), "[-0.00  ]\n");
+    assert_eq!(host.unknown_host_call_count(), 1);
+}
+
+#[test]
+fn formattable_percent_s_is_counted_until_format_to_is_modelled() {
+    let jar = jar("formattable");
+    let mut host = StdHost::new();
+    // Java 25 calls F.formatTo and produces <F:0:-1:-1>|true|null. The
+    // bounded interpreter does not execute that callback yet, so it counts
+    // the String.format call instead of falling back to Object.toString().
+    assert_eq!(call(&jar, &mut host, "formattable"), Value::Ref(None));
+    assert_eq!(host.unknown_host_call_count(), 1);
 }
 
 #[test]

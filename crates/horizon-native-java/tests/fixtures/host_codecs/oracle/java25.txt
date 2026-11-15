@@ -1,0 +1,12 @@
+spelled=falsefalsedfu-pair/i:1,a14,falsefalsenf-codec/010,falsefalsenf-codec/compound-tag21,falsefalsecom/mojang/serialization/Codec#codec36,falsefalsecodec/opaque12,0-1
+spelledTypes=truefalsefalse,truefalsefalse,truefalsefalse,truefalsefalse,truefalsefalse,
+pairs=1aa1|falsetruefalsetruefalsefalse2|(1, a)|(null, null)|1089,961|truetruefalsecom.mojang.datafixers.util.Pairjava.lang.Object|true71
+pairMaps=(2, b)|(3, B)|3B|true
+eithers=Left[a]|Right[2]|A|2|a|2|false|false|a3|Right[a]
+nested=((2, b), [3, 4])|36770|true
+identityHeld=<identity hash counted>
+opaqueCodec=truetrue
+codecConstants=<codec singleton calls counted>
+codecDuplicate=duplicate element: String
+codecText=String|Int|Bool
+pairVsJdk=falsefalsefalsefalsefalse

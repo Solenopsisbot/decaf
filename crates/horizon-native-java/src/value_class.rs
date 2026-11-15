@@ -54,6 +54,9 @@ const RETIRED_PREFIXES: &[&str] = &[
     "game-rule/",
     // Every `game/…` object is a handle (#156 P16b, P16e).
     "game/",
+    // StackWalker.Option moved to a typed host handle; old marker-shaped
+    // text remains an ordinary String.
+    "enum/java/lang/StackWalker$Option/",
 ];
 
 /// Whether a reference `marker` is a plain `java.lang.String` and `wanted`

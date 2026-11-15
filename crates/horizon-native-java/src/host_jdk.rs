@@ -138,13 +138,22 @@ pub(crate) fn logger_canonical(key: &str) -> bool {
 
 pub(crate) const LOGGER: Methods = methods(unknown_text);
 
-/// `StackWalker.getInstance(...)`: `options` is false for the no-argument
-/// overload, which answers the JDK's one `DEFAULT_WALKER`.
-pub(crate) fn stack_walker(options: bool) -> Value {
+/// `StackWalker.getInstance(...)`: the key records whether the walker has
+/// `RETAIN_CLASS_REFERENCE` access.
+pub(crate) fn stack_walker(retain_class_reference: bool) -> Value {
     Value::Host(HostRef::new(
         HostKind::StackWalker,
-        if options { "options" } else { "" },
+        if retain_class_reference { "retain" } else { "" },
     ))
+}
+
+pub(crate) fn stack_walker_retain(value: &Value) -> Option<bool> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::StackWalker => {
+            Some(handle.key() == "retain")
+        }
+        _ => None,
+    }
 }
 
 pub(crate) const STACK_WALKER: Methods = methods(unknown_text);
@@ -152,20 +161,50 @@ pub(crate) const STACK_WALKER: Methods = methods(unknown_text);
 /// One stack frame (`StackFrame`) or element (`StackTraceElement`) of the
 /// jar's own frames.
 pub(crate) fn frame_value(kind: HostKind, class: &str, method: &str) -> Value {
+    frame_value_with_retain(kind, class, method, true)
+}
+
+pub(crate) fn frame_value_with_retain(
+    kind: HostKind,
+    class: &str,
+    method: &str,
+    retain_class_reference: bool,
+) -> Value {
     Value::Host(HostRef::of_values(
         kind,
         &[
             Value::Ref(Some(class.into())),
             Value::Ref(Some(method.into())),
+            Value::Int(i32::from(retain_class_reference)),
         ],
     ))
 }
 
 /// `(class, method)` of a frame handle of `kind`.
 pub(crate) fn frame_parts(value: &Value, kind: HostKind) -> Option<(String, String)> {
-    match value {
-        Value::Host(handle) if handle.kind() == kind => two_strings(handle),
-        _ => None,
+    let Value::Host(handle) = value else {
+        return None;
+    };
+    (handle.kind() == kind).then(|| {
+        let values = handle.values()?;
+        let [Value::Ref(Some(class)), Value::Ref(Some(method)), ..] = values.as_slice() else {
+            return None;
+        };
+        Some((class.clone(), method.clone()))
+    })?
+}
+
+pub(crate) fn frame_retain_class_reference(value: &Value, kind: HostKind) -> Option<bool> {
+    let Value::Host(handle) = value else {
+        return None;
+    };
+    if handle.kind() != kind {
+        return None;
+    }
+    let values = handle.values()?;
+    match values.as_slice() {
+        [_, _, Value::Int(flag), ..] => Some(*flag != 0),
+        _ => Some(true),
     }
 }
 

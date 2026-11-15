@@ -599,6 +599,7 @@ fn execution_json(
         "host_calls": calls,
         "unknown_host_call_count": host.unknown_host_call_count(),
         "unknown_host_calls": host.unknown_host_calls(),
+        "client_registrations": host.client_registration_summary(),
         "parked_threads": parked_threads_json(host),
         "payload_directions": host
             .payload_registrations()
@@ -935,15 +936,27 @@ fn command_summary(
         .game_listeners(jar, server)
         .listeners
         .into_iter()
-        .filter(|l| l.event == GameEvent::RegisterCommands)
+        .filter(|l| {
+            l.event
+                == if server {
+                    GameEvent::RegisterCommands
+                } else {
+                    GameEvent::ClientRegisterCommands
+                }
+        })
         .collect();
     if listeners.is_empty() {
         return serde_json::Value::Null;
     }
     let mut refused = None;
+    let event = if server {
+        GameEvent::RegisterCommands
+    } else {
+        GameEvent::ClientRegisterCommands
+    };
     for listener in &listeners {
         let mut firing = EventFiring::new(
-            GameEvent::RegisterCommands,
+            event,
             std::sync::Arc::new(EventFacade {
                 dedicated: true,
                 ..EventFacade::default()
@@ -1094,7 +1107,9 @@ fn frame_census(
             l.event.name().starts_with("client_")
                 && !matches!(
                     l.event,
-                    GameEvent::ClientRegisterKeyMappings | GameEvent::ClientRegisterGuiLayers
+                    GameEvent::ClientRegisterKeyMappings
+                        | GameEvent::ClientRegisterGuiLayers
+                        | GameEvent::ClientRegisterCommands
                 )
         })
         .collect();

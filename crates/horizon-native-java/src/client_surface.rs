@@ -61,6 +61,8 @@ pub use items::{ClientEffect, ClientItem, ClientStack, ItemTable, StackSlot};
 mod text;
 // Config libraries' defaults (`AutoConfig`, YACL), for the interpreter's
 // library dispatch.
+#[path = "client_registrations.rs"]
+mod client_registrations;
 #[path = "client_config.rs"]
 mod config;
 
@@ -570,6 +572,7 @@ const IDENTITY: Pose = [1.0, 1.0, 0.0, 0.0];
 pub(crate) struct ClientState {
     /// `KeyMapping` object marker → its constructor's arguments.
     key_inits: BTreeMap<String, KeyInit>,
+    pub(crate) registrations: client_registrations::State,
     /// `KeyMapping.Category` object marker → its identifier.
     categories: BTreeMap<String, String>,
     /// The ids `KeyMapping.Category.register` made a category of.
@@ -976,6 +979,11 @@ impl StdHost {
         self.environment_type != "SERVER"
     }
 
+    /// Registration-only client APIs, in the order the jar called them.
+    pub fn client_registration_summary(&self) -> serde_json::Value {
+        client_registrations::summary(&self.client.registrations)
+    }
+
     /// The key mappings this host's jar registered, in order.
     pub fn client_key_mappings(&self) -> &[ClientKeyMapping] {
         &self.client.keys
@@ -1106,11 +1114,14 @@ impl StdHost {
     /// categories, and the fields of the `Minecraft` and `Options` stand-ins
     /// (an instance field of a host object reaches the host as a static read
     /// without its receiver).
-    pub(crate) fn client_static(&self, r: &MethodRef) -> Option<Result<Value, NativeError>> {
+    pub(crate) fn client_static(&mut self, r: &MethodRef) -> Option<Result<Value, NativeError>> {
         // `java.awt.Color` is a JDK singleton family even on a server host;
         // model both the upper- and lower-case field spellings everywhere.
         if !self.client_environment() && r.owner != "java/awt/Color" {
             return None;
+        }
+        if let Some(value) = client_registrations::static_field(&mut self.client.registrations, r) {
+            return Some(Ok(value));
         }
         let state = &self.client;
         let frame = state.frame.as_deref();
@@ -1236,6 +1247,9 @@ impl StdHost {
         if let Some(value) = text::text_invoke(r, args) {
             return Some(Ok(value));
         }
+        if let Some(value) = client_registrations::invoke(&mut self.client.registrations, r, args) {
+            return Some(value);
+        }
         let state = &mut self.client;
         match (r.owner.as_str(), r.name.as_str()) {
             (MINECRAFT_CLASS, "getInstance") => Some(Ok(marker(MINECRAFT))),
@@ -1314,6 +1328,11 @@ impl StdHost {
     ) -> Option<Result<Value, NativeError>> {
         if !self.client_environment() {
             return None;
+        }
+        if let Some(value) =
+            client_registrations::instance(&mut self.client.registrations, r, receiver, args)
+        {
+            return Some(value);
         }
         // A client registration event (`RegisterKeyMappingsEvent`...), as its firing names it.
         if let Some(event) = crate::host_game_event::fired_event(receiver) {

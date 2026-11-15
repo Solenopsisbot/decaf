@@ -52,50 +52,61 @@ impl<H: Host> Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         match (r.owner.as_str(), r.name.as_str()) {
-            // Every overload (options, a set of options, an estimated depth)
-            // walks the same way: the frames carry their class either way.
-            // JDK 25 answers its one `DEFAULT_WALKER` for `getInstance()` and
-            // for `getInstance(Set)` of an empty set (`Set.isEmpty`, then
-            // `getstatic DEFAULT_WALKER`); the option and depth overloads
-            // build a new walker.
             ("java/lang/StackWalker", "getInstance") => {
-                let options = match (r.descriptor.as_str(), args.first()) {
+                let retain = match (r.descriptor.as_str(), args.first()) {
                     ("()Ljava/lang/StackWalker;", _) => false,
-                    ("(Ljava/util/Set;)Ljava/lang/StackWalker;", Some(Value::Ref(None))) => {
-                        return Err(NativeError::UncaughtException {
-                            class: "java/lang/NullPointerException".into(),
-                            message: None,
-                            frame: None,
-                        });
+                    ("(I)Ljava/lang/StackWalker;", Some(Value::Int(depth))) if *depth >= 0 => false,
+                    ("(Ljava/lang/StackWalker$Option;)Ljava/lang/StackWalker;", Some(option))
+                        if crate::runtime::host_jdk_constant::stack_walker_option_name(option)
+                            == Some("RETAIN_CLASS_REFERENCE") =>
+                    {
+                        true
                     }
                     ("(Ljava/util/Set;)Ljava/lang/StackWalker;", Some(set)) => {
                         if self.host_collection_kind(set).is_none() {
-                            // Emptiness unknown: a key can't stand for "maybe
-                            // the default walker".
-                            self.host.unknown_operand_call(r)?;
-                            true
-                        } else {
-                            !self.collection_elements(set)?.is_empty()
+                            return Ok(None);
                         }
+                        let mut retain = false;
+                        for option in self.collection_elements(set)? {
+                            match crate::runtime::host_jdk_constant::stack_walker_option_name(&option) {
+                                Some("RETAIN_CLASS_REFERENCE") => retain = true,
+                                Some(_) | None => return Ok(None),
+                            }
+                        }
+                        retain
                     }
-                    _ => true,
+                    _ => return Ok(None),
                 };
-                Ok(Some(crate::runtime::host_jdk::stack_walker(options)))
+                Ok(Some(crate::runtime::host_jdk::stack_walker(retain)))
             }
             ("java/lang/StackWalker", "walk")
                 if r.descriptor == "(Ljava/util/function/Function;)Ljava/lang/Object;" =>
             {
                 let function = StdHost::argument(r, args, 0)?.clone();
+                let retain = receiver
+                    .and_then(crate::runtime::host_jdk::stack_walker_retain)
+                    .ok_or_else(|| NativeError::Metadata("invalid StackWalker receiver".into()))?;
                 // `walk`'s own frame is the JDK's, not the caller's; the first
                 // frame the function sees is the method that called `walk`.
-                let frames = snapshot()
+                // A top-level native entrypoint has no interpreter caller frame
+                // to stand in for Java's launcher/main frame. Count that boundary
+                // instead of returning a shortened stream.
+                let snapshot = snapshot();
+                if snapshot.len() < 2 {
+                    return Ok(Some(self.host.unknown_operand_call(r)?));
+                }
+                let frames = snapshot
                     .iter()
                     .map(|(class, method)| {
-                        crate::runtime::host_jdk::frame_value(HostKind::StackFrame, class, method)
+                        crate::runtime::host_jdk::frame_value_with_retain(
+                            HostKind::StackFrame,
+                            class,
+                            method,
+                            retain,
+                        )
                     })
                     .collect();
                 let stream = self.new_stream("java/lang/StackWalker", "walk", frames);
-                // The frame stream's spliterator is not `SIZED`.
                 Ok(Some(
                     self.invoke_callback(&function, &[stream])?
                         .unwrap_or(Value::Ref(None)),
@@ -104,10 +115,16 @@ impl<H: Host> Runtime<'_, H> {
             ("java/lang/StackWalker", "getCallerClass")
                 if r.descriptor == "()Ljava/lang/Class;" =>
             {
-                // Frame 0 called `getCallerClass`; its caller is frame 1. With
-                // no such frame the JVM throws, as a walk from the bottom of
-                // the stack has no caller.
-                match snapshot().get(1) {
+                if receiver.and_then(crate::runtime::host_jdk::stack_walker_retain) != Some(true) {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/UnsupportedOperationException".into(),
+                        message: None,
+                        frame: None,
+                    });
+                }
+                // The interpreter snapshot already excludes the JDK helper
+                // frame, so frame 0 is the jar method that called us.
+                match snapshot().first() {
                     Some((class, _)) => Ok(Some(crate::runtime::host_class::class_value(class))),
                     None => Err(NativeError::UncaughtException {
                         class: "java/lang/IllegalCallerException".into(),
@@ -122,6 +139,17 @@ impl<H: Host> Runtime<'_, H> {
                 else {
                     return Ok(None);
                 };
+                if name == "getDeclaringClass"
+                    && receiver.and_then(|frame| {
+                        crate::runtime::host_jdk::frame_retain_class_reference(frame, HostKind::StackFrame)
+                    }) != Some(true)
+                {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/UnsupportedOperationException".into(),
+                        message: None,
+                        frame: None,
+                    });
+                }
                 Ok(match name {
                     "getClassName" => Some(Value::Ref(Some(class.replace('/', ".")))),
                     "getMethodName" => Some(Value::Ref(Some(method))),
