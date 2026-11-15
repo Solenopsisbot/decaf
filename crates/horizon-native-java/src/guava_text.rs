@@ -137,6 +137,46 @@ impl StdHost {
                     Ok(Some(parts)) => Ok(self.new_list(parts)),
                 })
             }
+            (LISTS, "newLinkedList", "(Ljava/lang/Iterable;)Ljava/util/LinkedList;") => {
+                let parts = Self::argument(r, args, 0).and_then(|value| self.guava_parts(value));
+                Some(match parts {
+                    Err(error) => Err(error),
+                    Ok(None) => self.unknown_host_call(r),
+                    Ok(Some(parts)) => Ok(self.new_collection("java/util/LinkedList", parts)),
+                })
+            }
+            (
+                "com/google/common/collect/Sets",
+                "newHashSet",
+                "(Ljava/lang/Iterable;)Ljava/util/HashSet;",
+            )
+            | (
+                "com/google/common/collect/Sets",
+                "newHashSet",
+                "(Ljava/util/Iterator;)Ljava/util/HashSet;",
+            )
+            | (
+                "com/google/common/collect/Sets",
+                "newLinkedHashSet",
+                "(Ljava/lang/Iterable;)Ljava/util/LinkedHashSet;",
+            )
+            | (
+                "com/google/common/collect/Sets",
+                "newConcurrentHashSet",
+                "(Ljava/lang/Iterable;)Ljava/util/Set;",
+            ) => {
+                let parts = Self::argument(r, args, 0).and_then(|value| self.guava_parts(value));
+                let class = match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("newHashSet", _) => "java/util/HashSet",
+                    ("newLinkedHashSet", _) => "java/util/LinkedHashSet",
+                    _ => "java/util/concurrent/ConcurrentHashMap$KeySetView",
+                };
+                Some(match parts {
+                    Err(error) => Err(error),
+                    Ok(None) => self.unknown_host_call(r),
+                    Ok(Some(parts)) => Ok(self.new_collection(class, parts)),
+                })
+            }
             _ => None,
         }
     }

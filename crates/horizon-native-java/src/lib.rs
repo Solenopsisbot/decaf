@@ -122,6 +122,7 @@ mod java_format;
 mod java_format_args;
 mod java_identifier;
 mod java_immutable;
+mod java_math;
 mod java_nbt;
 mod java_numbers;
 mod java_regex;
@@ -3485,7 +3486,17 @@ impl StdHost {
     }
 
     fn empty_collection(&mut self, kind: &str) -> Value {
-        self.new_collection(stand_in_class(kind), Vec::new())
+        self.empty_collection_class(match kind {
+            "map" => "java/util/LinkedHashMap",
+            "set" => "java/util/LinkedHashSet",
+            _ => "java/util/ArrayList",
+        })
+    }
+
+    /// Allocate a fresh mutable collection with the concrete JDK class a
+    /// library factory constructs.
+    fn empty_collection_class(&mut self, class: &str) -> Value {
+        self.new_collection(class, Vec::new())
     }
 
     /// A new mutable collection of class `class` holding `values`: an object
@@ -5160,7 +5171,13 @@ impl Host for StdHost {
     }
 
     fn empty_mutable_collection(&mut self, kind: &str) -> Option<Value> {
-        Some(self.empty_collection(kind))
+        let class = match kind {
+            "map" => "java/util/LinkedHashMap",
+            "set" => "java/util/LinkedHashSet",
+            "list" => "java/util/ArrayList",
+            class => class,
+        };
+        Some(self.empty_collection_class(class))
     }
 
     fn array_view(
@@ -5511,6 +5528,12 @@ impl Host for StdHost {
         if let Some(value) = self.brigadier_invoke(r, args) {
             return value;
         }
+        if let Some(result) = guava_model::sized_factory_class(r, args) {
+            return result.map(|class| self.empty_collection_class(class));
+        }
+        if let Some(class) = guava_model::empty_factory_class(r) {
+            return Ok(self.empty_collection_class(class));
+        }
         if let Some(value) = jdk_model::static_call(r, args) {
             return value;
         }
@@ -5518,6 +5541,9 @@ impl Host for StdHost {
             return value;
         }
         if let Some(value) = java_numbers::static_call(r, args) {
+            return value;
+        }
+        if let Some(value) = java_math::static_call(r, args) {
             return value;
         }
         if let Some(value) = java_identifier::invoke_static(self, r, args) {
@@ -12335,6 +12361,7 @@ fn is_set_owner(owner: &str) -> bool {
                 | "java/util/concurrent/CopyOnWriteArraySet"
                 | "java/util/concurrent/ConcurrentSkipListSet"
                 | "java/util/concurrent/ConcurrentHashMap$KeySetView"
+                | "java/util/Collections$SetFromMap"
                 | "java/util/EnumSet"
                 | "com/google/common/collect/ImmutableSet"
         )
@@ -30917,6 +30944,102 @@ mod tests {
             host.invoke_instance(&equals, &first, std::slice::from_ref(&second))
                 .unwrap(),
             Value::Int(0)
+        );
+    }
+
+    #[test]
+    fn guava_empty_factories_keep_their_java_classes_and_identity_maps() {
+        let factories = [
+            (
+                "com/google/common/collect/Maps",
+                "newHashMap",
+                "()Ljava/util/HashMap;",
+                "java/util/HashMap",
+            ),
+            (
+                "com/google/common/collect/Lists",
+                "newArrayList",
+                "()Ljava/util/ArrayList;",
+                "java/util/ArrayList",
+            ),
+            (
+                "com/google/common/collect/Sets",
+                "newHashSet",
+                "()Ljava/util/HashSet;",
+                "java/util/HashSet",
+            ),
+            (
+                "com/google/common/collect/Maps",
+                "newLinkedHashMap",
+                "()Ljava/util/LinkedHashMap;",
+                "java/util/LinkedHashMap",
+            ),
+            (
+                "com/google/common/collect/Maps",
+                "newIdentityHashMap",
+                "()Ljava/util/IdentityHashMap;",
+                "java/util/IdentityHashMap",
+            ),
+            (
+                "com/google/common/collect/Sets",
+                "newIdentityHashSet",
+                "()Ljava/util/Set;",
+                "java/util/Collections$SetFromMap",
+            ),
+            (
+                "com/google/common/collect/Maps",
+                "newConcurrentMap",
+                "()Ljava/util/concurrent/ConcurrentMap;",
+                "java/util/concurrent/ConcurrentHashMap",
+            ),
+            (
+                "com/google/common/collect/Lists",
+                "newLinkedList",
+                "()Ljava/util/LinkedList;",
+                "java/util/LinkedList",
+            ),
+        ];
+        let mut host = StdHost::new();
+        for (owner, name, descriptor, class) in factories {
+            let r = MethodRef {
+                owner: owner.into(),
+                name: name.into(),
+                descriptor: descriptor.into(),
+            };
+            let first = host.invoke(&r, &[]).unwrap();
+            let second = host.invoke(&r, &[]).unwrap();
+            assert_eq!(class_of_value(&first).as_deref(), Some(class));
+            assert_ne!(first, second, "each Guava factory call allocates");
+        }
+        let make = MethodRef {
+            owner: "com/google/common/collect/Maps".into(),
+            name: "newIdentityHashMap".into(),
+            descriptor: "()Ljava/util/IdentityHashMap;".into(),
+        };
+        let map = host.invoke(&make, &[]).unwrap();
+        let put = MethodRef {
+            owner: "java/util/Map".into(),
+            name: "put".into(),
+            descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;".into(),
+        };
+        let get = MethodRef {
+            owner: "java/util/Map".into(),
+            name: "get".into(),
+            descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".into(),
+        };
+        let key_a = Value::Ref(Some("demo/Object#1".into()));
+        let key_b = Value::Ref(Some("demo/Object#2".into()));
+        host.invoke_instance(&put, &map, &[key_a.clone(), Value::Int(1)])
+            .unwrap();
+        host.invoke_instance(&put, &map, &[key_b.clone(), Value::Int(2)])
+            .unwrap();
+        assert_eq!(
+            host.invoke_instance(&get, &map, &[key_a]).unwrap(),
+            Value::Int(1)
+        );
+        assert_eq!(
+            host.invoke_instance(&get, &map, &[key_b]).unwrap(),
+            Value::Int(2)
         );
     }
 

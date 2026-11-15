@@ -180,12 +180,52 @@ fn listeners_run_in_the_real_buses_order() {
             "static",
             "typed",
             "object",
+            "bounded",
             "receives",
             "plain-typed",
             "bound",
             "lowest"
         ]
     );
+}
+
+#[test]
+fn generic_superclass_and_chained_bounds_follow_typetools() {
+    let mut fixture = Fixture::new();
+    fixture
+        .call("generic", &format!("({BUS})V"), &[game_bus()])
+        .unwrap();
+    assert_eq!(
+        fixture.fire(GameEvent::ServerTickEnd).0,
+        ["generic", "via-var"]
+    );
+    assert_eq!(fixture.host.unknown_host_call_count(), 0);
+}
+
+#[test]
+fn raw_consumer_matches_the_real_bus_failure_and_erased_stays_counted() {
+    let mut fixture = Fixture::new();
+    let error = fixture
+        .call(
+            "failures",
+            &format!("({BUS}I)V"),
+            &[game_bus(), Value::Int(0)],
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        NativeError::UncaughtException { ref class, ref message, .. }
+            if class == "java/lang/NullPointerException"
+                && message.as_deref() == Some("Cannot invoke \"java.lang.Class.getModifiers()\" because the return value of \"java.lang.Class.getSuperclass()\" is null")
+    ));
+    fixture
+        .call(
+            "failures",
+            &format!("({BUS}I)V"),
+            &[game_bus(), Value::Int(1)],
+        )
+        .unwrap();
+    assert_eq!(fixture.host.unknown_host_call_count(), 1);
 }
 
 #[test]

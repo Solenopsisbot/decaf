@@ -681,22 +681,41 @@ fn is_game_class(owner: &str) -> bool {
 /// field initialiser). A factory that takes elements or an expected size is
 /// not listed and stays an unknown call.
 fn empty_collection_factory(r: &MethodRef) -> Option<&'static str> {
-    if !r.descriptor.starts_with("()") {
-        return None;
-    }
-    match (r.owner.as_str(), r.name.as_str()) {
+    match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+        ("com/google/common/collect/Maps", "newHashMap", "()Ljava/util/HashMap;") => {
+            Some("java/util/HashMap")
+        }
+        ("com/google/common/collect/Maps", "newLinkedHashMap", "()Ljava/util/LinkedHashMap;") => {
+            Some("java/util/LinkedHashMap")
+        }
         (
             "com/google/common/collect/Maps",
-            "newHashMap" | "newLinkedHashMap" | "newConcurrentMap",
-        ) => Some("map"),
+            "newIdentityHashMap",
+            "()Ljava/util/IdentityHashMap;",
+        ) => Some("java/util/IdentityHashMap"),
         (
-            "com/google/common/collect/Lists",
-            "newArrayList" | "newLinkedList" | "newCopyOnWriteArrayList",
-        ) => Some("list"),
-        (
-            "com/google/common/collect/Sets",
-            "newHashSet" | "newLinkedHashSet" | "newConcurrentHashSet",
-        ) => Some("set"),
+            "com/google/common/collect/Maps",
+            "newConcurrentMap",
+            "()Ljava/util/concurrent/ConcurrentMap;",
+        ) => Some("java/util/concurrent/ConcurrentHashMap"),
+        ("com/google/common/collect/Lists", "newArrayList", "()Ljava/util/ArrayList;") => {
+            Some("java/util/ArrayList")
+        }
+        ("com/google/common/collect/Lists", "newLinkedList", "()Ljava/util/LinkedList;") => {
+            Some("java/util/LinkedList")
+        }
+        ("com/google/common/collect/Sets", "newHashSet", "()Ljava/util/HashSet;") => {
+            Some("java/util/HashSet")
+        }
+        ("com/google/common/collect/Sets", "newLinkedHashSet", "()Ljava/util/LinkedHashSet;") => {
+            Some("java/util/LinkedHashSet")
+        }
+        ("com/google/common/collect/Sets", "newConcurrentHashSet", "()Ljava/util/Set;") => {
+            Some("java/util/concurrent/ConcurrentHashMap$KeySetView")
+        }
+        ("com/google/common/collect/Sets", "newIdentityHashSet", "()Ljava/util/Set;") => {
+            Some("java/util/Collections$SetFromMap")
+        }
         _ => None,
     }
 }
@@ -1398,10 +1417,19 @@ impl<H: Host> Host for GameHookHost<'_, H> {
     }
 
     fn invoke(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
-        if let Some(kind) = empty_collection_factory(r) {
-            return self.inner.empty_mutable_collection(kind).ok_or_else(|| {
+        if let Some(result) = guava_model::sized_factory_class(r, args) {
+            let class = result?;
+            return self.inner.empty_mutable_collection(class).ok_or_else(|| {
                 NativeError::Metadata(format!(
-                    "game hook callback calls {}#{}{}, and the host models no {kind}",
+                    "game hook callback calls {}#{}{}, and the host models no collection",
+                    r.owner, r.name, r.descriptor
+                ))
+            });
+        }
+        if let Some(class) = empty_collection_factory(r) {
+            return self.inner.empty_mutable_collection(class).ok_or_else(|| {
+                NativeError::Metadata(format!(
+                    "game hook callback calls {}#{}{}, and the host models no collection",
                     r.owner, r.name, r.descriptor
                 ))
             });

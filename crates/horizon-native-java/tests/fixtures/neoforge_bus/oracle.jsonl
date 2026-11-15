@@ -1,4 +1,7 @@
-{"case":"order","out":["highest","captured","high-typed","static","typed","object","receives","plain-typed","bound","lowest"]}
+{"case":"order","out":["highest","captured","high-typed","static","typed","object","bounded","receives","plain-typed","bound","lowest"]}
+{"case":"generic","out":["generic","via-var"]}
+{"case":"failure_0","result":"java.lang.NullPointerException: Cannot invoke \"java.lang.Class.getModifiers()\" because the return value of \"java.lang.Class.getSuperclass()\" is null"}
+{"case":"failure_1","result":"java.lang.IllegalStateException: Failed to resolve consumer event type: demo.ErasedConsumer@2d6d8735"}
 {"case":"cancel","out":["cancels","uncancels","runs-again","cancels-last"],"canceled":true}
 {"case":"cancel_two_mods","out":["cancels","uncancels","skipped","uncancels","runs-again","runs-again","cancels-last"],"canceled":true}
 {"case":"unregister","out":["kept"]}
