@@ -26,6 +26,7 @@ mod charset_decoder;
 mod checkcast;
 mod class_init;
 mod class_precedence;
+mod client_reload;
 pub mod client_surface;
 mod client_values;
 mod collection_base;
@@ -33,6 +34,7 @@ mod collection_callback;
 mod collection_store;
 mod color_collection;
 mod commons_io;
+mod commons_lang;
 mod commons_pair;
 mod concurrent_sync;
 pub mod content;
@@ -102,6 +104,7 @@ mod host_mixin;
 mod host_neoforge_loader;
 mod host_optional;
 mod host_path;
+mod host_recursion;
 mod host_ref;
 mod host_reflect;
 mod host_reflect_type;
@@ -187,6 +190,7 @@ mod reflect_names;
 mod reflect_override;
 mod regex_calls;
 mod registry_contents;
+mod registry_lookup;
 mod sequenced;
 mod service_loader;
 mod stack_walk;
@@ -2369,6 +2373,13 @@ pub trait Host {
         None
     }
 
+    /// [`Self::modelled_to_string`], with a nested walk's `StackOverflowError` thrown rather
+    /// than read as "no model" (#250): the runtime's `String.valueOf`, `Objects.toString` and
+    /// string-concatenation paths call this, so a cycle ends as Java's does.
+    fn modelled_to_string_checked(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        Ok(self.modelled_to_string(value))
+    }
+
     /// The `(msb, lsb)` of a `new UUID(msb, lsb)` object this host saw
     /// constructed (`host_jdk_value.rs`), `None` for any other value.
     fn constructed_uuid(&self, _value: &Value) -> Option<(i64, i64)> {
@@ -2663,6 +2674,28 @@ pub trait Host {
     /// has two.
     fn note_entrypoint_constructed(&mut self, _kind: &str, _class: &str, _instance: &Value) {}
 
+    /// The Fabric entrypoint rows the loader host declared for `kind`, in the
+    /// loader's invocation order.  A host that does not own loader state
+    /// exposes no rows; the runtime then keeps the call on its counted host
+    /// path instead of inventing providers.
+    fn fabric_entrypoints(&self, _kind: &str) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// The already constructed instance for one Fabric entrypoint and the
+    /// requested interface.  Fabric caches one instance per entrypoint key;
+    /// a missing value means loading that entry failed or the host has not
+    /// constructed this provider in the current run.
+    fn fabric_entrypoint_object(
+        &self,
+        _kind: &str,
+        _class: &str,
+        _requested: &str,
+        _ordinal: usize,
+    ) -> Option<Value> {
+        None
+    }
+
     /// Sibling-jar classes this host lets the executing jar link against.
     ///
     /// `None` keeps single-jar behavior exactly as before: a symbol the
@@ -2714,6 +2747,41 @@ pub trait Host {
     /// interpreter allocates one and registers the message here. `getMessage`
     /// and `toString` then answer through the host's existing Throwable model.
     fn record_throwable(&mut self, _marker: &str, _message: Option<String>) {}
+
+    /// Throwable objects the host has retained with `addSuppressed`.
+    fn throwable_suppressed(&self, _marker: &str) -> Option<Vec<Value>> {
+        None
+    }
+
+    fn record_throwable_suppressed(&mut self, _marker: &str, _value: Value) {}
+
+    /// Record the cause of a host-created wrapper throwable. The default host
+    /// has no throwable table, so it keeps the older message-only behavior.
+    fn record_throwable_cause(&mut self, _marker: &str, _cause: Value) {}
+
+    /// A wrapper throwable whose cause is known before its marker is created.
+    fn record_wrapped_cause(&mut self, _class: &str, _message: Option<&str>, _cause: Value) {}
+
+    /// Take a cause staged for the next throwable with this class/message.
+    fn take_wrapped_cause(&mut self, _class: &str, _message: &Option<String>) -> Option<Value> {
+        None
+    }
+
+    /// Stage wrappers are materialized only when Java catches the final
+    /// exception. Keep later stage failures until that marker exists.
+    fn record_wrapped_suppressed(&mut self, _class: &str, _message: Option<&str>, _value: Value) {}
+
+    fn take_wrapped_suppressed(&mut self, _class: &str, _message: &Option<String>) -> Vec<Value> {
+        Vec::new()
+    }
+
+    /// A constructor failure discovered while running an entrypoint. The
+    /// loader's next `getEntrypoint()` call must see the original chain.
+    fn record_fabric_entrypoint_failure(&mut self, _kind: &str, _class: &str, _cause: Value) {}
+
+    fn take_fabric_entrypoint_failure(&mut self, _kind: &str, _class: &str) -> Option<Value> {
+        None
+    }
 
     /// Return jar-owned class state retained across native callback invocations.
     /// Hosts that do not keep a resident jar instance use an empty snapshot.
@@ -2789,6 +2857,11 @@ pub trait Host {
     /// The persistent Guava Table store, when this host models the narrow
     /// HashBasedTable surface. Other hosts leave Table calls counted.
     fn guava_table_store(&mut self) -> Option<&mut guava_table::Store> {
+        None
+    }
+
+    /// A fresh immutable JDK collection with the exact unmodifiable class.
+    fn immutable_collection(&mut self, _kind: &str, _values: Vec<Value>) -> Option<Value> {
         None
     }
 
@@ -3180,6 +3253,7 @@ pub struct StdHost {
     /// enough for bootstrap diagnostics without modelling Java stack traces.
     throwable_messages: BTreeMap<String, Option<String>>,
     throwable_causes: BTreeMap<String, Option<Value>>,
+    throwable_suppressed: BTreeMap<String, Vec<Value>>,
     /// Jar-owned static fields retained across entrypoint/event invocations.
     /// The runtime still owns the map; the host only provides the lifetime.
     persistent_static_fields: BTreeMap<String, Value>,
@@ -3339,6 +3413,7 @@ impl StdHost {
             capability_requests: Vec::new(),
             throwable_messages: BTreeMap::new(),
             throwable_causes: BTreeMap::new(),
+            throwable_suppressed: BTreeMap::new(),
             persistent_static_fields: BTreeMap::new(),
             persistent_initialized_classes: std::collections::BTreeSet::new(),
             heap: heap::JavaHeap::default(),
@@ -3478,6 +3553,7 @@ impl StdHost {
         kind: &str,
         class: &str,
         requested: Option<&str>,
+        ordinal: usize,
     ) -> Option<Value> {
         if class.contains("::") || requested.is_none() {
             return None;
@@ -3489,9 +3565,23 @@ impl StdHost {
         // One object per entrypoint key (Fabric Loader 0.19.5's
         // `EntrypointStorage.add`: a new `NewEntry`, with its own instance
         // map, per key).
-        self.constructed_entrypoints
-            .get(&(kind.to_owned(), internal))
-            .cloned()
+        let object = self
+            .constructed_entrypoints
+            .get(&(kind.to_owned(), internal.clone()))
+            .cloned()?;
+        if ordinal == 0 {
+            Some(object)
+        } else {
+            // Fabric's storage creates a distinct Entry (and therefore a
+            // distinct cached instance) for every duplicate declaration. The
+            // native entrypoint runner has one constructed object for the
+            // class, so give later duplicate rows distinct handles while
+            // retaining the normal object for the first row.
+            Some(jar_object::handle(format!(
+                "{internal}#{}",
+                1_000_000 + ordinal
+            )))
+        }
     }
 
     fn empty_collection(&mut self, kind: &str) -> Value {
@@ -3931,14 +4021,42 @@ impl StdHost {
         if jar_object::spells_key(receiver) {
             return None;
         }
-        let marker = self.synchronized_target(expect_ref(receiver)?);
-        if let Some(values) = self.view_values(marker) {
-            return Some(values);
+        // A view (synchronized, unmodifiable, reversed) reads the collection it wraps, which
+        // may be another view, as deep as a jar nests them: followed in a loop, never by
+        // recursion (#250).
+        let mut marker = expect_ref(receiver)?.clone();
+        let mut reversed = false;
+        // Each hop follows one row of the view tables, so their rows bound any chain: a chain
+        // of any length a jar builds is read (#260 review); only a cycle, which no jar can
+        // build, would stop here.
+        let hops_bound = self.unmodifiable_collections.len()
+            + self.synchronized_views.len()
+            + self.reversed_views.len()
+            + 1;
+        for hops in 0..hops_bound {
+            let target = self.synchronized_target(&marker).to_owned();
+            let next = if let Some(Some(source)) = self.unmodifiable_collections.get(&target) {
+                source.clone()
+            } else if let Some((base, _)) = self.reversed_views.get(&target) {
+                reversed = !reversed;
+                base.clone()
+            } else {
+                let mut values = match self.mutable_collections.get(&target) {
+                    Some(values) => values.clone(),
+                    // A view over a collection the host keeps no row for (a literal).
+                    None if hops > 0 => {
+                        collection_values(&jar_object::stored_value(&target)).ok()?
+                    }
+                    None => return None,
+                };
+                if reversed {
+                    values.reverse();
+                }
+                return Some(values);
+            };
+            marker = next;
         }
-        if let Some(values) = self.reversed_view_values(marker) {
-            return Some(values);
-        }
-        self.mutable_collections.get(marker).cloned()
+        None
     }
 
     /// Answer `java.util.Properties` members from the map a collection keeps.
@@ -4214,8 +4332,7 @@ impl StdHost {
     }
 
     /// Add one bounded Fabric entrypoint container to the loader view.
-    /// Duplicate `(kind, class, provider)` rows are ignored to keep discovery
-    /// deterministic when a launcher seeds the same jar more than once.
+    /// Fabric stores every declaration, including duplicate rows.
     pub fn with_fabric_entrypoint(
         mut self,
         kind: impl Into<String>,
@@ -4227,9 +4344,7 @@ impl StdHost {
             class: class.into(),
             provider: provider.into(),
         };
-        if !self.fabric_entrypoint_containers.contains(&entry) {
-            self.fabric_entrypoint_containers.push(entry);
-        }
+        self.fabric_entrypoint_containers.push(entry);
         self
     }
 
@@ -4885,6 +5000,29 @@ impl Host for StdHost {
             .insert((kind.to_owned(), class.to_owned()), instance.clone());
     }
 
+    fn fabric_entrypoints(&self, kind: &str) -> Vec<(String, String)> {
+        let mut rows = self
+            .fabric_entrypoint_containers
+            .iter()
+            .filter(|entry| entry.kind == kind)
+            .map(|entry| (entry.class.clone(), entry.provider.clone()))
+            .collect::<Vec<_>>();
+        // Fabric's resolver presents selected mod candidates by id while
+        // retaining each metadata document's declared entrypoint order.
+        rows.sort_by(|(_, left), (_, right)| left.cmp(right));
+        rows
+    }
+
+    fn fabric_entrypoint_object(
+        &self,
+        kind: &str,
+        class: &str,
+        requested: &str,
+        ordinal: usize,
+    ) -> Option<Value> {
+        self.fabric_entrypoint_object(kind, class, Some(requested), ordinal)
+    }
+
     fn note_content_builder(&mut self, event: ContentBuilderEvent) {
         if let Some(entry) = self.content_builders.note(event) {
             // An attachment registers itself; a metadata row for the same key
@@ -5182,10 +5320,21 @@ impl Host for StdHost {
         }
     }
 
+    fn immutable_collection(&mut self, kind: &str, values: Vec<Value>) -> Option<Value> {
+        let owner = match kind {
+            "list" => "java/util/List",
+            "set" => "java/util/Set",
+            "map" => "java/util/Map",
+            _ => return None,
+        };
+        Some(self.unmodifiable_from(owner, "of", kind, values))
+    }
+
     fn empty_mutable_collection(&mut self, kind: &str) -> Option<Value> {
         let class = match kind {
             "map" => "java/util/LinkedHashMap",
             "set" => "java/util/LinkedHashSet",
+            "enum-set" => "java/util/EnumSet",
             "list" => "java/util/ArrayList",
             class => class,
         };
@@ -5286,6 +5435,10 @@ impl Host for StdHost {
         crate::java_tostring::modelled(self, value)
     }
 
+    fn modelled_to_string_checked(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        crate::java_tostring::modelled_checked(self, value)
+    }
+
     fn constructed_uuid(&self, value: &Value) -> Option<(i64, i64)> {
         self.constructed_uuids
             .get(jar_object::object_key(value)?)
@@ -5310,6 +5463,64 @@ impl Host for StdHost {
             self.throwable_causes.insert(marker.to_owned(), None);
         }
         self.throwable_messages.insert(marker.to_owned(), message);
+    }
+
+    fn throwable_suppressed(&self, marker: &str) -> Option<Vec<Value>> {
+        (self.throwable_messages.contains_key(marker) || self.throwable_causes.contains_key(marker))
+            .then(|| {
+                self.throwable_suppressed
+                    .get(marker)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+    }
+
+    fn record_throwable_suppressed(&mut self, marker: &str, value: Value) {
+        self.throwable_suppressed
+            .entry(marker.to_owned())
+            .or_default()
+            .push(value);
+    }
+
+    fn record_throwable_cause(&mut self, marker: &str, cause: Value) {
+        self.throwable_causes.insert(marker.to_owned(), Some(cause));
+    }
+
+    fn record_wrapped_cause(&mut self, class: &str, message: Option<&str>, cause: Value) {
+        self.throwable_causes.insert(
+            wrapped_cause_key(class, &message.map(str::to_owned)),
+            Some(cause),
+        );
+    }
+
+    fn take_wrapped_cause(&mut self, class: &str, message: &Option<String>) -> Option<Value> {
+        self.throwable_causes
+            .remove(&wrapped_cause_key(class, message))
+            .flatten()
+    }
+
+    fn record_wrapped_suppressed(&mut self, class: &str, message: Option<&str>, value: Value) {
+        self.throwable_suppressed
+            .entry(wrapped_suppressed_key(class, &message.map(str::to_owned)))
+            .or_default()
+            .push(value);
+    }
+
+    fn take_wrapped_suppressed(&mut self, class: &str, message: &Option<String>) -> Vec<Value> {
+        self.throwable_suppressed
+            .remove(&wrapped_suppressed_key(class, message))
+            .unwrap_or_default()
+    }
+
+    fn record_fabric_entrypoint_failure(&mut self, kind: &str, class: &str, cause: Value) {
+        self.throwable_causes
+            .insert(fabric_failure_key(kind, class), Some(cause));
+    }
+
+    fn take_fabric_entrypoint_failure(&mut self, kind: &str, class: &str) -> Option<Value> {
+        self.throwable_causes
+            .remove(&fabric_failure_key(kind, class))
+            .flatten()
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
@@ -5357,6 +5568,9 @@ impl Host for StdHost {
         if let Some(value) = self.client_static(r) {
             return value;
         }
+        if let Some(value) = client_reload::static_field(&r.owner, &r.name, &r.descriptor) {
+            return Ok(value);
+        }
         if let Some(value) = jdk_model::static_field(&r.owner, &r.name) {
             return Ok(value);
         }
@@ -5385,6 +5599,19 @@ impl Host for StdHost {
             return Ok(Value::Ref(Some(format!("enum/{}/{}", r.owner, r.name))));
         }
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+            // Fabric Biome API's four shared modification phases are opaque
+            // singleton values. Their identity is all this map needs.
+            (
+                "net/fabricmc/fabric/api/biome/v1/ModificationPhase",
+                "ADDITIONS" | "REMOVALS" | "REPLACEMENTS" | "POST_PROCESSING",
+                "Lnet/fabricmc/fabric/api/biome/v1/ModificationPhase;",
+            ) => host_fabric_runtime::modification_phase(&r.name)
+                .ok_or_else(|| NativeError::UnknownHostCall(r.clone())),
+            (
+                "net/fabricmc/fabric/api/resource/v1/reloader/ResourceReloaderKeys$Server",
+                "FUNCTIONS",
+                "Lnet/minecraft/resources/Identifier;",
+            ) => Ok(host_ids::static_identifier("minecraft:functions")),
             ("java/time/Duration", "ZERO", "Ljava/time/Duration;") => Ok(duration_value(0)),
             // TimeUnit constants carry their name; the conversion accessors
             // multiply by that unit's nanosecond factor.
@@ -5526,6 +5753,9 @@ impl Host for StdHost {
         if let Some(value) = self.guava_text(r, None, args) {
             return value;
         }
+        if let Some(value) = commons_lang::static_call(self, r, args) {
+            return value;
+        }
         if let Some(value) = self.neoforge_loader_call(r, args) {
             return Ok(value);
         }
@@ -5549,6 +5779,9 @@ impl Host for StdHost {
         }
         if let Some(class) = guava_model::empty_factory_class(r) {
             return Ok(self.empty_collection_class(class));
+        }
+        if let Some(value) = client_reload::static_call(self, r, args) {
+            return value;
         }
         if let Some(value) = jdk_model::static_call(r, args) {
             return value;
@@ -6274,7 +6507,7 @@ impl Host for StdHost {
             ("java/util/Objects", "toString", "(Ljava/lang/Object;)Ljava/lang/String;") => {
                 // A model object prints its own `toString`, not its marker.
                 let value = Self::argument(r, args, 0)?;
-                let text = self.modelled_to_string(value);
+                let text = self.modelled_to_string_checked(value)?;
                 Ok(Value::Ref(Some(text.unwrap_or_else(|| value_text(value)))))
             }
             ("java/lang/Math", "abs", "(I)I") => {
@@ -6400,7 +6633,7 @@ impl Host for StdHost {
             ("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;") => {
                 // A model object prints its own `toString`, not its marker.
                 let value = Self::argument(r, args, 0)?;
-                let text = self.modelled_to_string(value);
+                let text = self.modelled_to_string_checked(value)?;
                 Ok(Value::Ref(Some(text.unwrap_or_else(|| value_text(value)))))
             }
             // Chat components are a common loader/bootstrap value (mod
@@ -6783,6 +7016,18 @@ impl Host for StdHost {
         if let Some(refusal) = native_library::refusal(r, args) {
             return Err(refusal);
         }
+        if let Some(value) = registry_lookup::instance_call(self, r, receiver, args) {
+            return value;
+        }
+        // ItemStack.EMPTY is a canonical host value even before a client frame
+        // exists, so its bootstrap isEmpty() answer must stay exact.
+        if r.owner == "net/minecraft/world/item/ItemStack"
+            && r.name == "isEmpty"
+            && r.descriptor == "()Z"
+            && crate::game_object::handle_key(receiver) == Some("client/stack/empty")
+        {
+            return Ok(Value::Int(1));
+        }
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
         // An object's are its class's: the models below answer them.
@@ -6853,6 +7098,9 @@ impl Host for StdHost {
         // The command dispatcher, builders, nodes and a running command's
         // context and source (`brigadier.rs`).
         if let Some(value) = self.brigadier_call(r, receiver, args) {
+            return value;
+        }
+        if let Some(value) = client_reload::host_instance_call(self, r, receiver, args) {
             return value;
         }
         if let Some(value) = jdk_model::instance_call(r, receiver, args) {
@@ -7627,6 +7875,13 @@ impl Host for StdHost {
                     if is_queue_owner(owner) =>
                 {
                     let value = Self::argument(r, args, 0)?.clone();
+                    if queue_rejects_null(owner) && value == Value::Ref(None) {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
                     self.mutable_collections
                         .entry(marker.to_owned())
                         .or_default()
@@ -7637,6 +7892,13 @@ impl Host for StdHost {
                     if is_queue_owner(owner) =>
                 {
                     let value = Self::argument(r, args, 0)?.clone();
+                    if queue_rejects_null(owner) && value == Value::Ref(None) {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
                     self.mutable_collections
                         .entry(marker.to_owned())
                         .or_default()
@@ -7645,6 +7907,13 @@ impl Host for StdHost {
                 }
                 (owner, "push", "(Ljava/lang/Object;)Z") if is_queue_owner(owner) => {
                     let value = Self::argument(r, args, 0)?.clone();
+                    if queue_rejects_null(owner) && value == Value::Ref(None) {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
                     self.mutable_collections
                         .entry(marker.to_owned())
                         .or_default()
@@ -8490,8 +8759,8 @@ impl Host for StdHost {
                 // counted as in any collection's text).
                 ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(format!(
                     "{}={}",
-                    object_text(self, &key),
-                    object_text(self, &value)
+                    object_text(self, &key)?,
+                    object_text(self, &value)?
                 )))),
                 _ => Err(NativeError::MissingMethod(format!(
                     "{}#{}{}",
@@ -9715,6 +9984,9 @@ impl Host for StdHost {
                     && let Some(rest) = marker.strip_prefix("@fn:consumer.then:")
                     && let Some((left, right)) = rest.split_once('|')
                 {
+                    // One level of a composed consumer (#250): a chain as long as a jar
+                    // builds it ends in a `StackOverflowError`, as Java's lambda chain does.
+                    let _level = host_recursion::enter()?;
                     self.invoke_instance(r, &composed_callback(left), args)?;
                     self.invoke_instance(r, &composed_callback(right), args)?;
                 }
@@ -9725,9 +9997,13 @@ impl Host for StdHost {
                 "accept",
                 "(Ljava/lang/Object;Ljava/lang/Object;)V",
             ) => Ok(Value::Void),
-            ("java/util/function/Predicate", "test", "(Ljava/lang/Object;)Z") => Ok(Value::Int(
-                expect_ref(receiver).is_some_and(|marker| predicate_marker_value(marker)) as i32,
-            )),
+            ("java/util/function/Predicate", "test", "(Ljava/lang/Object;)Z") => {
+                let truth = match expect_ref(receiver) {
+                    Some(marker) => predicate_marker_value(marker)?,
+                    None => false,
+                };
+                Ok(Value::Int(i32::from(truth)))
+            }
             ("java/util/function/Supplier", "get", "()Ljava/lang/Object;") => Ok(Value::Ref(None)),
             // `registry.key()`: the registry's key, `ResourceKey[minecraft:root /
             // <id>]`, the same interned key `Registries.X` is. Libraries index
@@ -9922,12 +10198,16 @@ impl Host for StdHost {
                     .get(1)
                     .and_then(host_class::class_name)
                     .map(str::to_owned);
-                let entries = self
+                let mut entries = self
                     .fabric_entrypoint_containers
                     .iter()
                     .filter(|entry| entry.kind == kind)
                     .cloned()
                     .collect::<Vec<_>>();
+                // Resolver selection presents providers by mod id while
+                // retaining each provider's declaration order. `invoke` uses
+                // the same stable ordering below through `fabric_entrypoints`.
+                entries.sort_by(|left, right| left.provider.cmp(&right.provider));
                 if entries.is_empty() {
                     // `EntrypointStorage.getEntrypoints` of a key no mod
                     // declares: `Collections.emptyList()`, one shared object.
@@ -9939,7 +10219,7 @@ impl Host for StdHost {
                     ));
                 }
                 let mut values = Vec::new();
-                for entry in entries {
+                for (ordinal, entry) in entries.into_iter().enumerate() {
                     if r.name == "getEntrypointContainers" {
                         values.push(host_fabric_runtime::entrypoint_container(
                             &host_fabric_runtime::ContainerParts {
@@ -9947,6 +10227,7 @@ impl Host for StdHost {
                                 class: entry.class,
                                 provider: entry.provider,
                                 requested: requested.clone(),
+                                ordinal,
                             },
                         ));
                     } else {
@@ -9954,6 +10235,7 @@ impl Host for StdHost {
                             &kind,
                             &entry.class,
                             requested.as_deref(),
+                            ordinal,
                         ) {
                             Some(object) => values.push(object),
                             None => return self.unknown_host_call(r),
@@ -10033,6 +10315,7 @@ impl Host for StdHost {
                             &parts.kind,
                             &parts.class,
                             parts.requested.as_deref(),
+                            parts.ordinal,
                         )
                     });
                 match object {
@@ -10771,6 +11054,7 @@ fn resource_key_identifier(value: &Value) -> Option<(String, String)> {
 /// the same registry id here. This is a lookup table only: no class is loaded
 /// and no game registry is inspected.
 const REGISTRY_STATICS: &[(&str, &str)] = &[
+    ("REGISTRY", "minecraft:root"),
     ("ITEM", "minecraft:item"),
     ("BLOCK", "minecraft:block"),
     ("ENTITY_TYPE", "minecraft:entity_type"),
@@ -11406,6 +11690,21 @@ fn is_throwable_marker(marker: &str) -> bool {
     jar_object::marker_class(marker).is_some_and(is_throwable_owner)
 }
 
+fn wrapped_cause_key(class: &str, message: &Option<String>) -> String {
+    format!("@wrapped-cause/{class}/{message:?}")
+}
+
+fn wrapped_suppressed_key(class: &str, message: &Option<String>) -> String {
+    format!("@wrapped-suppressed/{class}/{message:?}")
+}
+
+fn fabric_failure_key(kind: &str, class: &str) -> String {
+    format!(
+        "@fabric-entrypoint-failure/{kind}/{}",
+        class.replace('.', "/")
+    )
+}
+
 /// The superclass of the JDK throwable types a mod catch block can name.
 ///
 /// A jar's own classes carry their `super_class`, but `java/lang/*` classes
@@ -11445,6 +11744,7 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         | "java/lang/StringIndexOutOfBoundsException"
         | "java/util/InputMismatchException" => "java/lang/IndexOutOfBoundsException",
         "java/lang/RuntimeException" => "java/lang/Exception",
+        "java/util/concurrent/CompletionException" => "java/lang/RuntimeException",
         "java/lang/ClassNotFoundException"
         | "java/lang/NoSuchMethodException"
         | "java/lang/NoSuchFieldException"
@@ -11458,6 +11758,7 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         "java/io/FileNotFoundException"
         | "java/nio/file/NoSuchFileException"
         | "java/nio/file/FileSystemException" => "java/io/IOException",
+        "java/util/concurrent/ExecutionException" => "java/lang/Exception",
         "java/lang/ReflectiveOperationException"
         | "java/io/IOException"
         | "java/lang/InterruptedException"
@@ -11492,6 +11793,16 @@ fn exception_is_subtype(
     thrown: &str,
     catch: &str,
 ) -> bool {
+    // Loader exceptions such as `EntrypointException` live in the host's
+    // class path rather than the mod jar. Their names still carry the Java
+    // throwable contract, so a jar's ordinary `catch (Throwable/Exception)`
+    // must receive the wrapped failure instead of letting it escape.
+    if is_throwable_owner(thrown)
+        && (catch == "java/lang/Throwable"
+            || catch == "java/lang/Exception" && thrown.ends_with("Exception"))
+    {
+        return true;
+    }
     if catch == "java/lang/Object" {
         return true;
     }
@@ -11620,6 +11931,7 @@ impl host_ref::Nested for MarkerText {
     }
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        let _level = host_recursion::enter()?;
         Ok(Some(match value {
             // An object prints its key, as its marker did.
             Value::Host(handle) if jar_object::is_object_handle(handle) => handle.key().to_owned(),
@@ -11643,6 +11955,7 @@ struct HostNested<'a>(Option<&'a mut StdHost>);
 
 impl host_ref::Nested for HostNested<'_> {
     fn hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
+        let _level = host_recursion::enter()?;
         Ok(match value {
             // An object's own `hashCode` is jar code (or an identity hash).
             Value::Host(handle) if jar_object::is_object_handle(handle) => None,
@@ -11655,6 +11968,7 @@ impl host_ref::Nested for HostNested<'_> {
     }
 
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError> {
+        let _level = host_recursion::enter()?;
         Ok(match a {
             // `a == b` answers for any object; its own `equals` is jar code.
             Value::Host(handle) if jar_object::is_object_handle(handle) => (a == b).then_some(true),
@@ -11669,10 +11983,11 @@ impl host_ref::Nested for HostNested<'_> {
     }
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        let _level = host_recursion::enter()?;
         Ok(match (value, self.0.as_deref_mut()) {
             // An object prints what its class's model prints, if one does.
             (Value::Host(handle), Some(host)) if jar_object::is_object_handle(handle) => {
-                host.modelled_to_string(value)
+                java_tostring::modelled_checked(host, value)?
             }
             (Value::Host(handle), None) if jar_object::is_object_handle(handle) => None,
             // A `Class` the host can name the kind of: a primitive, an array,
@@ -11682,7 +11997,7 @@ impl host_ref::Nested for HostNested<'_> {
             }
             (Value::Host(handle), _) => return handle.to_string(self),
             (Value::Ref(Some(text)), _) if value_class::is_plain_string(text) => Some(text.clone()),
-            (Value::Ref(Some(_)), Some(host)) => host.modelled_to_string(value),
+            (Value::Ref(Some(_)), Some(host)) => java_tostring::modelled_checked(host, value)?,
             (Value::Ref(Some(_)), None) => None,
             (other, _) => Some(value_text(other)),
         })
@@ -12343,10 +12658,21 @@ fn is_list_like_owner(owner: &str) -> bool {
 /// `peek` and `push` are the queue-only members modelled above them; the
 /// table is FIFO, which is what a `PriorityQueue`'s own iteration order is not,
 /// but is a bounded order the interpreter can reproduce deterministically.
+fn queue_rejects_null(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/util/ArrayDeque"
+            | "java/util/concurrent/ConcurrentLinkedQueue"
+            | "java/util/concurrent/ConcurrentLinkedDeque"
+    )
+}
+
+/// Every queue a jar constructs directly.
 fn is_queue_owner(owner: &str) -> bool {
     matches!(
         owner,
-        "java/util/Queue"
+        "java/util/LinkedList"
+            | "java/util/Queue"
             | "java/util/Deque"
             | "java/util/BlockingQueue"
             | "java/util/BlockingDeque"
@@ -12670,8 +12996,19 @@ fn collection_text(
     value: &Value,
     owner_is_map: bool,
 ) -> Result<String, NativeError> {
-    let values = host_collection_values(host, value)?;
+    // One level of nested printing (#250).
+    let _level = host_recursion::enter()?;
     let marker = expect_string(value).to_owned();
+    // `Collections.unmodifiable*`'s `toString` is `c.toString()` (Java 25's `javap`): the view
+    // prints the collection it wraps, which is then the receiver `(this Collection)` compares
+    // against, never the view itself.
+    if let Some(source) = Host::unmodifiable_view_source(host, &marker)
+        .map(|source| jar_object::stored_value(&source))
+        .filter(|source| host.mutable_values(source).is_some())
+    {
+        return collection_text(host, &source, false);
+    }
+    let values = host_collection_values(host, value)?;
     let kind = marker.split('/').next().unwrap_or(&marker);
     let kind = kind.split_once('#').map_or(kind, |(kind, _)| kind);
     let class = marker.split_once('#').map(|(class, _)| class);
@@ -12681,18 +13018,41 @@ fn collection_text(
             is_map_owner(class) || java_immutable::supertypes(class).contains(&"java/util/Map")
         });
     // `AbstractCollection.toString`/`AbstractMap.toString`: each element is
-    // `String.valueOf(element)`, and the collection itself inside it prints
-    // `(this Collection)`/`(this Map)`.
+    // `String.valueOf(element)`, and the collection itself inside it (`e == this`)
+    // prints `(this Collection)`/`(this Map)`. A collection is a handle, so `==` is
+    // its identity, not its text (#250: a list holding itself recursed until the
+    // native stack overflowed). A deeper cycle recurses, as on the JVM, until a
+    // `StackOverflowError` (`host_recursion.rs`).
+    // Only a class whose `toString` is `AbstractCollection`'s/`AbstractMap`'s (or checks the
+    // same way: `ConcurrentHashMap`, the reversed views, `Helpers.collectionToString`'s blocking
+    // queues) prints itself as `(this Collection)`. `CopyOnWriteArrayList` (`Arrays.toString` of
+    // its array) and the concurrent linked queues print every element, so a list holding itself
+    // recurses until a `StackOverflowError`, as on the JVM.
+    let checks_itself = !class.is_some_and(|class| {
+        matches!(
+            class,
+            "java/util/concurrent/CopyOnWriteArrayList"
+                | "java/util/concurrent/ConcurrentLinkedQueue"
+                | "java/util/concurrent/ConcurrentLinkedDeque"
+                | "java/util/concurrent/LinkedTransferQueue"
+        )
+    });
     let mut texts = Vec::with_capacity(values.len());
     for element in &values {
-        texts.push(match element {
-            Value::Ref(Some(inner)) if *inner == marker => if is_map {
+        let itself = checks_itself
+            && match element {
+                Value::Ref(Some(inner)) => *inner == marker,
+                element => object_methods::identical(element, value),
+            };
+        texts.push(if itself {
+            if is_map {
                 "(this Map)"
             } else {
                 "(this Collection)"
             }
-            .to_owned(),
-            element => object_text(host, element),
+            .to_owned()
+        } else {
+            object_text(host, element)?
         });
     }
     Ok(if is_map {
@@ -12710,36 +13070,257 @@ fn collection_text(
 /// `String.valueOf(Object)` of one value a model holds (a collection's
 /// element, an optional's payload): a box prints its value and a model
 /// object its `toString`.
-fn object_text(host: &mut StdHost, value: &Value) -> String {
-    match value {
+fn object_text(host: &mut StdHost, value: &Value) -> Result<String, NativeError> {
+    Ok(match value {
         Value::Boxed(boxed) => boxed.text(),
         // A handle prints its kind's `toString`; one holding an object the
-        // host cannot print is counted, and keeps the old text.
+        // host cannot print is counted, and keeps the old text. A cycle's
+        // `StackOverflowError` is thrown, as Java's is.
         Value::Host(handle) => match handle.to_string(&mut HostNested(Some(host))) {
             Ok(Some(text)) => text,
+            Err(error) if host_recursion::is_stack_overflow(&error) => return Err(error),
             _ => {
                 let _ = host.unknown_host_call(&jar_text::object_to_string());
                 host_text(value)
             }
         },
-        Value::Ref(Some(marker)) => host.modelled_to_string(value).unwrap_or_else(|| {
-            // An object no model prints (a jar object, an identity hash)
-            // is counted; the element keeps its marker in the text. A
-            // stream is counted too, and never prints its marker.
-            if stream_pipeline::is_stream_marker(marker) {
-                let _ = host.unknown_host_call(&jar_text::object_to_string());
-                return stream_pipeline::STREAM_TEXT.into();
-            }
-            if crate::jar_object::packaged_object_class(value).is_some() {
-                let _ = host.unknown_host_call(&jar_text::object_to_string());
-            }
-            marker.clone()
-        }),
+        Value::Ref(Some(marker)) => {
+            java_tostring::modelled_checked(host, value)?.unwrap_or_else(|| {
+                // An object no model prints (a jar object, an identity hash)
+                // is counted; the element keeps its marker in the text. A
+                // stream is counted too, and never prints its marker.
+                if stream_pipeline::is_stream_marker(marker) {
+                    let _ = host.unknown_host_call(&jar_text::object_to_string());
+                    return stream_pipeline::STREAM_TEXT.into();
+                }
+                if crate::jar_object::packaged_object_class(value).is_some() {
+                    let _ = host.unknown_host_call(&jar_text::object_to_string());
+                }
+                marker.clone()
+            })
+        }
         other => value_text(other),
-    }
+    })
 }
 
 impl<H: Host> Runtime<'_, H> {
+    fn retain_entrypoint_failure(
+        &mut self,
+        first: &mut Option<(String, Value)>,
+        suppressed: &mut Vec<Value>,
+        message: String,
+        cause: Value,
+    ) {
+        if first.is_none() {
+            *first = Some((message, cause));
+            return;
+        }
+        let wrapper =
+            self.caught_throwable("java/lang/RuntimeException", Some(message.clone()), None);
+        if let Some(marker) = jar_object::instance_key(&wrapper) {
+            self.host.record_throwable_cause(marker, cause);
+        }
+        suppressed.push(wrapper);
+    }
+
+    /// The bounded Throwable state that the JDK exposes for Fabric's
+    /// aggregated entrypoint failures. Arrays are allocated by the runtime so
+    /// normal `getSuppressed()[i]` bytecode sees the real handles.
+    fn invoke_throwable_metadata(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if !is_throwable_owner(&r.owner) {
+            return Ok(None);
+        }
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        let Some(marker) = jar_object::instance_key(receiver).map(str::to_owned) else {
+            return Ok(None);
+        };
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("getSuppressed", "()[Ljava/lang/Throwable;") => {
+                let Some(values) = self.host.throwable_suppressed(&marker) else {
+                    return Ok(None);
+                };
+                Ok(Some(self.new_array_value("[Ljava/lang/Throwable;", values)))
+            }
+            ("addSuppressed", "(Ljava/lang/Throwable;)V") => {
+                let Some(value) = args.first().filter(|value| **value != Value::Ref(None)) else {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: None,
+                        frame: None,
+                    });
+                };
+                if receiver == value {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/IllegalArgumentException".into(),
+                        message: Some("Self-suppression not permitted".into()),
+                        frame: None,
+                    });
+                }
+                self.host
+                    .record_throwable_suppressed(&marker, value.clone());
+                Ok(Some(Value::Void))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `FabricLoaderImpl.invokeEntrypoints` walks the entrypoint rows in the
+    /// same order as `getEntrypointContainers`, obtains each cached instance,
+    /// and passes it to the supplied `Consumer`. Fabric catches `Throwable`
+    /// for every row, wraps it with the stage/provider/definition message,
+    /// gathers later failures, and continues before throwing the first
+    /// wrapper. An entrypoint loading/type error is itself an
+    /// `EntrypointException` with its original cause.
+    fn invoke_fabric_entrypoints(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "net/fabricmc/loader/api/FabricLoader"
+            || r.name != "invokeEntrypoints"
+            || r.descriptor != "(Ljava/lang/String;Ljava/lang/Class;Ljava/util/function/Consumer;)V"
+        {
+            return Ok(None);
+        }
+        let Some(Value::Host(loader)) = receiver else {
+            return Ok(None);
+        };
+        if loader.kind() != HostKind::FabricLoaderInstance {
+            return Ok(None);
+        }
+        let kind = expect_string(args.first().unwrap_or(&Value::Ref(None))).to_owned();
+        let requested = args
+            .get(1)
+            .and_then(host_class::class_name)
+            .ok_or_else(|| NativeError::Metadata("invokeEntrypoints requires a Class".into()))?;
+        let consumer = args
+            .get(2)
+            .ok_or_else(|| NativeError::Metadata("invokeEntrypoints requires a Consumer".into()))?
+            .clone();
+        let entries = self.host.fabric_entrypoints(&kind);
+        if entries.is_empty() {
+            // The standalone host does not know the run's loader rows. Keep
+            // this counted, as the old host path did, rather than silently
+            // answering an empty invocation.
+            self.host.unknown_operand_call(r)?;
+            return Ok(Some(Value::Void));
+        }
+        let mut first_failure: Option<(String, Value)> = None;
+        let mut suppressed_failures = Vec::new();
+        for (ordinal, (entry_class, provider)) in entries.into_iter().enumerate() {
+            let object =
+                self.host
+                    .fabric_entrypoint_object(&kind, &entry_class, requested, ordinal);
+            let Some(object) = object else {
+                let loading_message = format!(
+                    "Exception while loading entries for entrypoint '{kind}' provided by '{provider}'"
+                );
+                let cast_cause = match self
+                    .host
+                    .take_fabric_entrypoint_failure(&kind, &entry_class)
+                {
+                    Some(cause) => cause,
+                    None => self.caught_throwable(
+                        "java/lang/ClassCastException",
+                        Some(format!(
+                            "entrypoint {entry_class} is not assignable to {requested}"
+                        )),
+                        None,
+                    ),
+                };
+                let loading = self.caught_throwable(
+                    "net/fabricmc/loader/api/EntrypointException",
+                    Some(loading_message),
+                    None,
+                );
+                if let Some(marker) = jar_object::instance_key(&loading) {
+                    self.host.record_throwable_cause(marker, cast_cause);
+                }
+                let stage_message = format!(
+                    "Could not execute entrypoint stage '{kind}' due to errors, provided by '{provider}' at '{entry_class}'!"
+                );
+                self.retain_entrypoint_failure(
+                    &mut first_failure,
+                    &mut suppressed_failures,
+                    stage_message,
+                    loading,
+                );
+                continue;
+            };
+            let accepted = match self.run_functional(
+                (
+                    "java/util/function/Consumer",
+                    "accept",
+                    "(Ljava/lang/Object;)V",
+                ),
+                &consumer,
+                &[object],
+            ) {
+                Ok(accepted) => accepted,
+                Err(NativeError::UncaughtException {
+                    class: thrown_class,
+                    message,
+                    frame,
+                }) => {
+                    let cause = self.caught_throwable(&thrown_class, message, frame.as_deref());
+                    let stage_message = format!(
+                        "Could not execute entrypoint stage '{kind}' due to errors, provided by '{provider}' at '{entry_class}'!"
+                    );
+                    self.retain_entrypoint_failure(
+                        &mut first_failure,
+                        &mut suppressed_failures,
+                        stage_message,
+                        cause,
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if !accepted {
+                self.host.unknown_operand_call(r)?;
+                let cause = self.caught_throwable(
+                    "java/lang/RuntimeException",
+                    Some("entrypoint consumer was not executable".into()),
+                    None,
+                );
+                let stage_message = format!(
+                    "Could not execute entrypoint stage '{kind}' due to errors, provided by '{provider}' at '{entry_class}'!"
+                );
+                self.retain_entrypoint_failure(
+                    &mut first_failure,
+                    &mut suppressed_failures,
+                    stage_message,
+                    cause,
+                );
+            }
+        }
+        if let Some((message, cause)) = first_failure {
+            self.host
+                .record_wrapped_cause("java/lang/RuntimeException", Some(&message), cause);
+            for suppressed in suppressed_failures {
+                self.host.record_wrapped_suppressed(
+                    "java/lang/RuntimeException",
+                    Some(&message),
+                    suppressed,
+                );
+            }
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/RuntimeException".into(),
+                message: Some(message),
+                frame: None,
+            });
+        }
+        Ok(Some(Value::Void))
+    }
+
     /// Refuse a field access on an object the resident heap collected: its
     /// fields are gone, so the access is a missed root, never its fields'
     /// defaults (#226 review). Checked where no field row exists, which is
@@ -13567,10 +14148,11 @@ impl ClassFile {
         let interface_count = r.u2()? as usize;
         r.skip(interface_count * 2)?;
         let fields = read_fields(&mut r, &pool)?;
-        let methods = read_methods(&mut r, &pool)?;
+        let (methods, method_warnings) = read_methods(&mut r, &pool)?;
         let (annotations, bootstrap_methods, warnings) = read_class_attributes(&mut r, &pool)?;
-        let warnings = warnings
+        let warnings = method_warnings
             .into_iter()
+            .chain(warnings)
             .map(|warning| format!("{name}: {warning}"))
             .collect();
         Ok((
@@ -14959,6 +15541,10 @@ impl NativeJar {
                                     slice: None,
                                     shift: None,
                                 };
+                                if injection_metadata_requires_refusal(inject) {
+                                    unresolved.push(plan);
+                                    continue;
+                                }
                                 let (slice, shift) =
                                     match resolve_injection_modifiers(anchor, &inject_slices) {
                                         Ok(modifiers) => modifiers,
@@ -17248,14 +17834,19 @@ impl NativeJar {
         for declaration in &self.native_declarations {
             host.declared_registrations.insert(declaration.key());
         }
-        let provider = self
-            .fabric_id
-            .as_deref()
-            .or(self.neoforge_id.as_deref())
-            .unwrap_or("unknown");
-        for (kind, entries) in &self.fabric_entrypoints {
-            for entry in entries {
-                host = host.with_fabric_entrypoint(kind, &entry.class, provider);
+        // `record_fabric_metadata` already copied declarations from a real
+        // fabric.mod.json. Synthetic class-only jars have no metadata bytes,
+        // so retain the explicit builder path for their unit fixtures.
+        if !self.resource_bytes.contains_key("fabric.mod.json") {
+            let provider = self
+                .fabric_id
+                .as_deref()
+                .or(self.neoforge_id.as_deref())
+                .unwrap_or("unknown");
+            for (kind, entries) in &self.fabric_entrypoints {
+                for entry in entries {
+                    host = host.with_fabric_entrypoint(kind, &entry.class, provider);
+                }
             }
         }
         host
@@ -17412,7 +18003,47 @@ impl NativeJar {
                 if active.is_some() {
                     neoforge_imc::set_active(runtime.host, previous.as_deref());
                 }
-                constructed?;
+                if let Err(error) = constructed {
+                    if let NativeError::UncaughtException {
+                        class: thrown_class,
+                        message,
+                        frame,
+                    } = &error
+                    {
+                        // The default Fabric adapter reflects through
+                        // Constructor.newInstance: its LanguageAdapterException
+                        // retains an InvocationTargetException, which in turn
+                        // retains the constructor's original Throwable.
+                        let original = runtime.caught_throwable(
+                            thrown_class,
+                            message.clone(),
+                            frame.as_deref(),
+                        );
+                        let invocation = runtime.caught_throwable(
+                            "java/lang/reflect/InvocationTargetException",
+                            None,
+                            None,
+                        );
+                        if let Some(marker) = jar_object::instance_key(&invocation) {
+                            runtime.host.record_throwable_cause(marker, original);
+                        }
+                        let adapter = runtime.caught_throwable(
+                            "net/fabricmc/loader/api/LanguageAdapterException",
+                            Some(format!(
+                                "Could not instantiate class {}!",
+                                class_name.replace('/', ".")
+                            )),
+                            None,
+                        );
+                        if let Some(marker) = jar_object::instance_key(&adapter) {
+                            runtime.host.record_throwable_cause(marker, invocation);
+                        }
+                        runtime
+                            .host
+                            .record_fabric_entrypoint_failure(kind, &class_name, adapter);
+                    }
+                    return Err(error);
+                }
                 runtime
                     .host
                     .note_entrypoint_constructed(kind, &class_name, &instance);
@@ -19722,21 +20353,25 @@ fn parse_callback_marker(marker: &str) -> Result<CallbackMarker, NativeError> {
 /// Evaluate the bounded truth surface of a predicate marker.  Java's default
 /// `Predicate` combinators are represented as markers, so they remain usable
 /// even though the interpreter does not materialize interface instances.
-fn predicate_marker_value(marker: &str) -> bool {
+///
+/// One level per combinator (#250): a chain as deep as a jar builds it ends in a
+/// `StackOverflowError`, as Java's default-method chain does.
+fn predicate_marker_value(marker: &str) -> Result<bool, NativeError> {
+    let _level = host_recursion::enter()?;
     if let Some(rest) = marker.strip_prefix("@fn:predicate.not:") {
-        return !predicate_marker_value(rest);
+        return Ok(!predicate_marker_value(rest)?);
     }
     if let Some(rest) = marker.strip_prefix("@fn:predicate.and:")
         && let Some((left, right)) = rest.split_once('|')
     {
-        return predicate_marker_value(left) && predicate_marker_value(right);
+        return Ok(predicate_marker_value(left)? && predicate_marker_value(right)?);
     }
     if let Some(rest) = marker.strip_prefix("@fn:predicate.or:")
         && let Some((left, right)) = rest.split_once('|')
     {
-        return predicate_marker_value(left) || predicate_marker_value(right);
+        return Ok(predicate_marker_value(left)? || predicate_marker_value(right)?);
     }
-    marker.starts_with("@indy:")
+    Ok(marker.starts_with("@indy:"))
 }
 
 /// The marker a `Predicate`/`Consumer`/`Function` combinator answers.
@@ -21192,6 +21827,9 @@ impl<H: Host> Runtime<'_, H> {
         marker: &Value,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        // One level of a composed callback (`andThen`, `compose`, #250): a chain as deep as a
+        // jar builds it ends in a `StackOverflowError`, as Java's lambda chain does.
+        let _level = host_recursion::enter()?;
         // A `Stream.Builder` handle, or a push's sink handed to a
         // spliterator, is a `Consumer` (`stream_pipeline.rs`).
         if let Some(value) = self.stream_callback(marker, args)? {
@@ -21976,6 +22614,13 @@ impl<H: Host> Runtime<'_, H> {
             }
             if let Some(file) = self.class(&current) {
                 queue.extend(file.interface_names());
+            } else if current.starts_with("java/")
+                && host_ref::ClassHierarchy::is_instance(&host_ref::JdkHierarchy, &current, wanted)
+                    == Some(true)
+            {
+                // A JDK interface the jar names (`implements List`): Java 25's
+                // table knows its superinterfaces (`Collection`, #242).
+                return true;
             }
         }
         false
@@ -23474,7 +24119,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     return Ok(Some(Value::Void));
                 }
-                let Some(path) = self.io_paths.get(&marker).cloned() else {
+                let Some(path) = self.io_path_of(&Value::Ref(Some(marker.clone()))) else {
                     return Ok(None);
                 };
                 Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
@@ -24736,6 +25381,11 @@ impl<H: Host> Runtime<'_, H> {
     /// constants were declared in supplies the position. A receiver that is not
     /// such a marker, or a class this invocation never initialized, stays with
     /// the host's answer.
+    pub(crate) fn enum_ordinal_of(&self, value: &Value) -> Option<i32> {
+        let marker = expect_ref(value)?;
+        self.enum_constants.get(marker).map(|(_, ordinal)| *ordinal)
+    }
+
     fn declared_enum_ordinal(&mut self, marker: &str) -> Result<Option<Value>, NativeError> {
         let Some((class, name)) = marker
             .strip_prefix("enum/")
@@ -24960,6 +25610,86 @@ impl<H: Host> Runtime<'_, H> {
         Ok(None)
     }
 
+    /// Where a throw that a call at `at` raised goes: this frame's handler that catches it
+    /// (its program counter and the throwable it receives), or the error leaving the frame.
+    ///
+    /// A Java throw is delivered by its class. A jar recursion past the thread's stack
+    /// ([`NativeError::CallDepthExceeded`], `frame_bound.rs`) is Java's `StackOverflowError`
+    /// (#250): a handler for it (or `Error`/`Throwable`) catches it, as on the JVM; with none it
+    /// leaves as the bound's own diagnostic. Any other error leaves with this frame's context.
+    /// Kept out of line so `invoke_frame`, which delivers at every call site, keeps a small
+    /// frame (the jar-frame bound is measured in those frames).
+    #[inline(never)]
+    fn deliver_throw(
+        &mut self,
+        error: NativeError,
+        file: &ClassFile,
+        class: &str,
+        method: &str,
+        desc: &str,
+        at: usize,
+    ) -> Result<(usize, Value), NativeError> {
+        // A host walk's refusal (`host_recursion.rs`) reaches the jar here: counted before any
+        // handler sees its throw.
+        self.count_bound_refusals()?;
+        match error {
+            NativeError::UncaughtException {
+                class: thrown,
+                message,
+                frame,
+            } => {
+                if let Some(handler) = self.exception_handler(file, method, desc, at, &thrown)? {
+                    let value = self.caught_throwable(&thrown, message, frame.as_deref());
+                    return Ok((handler, value));
+                }
+                Err(NativeError::UncaughtException {
+                    class: thrown,
+                    message,
+                    frame: frame.or_else(|| Some(format!("{class}#{method} +{at}"))),
+                })
+            }
+            error @ NativeError::CallDepthExceeded { limit, .. } => {
+                // A table that cannot be read catches nothing: the bound's error stands.
+                if let Ok(Some(handler)) =
+                    self.exception_handler(file, method, desc, at, host_recursion::STACK_OVERFLOW)
+                {
+                    // The bound is the host's native stack (`frame_bound.rs`), far shallower than
+                    // the JVM's: a finite recursion Java finishes (`sum(2000)`) is refused here,
+                    // and even an endless one does not overflow where Java's would. The jar gets
+                    // Java's catchable throw; the conversion is counted, naming the bound and the
+                    // depth, so the run is never silent (#260 review). A strict host refuses.
+                    self.count_bound("frame-bound", limit)?;
+                    let value = self.caught_throwable(host_recursion::STACK_OVERFLOW, None, None);
+                    return Ok((handler, value));
+                }
+                Err(error)
+            }
+            error => Err(frame_context(error, class, method, at)),
+        }
+    }
+
+    /// Count one `StackOverflowError` the runtime raised from its own `bound` at `depth`
+    /// (`java/lang/StackOverflowError#<BOUND:DEPTH>()V`): the bound decided it, not Java.
+    fn count_bound(&mut self, bound: &str, depth: usize) -> Result<(), NativeError> {
+        self.host
+            .unknown_operand_call(&MethodRef {
+                owner: host_recursion::STACK_OVERFLOW.into(),
+                name: format!("<{bound}:{depth}>"),
+                descriptor: "()V".into(),
+            })
+            .map(|_| ())
+    }
+
+    /// Count the host walks' refusals since the last count (`host_recursion.rs`).
+    fn count_bound_refusals(&mut self) -> Result<(), NativeError> {
+        for (depth, times) in host_recursion::take_refusals() {
+            for _ in 0..times {
+                self.count_bound("host-walk-bound", depth)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The throwable value a Java handler receives for a throw the host or a
     /// nested frame raised, tagged with the message the throw carries.
     fn caught_throwable(
@@ -24973,9 +25703,17 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.caught_object(class, &message, frame) {
             return value;
         }
+        let pending_cause = self.host.take_wrapped_cause(class, &message);
+        let pending_suppressed = self.host.take_wrapped_suppressed(class, &message);
         let value = self.new_object(class);
         if let Some(marker) = expect_ref(&value) {
             self.host.record_throwable(marker, message);
+            if let Some(cause) = pending_cause {
+                self.host.record_throwable_cause(marker, cause);
+            }
+            for suppressed in pending_suppressed {
+                self.host.record_throwable_suppressed(marker, suppressed);
+            }
         }
         value
     }
@@ -25247,6 +25985,11 @@ impl<H: Host> Runtime<'_, H> {
         let result = self.invoke_frame(class, method, desc, receiver, args);
         stack_walk::leave();
         self.depth -= 1;
+        // An execution's end: a host walk's refusal no jar frame saw (the entrypoint's own
+        // host call, or one that left uncaught) is counted too.
+        if self.depth == 0 {
+            self.count_bound_refusals()?;
+        }
         result
     }
 
@@ -25260,6 +26003,29 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// One jar frame, executed instruction by instruction.
+    fn invoke_throwable_suppressed(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+    ) -> Result<Option<Value>, NativeError> {
+        if r.name != "getSuppressed"
+            || r.descriptor != "()[Ljava/lang/Throwable;"
+            || !is_throwable_owner(&r.owner)
+        {
+            return Ok(None);
+        }
+        let Some(marker) = receiver.and_then(jar_object::instance_key) else {
+            return Ok(None);
+        };
+        // One store for every `addSuppressed`: the host's (#269's entrypoint failures,
+        // #278's `whenComplete`), which the heap collector traces. `None` (a throwable the
+        // host doesn't hold) falls through to the other paths.
+        let Some(values) = self.host.throwable_suppressed(marker) else {
+            return Ok(None);
+        };
+        Ok(Some(self.new_array_value("[Ljava/lang/Throwable;", values)))
+    }
+
     fn invoke_frame(
         &mut self,
         class: &str,
@@ -25369,6 +26135,11 @@ impl<H: Host> Runtime<'_, H> {
                 name: method.to_owned(),
                 descriptor: desc.to_owned(),
             };
+            if let Some(receiver) = receiver.as_ref()
+                && let Some(value) = client_reload::runtime_instance_call(self, &r, receiver, args)
+            {
+                return value;
+            }
             return match receiver.as_ref() {
                 Some(receiver) => self.host.invoke_instance(&r, receiver, args),
                 None => self.host.invoke(&r, args),
@@ -25410,27 +26181,16 @@ impl<H: Host> Runtime<'_, H> {
             ($at:expr, $call:expr) => {
                 match $call {
                     Ok(value) => value,
-                    Err(NativeError::UncaughtException {
-                        class: thrown,
-                        message,
-                        frame,
-                    }) => {
-                        if let Some(handler) =
-                            self.exception_handler(file, method, desc, $at, &thrown)?
-                        {
-                            let value = self.caught_throwable(&thrown, message, frame.as_deref());
-                            stack.clear();
-                            stack.push(value);
-                            pc = handler;
-                            continue;
-                        }
-                        return Err(NativeError::UncaughtException {
-                            class: thrown,
-                            message,
-                            frame: frame.or_else(|| Some(format!("{class}#{method} +{}", $at))),
-                        });
+                    // One call per site: the delivery's code lives in `deliver_throw`, so a
+                    // frame of this function stays as small as the bound measured it.
+                    Err(error) => {
+                        let (handler, value) =
+                            self.deliver_throw(error, file, class, method, desc, $at)?;
+                        stack.clear();
+                        stack.push(value);
+                        pc = handler;
+                        continue;
                     }
-                    Err(error) => return Err(frame_context(error, class, method, $at)),
                 }
             };
         }
@@ -26586,11 +27346,21 @@ impl<H: Host> Runtime<'_, H> {
                         // A jar's own `BlockPos`/`LevelResource`: the game's
                         // members on its fields (`jar_server_values.rs`).
                         value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_throwable_suppressed(&r, receiver.as_ref())
+                    ) {
+                        value
                     } else if let Some(value) =
                         invoke_or_catch!(at, self.invoke_jar_throwable(&r, op, receiver.as_ref()))
                     {
                         // A jar exception's inherited `Throwable` text members
                         // (`jar_throwables.rs`).
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_throwable_metadata(&r, receiver.as_ref(), &args)
+                    ) {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
@@ -26991,6 +27761,15 @@ impl<H: Host> Runtime<'_, H> {
                             .flatten();
                             if let Some(value) = optional {
                                 value
+                            } else if let Some(value) = invoke_or_catch!(
+                                at,
+                                self.invoke_fabric_entrypoints(
+                                    &resolved,
+                                    receiver.as_ref(),
+                                    &args,
+                                )
+                            ) {
+                                value
                             } else if matches!(
                                 resolved.owner.as_str(),
                                 "java/util/function/Function"
@@ -27036,7 +27815,16 @@ impl<H: Host> Runtime<'_, H> {
                                     } else {
                                         invoke_or_catch!(
                                             at,
-                                            self.host.invoke_instance(&resolved, receiver, &args)
+                                            if let Some(value) =
+                                                client_reload::runtime_instance_call(
+                                                    self, &resolved, receiver, &args
+                                                )
+                                            {
+                                                value
+                                            } else {
+                                                self.host
+                                                    .invoke_instance(&resolved, receiver, &args)
+                                            }
                                         )
                                     }
                                 } else {
@@ -27068,13 +27856,28 @@ impl<H: Host> Runtime<'_, H> {
                                         ),
                                         None => invoke_or_catch!(
                                             at,
-                                            self.host.invoke_instance(&resolved, receiver, &args)
+                                            if let Some(value) =
+                                                client_reload::runtime_instance_call(
+                                                    self, &resolved, receiver, &args
+                                                )
+                                            {
+                                                value
+                                            } else {
+                                                self.host
+                                                    .invoke_instance(&resolved, receiver, &args)
+                                            }
                                         ),
                                     }
                                 } else {
                                     invoke_or_catch!(
                                         at,
-                                        self.host.invoke_instance(&resolved, receiver, &args)
+                                        if let Some(value) = client_reload::runtime_instance_call(
+                                            self, &resolved, receiver, &args
+                                        ) {
+                                            value
+                                        } else {
+                                            self.host.invoke_instance(&resolved, receiver, &args)
+                                        }
                                     )
                                 }
                             } else {
@@ -27177,7 +27980,7 @@ impl<H: Host> Runtime<'_, H> {
                         // `String` operand is already its text.
                         for (value, argument) in captured.iter_mut().zip(&arguments) {
                             if argument != "Ljava/lang/String;"
-                                && let Some(text) = self.host.modelled_to_string(value)
+                                && let Some(text) = self.host.modelled_to_string_checked(value)?
                             {
                                 *value = Value::Ref(Some(text));
                             }
@@ -29008,7 +29811,38 @@ fn read_fields(r: &mut Reader<'_>, pool: &[Cp]) -> Result<Vec<Field>, NativeErro
     }
     Ok(out)
 }
-fn read_methods(r: &mut Reader<'_>, pool: &[Cp]) -> Result<Vec<Method>, NativeError> {
+/// The error a `RuntimeVisibleAnnotations` attribute nested past [`MAX_ANNOTATION_DEPTH`] gives.
+const ANNOTATIONS_TOO_DEEP: &str = "annotation values nested too deeply";
+
+/// A `RuntimeVisibleAnnotations` attribute's annotations. One nested past
+/// [`MAX_ANNOTATION_DEPTH`] is skipped with a warning naming `owner`, never failing the class
+/// (and so the jar) it sits on (#260 review): the class loads without those annotations, as an
+/// unreadable invisible annotation's class does. Any other malformed attribute fails as before.
+fn read_visible_annotations(
+    bytes: &[u8],
+    pool: &[Cp],
+    owner: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Annotation>, NativeError> {
+    match read_annotations(&mut Reader::new(bytes), pool) {
+        Err(NativeError::InvalidClass(why)) if why == ANNOTATIONS_TOO_DEEP => {
+            push_class_annotation_warning(
+                warnings,
+                format!(
+                    "{owner}: annotations nest deeper than {MAX_ANNOTATION_DEPTH} levels; skipped"
+                ),
+            );
+            Ok(Vec::new())
+        }
+        other => other,
+    }
+}
+
+fn read_methods(
+    r: &mut Reader<'_>,
+    pool: &[Cp],
+) -> Result<(Vec<Method>, Vec<String>), NativeError> {
+    let mut warnings = Vec::new();
     let n = r.u2()? as usize;
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
@@ -29031,8 +29865,12 @@ fn read_methods(r: &mut Reader<'_>, pool: &[Cp]) -> Result<Vec<Method>, NativeEr
                 let len = c.u4()? as usize;
                 code = Some(c.bytes(len)?.to_owned());
             } else if attr == "RuntimeVisibleAnnotations" {
-                let mut body = Reader::new(bytes);
-                annotations.extend(read_annotations(&mut body, pool)?);
+                annotations.extend(read_visible_annotations(
+                    bytes,
+                    pool,
+                    &format!("method {name}{descriptor}"),
+                    &mut warnings,
+                )?);
             }
             // RuntimeInvisibleAnnotations and parameter annotations are not
             // needed for Mixin discovery; their bytes were already bounded by
@@ -29048,7 +29886,7 @@ fn read_methods(r: &mut Reader<'_>, pool: &[Cp]) -> Result<Vec<Method>, NativeEr
             annotations,
         });
     }
-    Ok(out)
+    Ok((out, warnings))
 }
 fn skip_attributes(r: &mut Reader<'_>, pool: &[Cp]) -> Result<(), NativeError> {
     let n = r.u2()? as usize;
@@ -29094,8 +29932,12 @@ fn read_class_attributes(
         let bytes = r.bytes(length)?;
         match name.as_str() {
             "RuntimeVisibleAnnotations" => {
-                let mut body = Reader::new(bytes);
-                annotations.extend(read_annotations(&mut body, pool)?);
+                annotations.extend(read_visible_annotations(
+                    bytes,
+                    pool,
+                    "class",
+                    &mut warnings,
+                )?);
             }
             "RuntimeInvisibleAnnotations" => {
                 read_invisible_mixin_annotations(bytes, pool, &mut annotations, &mut warnings);
@@ -29214,18 +30056,46 @@ fn read_annotations(r: &mut Reader<'_>, pool: &[Cp]) -> Result<Vec<Annotation>, 
     })
 }
 
+/// How deep annotation values may nest (an array or annotation inside another). The JVM sets
+/// no limit, but the reader is Rust recursion over the class file's bytes, which a jar chooses:
+/// three bytes per nested array would otherwise overflow the native stack while the jar loads
+/// (#250). javac writes a handful of levels; an attribute nested deeper is skipped with a warning
+/// (`read_visible_annotations`), never failing its class or jar.
+const MAX_ANNOTATION_DEPTH: usize = 64;
+
 fn read_annotation(r: &mut Reader<'_>, pool: &[Cp]) -> Result<Annotation, NativeError> {
+    read_annotation_at(r, pool, 0)
+}
+
+fn read_annotation_at(
+    r: &mut Reader<'_>,
+    pool: &[Cp],
+    depth: usize,
+) -> Result<Annotation, NativeError> {
     let descriptor = utf8(pool, r.u2()?)?;
     let pair_count = r.u2()? as usize;
     let mut values = BTreeMap::new();
     for _ in 0..pair_count {
         let name = utf8(pool, r.u2()?)?;
-        values.insert(name, read_annotation_value(r, pool)?);
+        values.insert(name, read_annotation_value_at(r, pool, depth + 1)?);
     }
     Ok(Annotation { descriptor, values })
 }
 
 fn read_annotation_value(r: &mut Reader<'_>, pool: &[Cp]) -> Result<AnnotationValue, NativeError> {
+    read_annotation_value_at(r, pool, 0)
+}
+
+fn read_annotation_value_at(
+    r: &mut Reader<'_>,
+    pool: &[Cp],
+    depth: usize,
+) -> Result<AnnotationValue, NativeError> {
+    if depth > MAX_ANNOTATION_DEPTH {
+        return Err(NativeError::InvalidClass(
+            "annotation values nested too deeply",
+        ));
+    }
     match r.u1()? {
         b's' => Ok(AnnotationValue::String(utf8(pool, r.u2()?)?)),
         b'Z' => match int_constant(pool, r.u2()?)? {
@@ -29248,14 +30118,16 @@ fn read_annotation_value(r: &mut Reader<'_>, pool: &[Cp]) -> Result<AnnotationVa
         // A class constant in an annotation is a field descriptor such as
         // `Lnet/minecraft/world/level/Level;`.
         b'c' => Ok(AnnotationValue::String(utf8(pool, r.u2()?)?)),
-        b'@' => Ok(AnnotationValue::Annotation(Box::new(read_annotation(
-            r, pool,
+        b'@' => Ok(AnnotationValue::Annotation(Box::new(read_annotation_at(
+            r,
+            pool,
+            depth + 1,
         )?))),
         b'[' => {
             let count = r.u2()? as usize;
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(read_annotation_value(r, pool)?);
+                items.push(read_annotation_value_at(r, pool, depth + 1)?);
             }
             Ok(AnnotationValue::Array(items))
         }
@@ -29675,6 +30547,26 @@ fn mixin_target_owners(mixin: &Annotation) -> Vec<String> {
 }
 
 /// A boolean annotation element; absent or non-boolean is false.
+/// The bounded injector does not implement Mixin's injection-count or local-capture metadata.
+/// Refuse non-default values so a game-hook plan is counted instead of silently claiming the
+/// loader would have accepted or warned about it.
+fn injection_metadata_requires_refusal(annotation: &Annotation) -> bool {
+    let nonzero = |key: &str| {
+        matches!(
+            annotation.values.get(key),
+            Some(AnnotationValue::Int(value)) if *value != 0
+        )
+    };
+    if nonzero("require") || nonzero("expect") {
+        return true;
+    }
+    match annotation.values.get("locals") {
+        None => false,
+        Some(AnnotationValue::String(value)) => value.rsplit('.').next() != Some("NO_CAPTURE"),
+        Some(_) => true,
+    }
+}
+
 fn annotation_bool(annotation: &Annotation, key: &str) -> bool {
     matches!(
         annotation.values.get(key),
@@ -41829,6 +42721,73 @@ mandatory = true
             host_collection_values(&host, &entries).unwrap(),
             Vec::<Value>::new()
         );
+    }
+
+    /// Annotation values nested as deep as a class file's bytes allow are refused as an invalid
+    /// class, never read by recursion until the native stack overflows (#250); a few levels
+    /// read as ever.
+    /// A `RuntimeVisibleAnnotations` attribute nested past the depth bound is skipped with a
+    /// warning naming its owner: its class (and jar) still load (#260 review). One within the
+    /// bound reads as ever.
+    #[test]
+    fn a_too_deep_visible_annotation_is_skipped_with_a_warning() {
+        let pool = vec![
+            Cp::Empty,
+            Cp::Utf8("Ldemo/Deep;".into()),
+            Cp::Utf8("value".into()),
+            Cp::Integer(7),
+        ];
+        let attribute = |levels: usize| {
+            // One annotation `@Deep(value = [[[...7...]]])`.
+            let mut bytes = vec![0, 1, 0, 1, 0, 1, 0, 2];
+            for _ in 0..levels {
+                bytes.extend_from_slice(&[b'[', 0, 1]);
+            }
+            bytes.extend_from_slice(&[b'I', 0, 3]);
+            bytes
+        };
+        let mut warnings = Vec::new();
+        let deep =
+            read_visible_annotations(&attribute(100), &pool, "class", &mut warnings).unwrap();
+        assert!(deep.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].starts_with("class: annotations nest deeper"),
+            "{warnings:?}"
+        );
+        let mut warnings = Vec::new();
+        let shallow =
+            read_visible_annotations(&attribute(3), &pool, "class", &mut warnings).unwrap();
+        assert_eq!(shallow.len(), 1);
+        assert_eq!(shallow[0].descriptor, "Ldemo/Deep;");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn deeply_nested_annotation_values_are_refused() {
+        let pool = vec![Cp::Empty, Cp::Integer(7)];
+        let nested = |levels: usize| {
+            let mut bytes = Vec::with_capacity(levels * 3 + 3);
+            for _ in 0..levels {
+                bytes.extend_from_slice(&[b'[', 0, 1]);
+            }
+            bytes.extend_from_slice(&[b'I', 0, 1]);
+            bytes
+        };
+        let deep = nested(100_000);
+        assert!(matches!(
+            read_annotation_value(&mut Reader::new(&deep), &pool),
+            Err(NativeError::InvalidClass(_))
+        ));
+        let shallow = nested(3);
+        let mut value = read_annotation_value(&mut Reader::new(&shallow), &pool).unwrap();
+        for _ in 0..3 {
+            let AnnotationValue::Array(mut items) = value else {
+                panic!("{value:?}")
+            };
+            value = items.remove(0);
+        }
+        assert_eq!(value, AnnotationValue::Int(7));
     }
 
     #[test]

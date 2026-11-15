@@ -199,9 +199,7 @@ impl Store {
     }
 
     fn rows_for(&self, key: &str) -> Option<Vec<(Value, Value, Value)>> {
-        let Some((rows, _, _)) = self.table_state(key) else {
-            return None;
-        };
+        let (rows, _, _) = self.table_state(key)?;
         Some(
             rows.iter()
                 .flat_map(|row| {
