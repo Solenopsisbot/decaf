@@ -87,6 +87,10 @@ fn fixture() -> Fixture {
             ("demo/Review.java", REVIEW),
             ("demo/Woven.java", WOVEN),
             ("org/spongepowered/asm/mixin/Mixin.java", MIXIN_STUB),
+            (
+                "net/minecraft/core/Direction.java",
+                "package net.minecraft.core; public enum Direction { DOWN, UP, NORTH, SOUTH, WEST, EAST }",
+            ),
         ],
     )
 }
@@ -157,6 +161,46 @@ fn a_jar_class_answers_from_its_class_file() {
     assert_eq!(
         run("members"),
         ("1111111111111111,2,GREEN,9,1545,1".to_owned(), Vec::new())
+    );
+}
+
+#[test]
+fn enum_value_of_collections_and_jdk_reflection_match_java_25() {
+    let (text, unknown) = run("enumReview");
+    assert_eq!(
+        text,
+        "iae:iae:iae:2:a-body:B:true:[a-body, B]:{a-body=aye, B=bee}:6:NEW:true:NEW:demo.Probe$E"
+    );
+    assert!(
+        !unknown
+            .iter()
+            .any(|(call, _)| call.contains("java/util/EnumSet"))
+    );
+    assert!(
+        !unknown
+            .iter()
+            .any(|(call, _)| call.contains("java/util/EnumMap"))
+    );
+}
+
+#[test]
+fn enum_reflection_and_value_of_match_java_25() {
+    let (text, unknown) = run("enumReflectionRecheck");
+    assert_eq!(
+        text,
+        "java.lang.NullPointerException: Name is null|java.lang.NullPointerException: Cannot invoke \"java.lang.Class.enumConstantDirectory()\" because \"enumClass\" is null|java.lang.IllegalArgumentException: java.lang.String is not an enum class|false,true|[a-body, B]|true|[NANOSECONDS, MICROSECONDS, MILLISECONDS, SECONDS, MINUTES, HOURS, DAYS]|[NANOSECONDS, MICROSECONDS, MILLISECONDS, SECONDS, MINUTES, HOURS, DAYS]|[NEW, RUNNABLE, BLOCKED, WAITING, TIMED_WAITING, TERMINATED]|[NEW, RUNNABLE, BLOCKED, WAITING, TIMED_WAITING, TERMINATED]|[DOWN, UP, NORTH, SOUTH, WEST, EAST]|true"
+    );
+    assert!(unknown.is_empty(), "{unknown:?}");
+}
+
+#[test]
+fn enum_declaring_class_handles_constant_specific_bodies() {
+    assert_eq!(
+        run("enumClasses"),
+        (
+            "false,true,true,2,kind-a,B,true,demo.Probe$Kind$1".to_owned(),
+            Vec::new()
+        )
     );
 }
 

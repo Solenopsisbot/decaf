@@ -46,6 +46,7 @@ mod dfu_either;
 mod dfu_pair;
 mod dfu_pair_ops;
 mod entrypoint_role;
+mod enum_collections;
 mod enum_value_of;
 pub mod events;
 mod executors;
@@ -12005,6 +12006,14 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
         // SLF4J ships with the game; logging shims switch over its levels
         // (javac's `$SwitchMap` sizes its table from `values()`).
         "org/slf4j/event/Level" => &["ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
+        "java/lang/Thread$State" => &[
+            "NEW",
+            "RUNNABLE",
+            "BLOCKED",
+            "WAITING",
+            "TIMED_WAITING",
+            "TERMINATED",
+        ],
         // The JDK's open options, checked by `Files`' writers (`open_options.rs`).
         "java/nio/file/StandardOpenOption" => open_options::STANDARD_OPEN_OPTIONS,
         // `Collector.of`'s characteristics (`stream_pipeline.rs`).
@@ -12454,6 +12463,12 @@ fn value_text(value: &Value) -> String {
         Value::Boxed(boxed) => boxed.text(),
         Value::Host(_) => host_text(value),
         Value::Ref(Some(value)) => {
+            if let Some((_, name)) = value
+                .strip_prefix("enum/")
+                .and_then(|rest| rest.rsplit_once('/'))
+            {
+                return name.to_owned();
+            }
             // A marker whose Java `toString` is its payload: string
             // concatenation goes through `String.valueOf`, not the modelled
             // instance method.
@@ -13411,6 +13426,12 @@ fn object_text(host: &mut StdHost, value: &Value) -> Result<String, NativeError>
             }
         },
         Value::Ref(Some(marker)) => {
+            if let Some((_, name)) = marker
+                .strip_prefix("enum/")
+                .and_then(|rest| rest.rsplit_once('/'))
+            {
+                return Ok(name.to_owned());
+            }
             java_tostring::modelled_checked(host, value)?.unwrap_or_else(|| {
                 // An object no model prints (a jar object, an identity hash)
                 // is counted; the element keeps its marker in the text. A
@@ -24194,6 +24215,11 @@ impl<H: Host> Runtime<'_, H> {
         if r.name != "values" {
             return None;
         }
+        if let Some(values) = crate::enum_value_of::known_enum_values(&r.owner)
+            && r.descriptor == format!("()[L{};", r.owner)
+        {
+            return Some(self.new_array_value(&format!("[L{};", r.owner), values));
+        }
         // A loader enum whose constants are host handles (`ModConfig.Type`).
         if let Some(values) = crate::host_neoforge_loader::enum_values(&r.owner)
             .or_else(|| crate::host_fabric_runtime::enum_values(&r.owner))
@@ -25739,6 +25765,9 @@ impl<H: Host> Runtime<'_, H> {
         let marker = expect_ref(receiver.unwrap_or(&Value::Ref(None)));
         let recorded = marker.and_then(|marker| self.enum_constants.get(marker).cloned());
         match (r.name.as_str(), r.descriptor.as_str()) {
+            ("getDeclaringClass", "()Ljava/lang/Class;") => Ok(self
+                .enum_declaring_class(receiver)
+                .map(|class| host_class::class_value(&class))),
             ("name", "()Ljava/lang/String;") | ("toString", "()Ljava/lang/String;") => {
                 Ok(recorded.map(|(name, _)| Value::Ref(Some(name))))
             }
@@ -25751,6 +25780,31 @@ impl<H: Host> Runtime<'_, H> {
             },
             _ => Ok(None),
         }
+    }
+
+    fn enum_declaring_class(&self, receiver: Option<&Value>) -> Option<String> {
+        let marker = receiver.and_then(expect_ref)?;
+        let runtime_class = jar_object::object_class(receiver?).or_else(|| {
+            marker
+                .strip_prefix("enum/")
+                .and_then(|rest| rest.rsplit_once('/'))
+                .map(|(class, _)| class)
+        })?;
+        if !self.has_class(runtime_class) {
+            return game_enum_constants(runtime_class).map(|_| runtime_class.to_owned());
+        }
+        let mut class = runtime_class.to_owned();
+        for _ in 0..64 {
+            let file = self.class(&class)?;
+            if file.super_name == "java/lang/Enum" {
+                return Some(class);
+            }
+            if file.super_name.is_empty() || file.super_name == class {
+                return None;
+            }
+            class = file.super_name.clone();
+        }
+        None
     }
 
     /// The ordinal of one `enum/<class>/<name>` marker: its position in the
@@ -27791,6 +27845,11 @@ impl<H: Host> Runtime<'_, H> {
                     ) {
                         // A jar's copy of a loader class its run's loader
                         // lacks (`class_precedence.rs`).
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_enum_collection(&r, receiver.as_ref(), &args)
+                    ) {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
