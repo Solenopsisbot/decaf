@@ -305,6 +305,10 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     pub(crate) fn java_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
+        if matches!(value, Value::Host(handle) if matches!(handle.kind(), crate::host_ref::HostKind::GuavaTable | crate::host_ref::HostKind::GuavaCell))
+        {
+            return self.guava_table_hash(value);
+        }
         // One level of a nested `hashCode` (#250): a list holding itself recurses on the JVM
         // too, and ends in a `StackOverflowError` the jar can catch.
         let _level = crate::host_recursion::enter()?;
@@ -501,6 +505,20 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `a.equals(b)` for a non-null `a`, as the JVM runs it.
     pub(crate) fn java_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
+        if matches!(a, Value::Host(handle) if matches!(handle.kind(), crate::host_ref::HostKind::GuavaTable | crate::host_ref::HostKind::GuavaCell))
+        {
+            return match self.guava_table_equals(a, b)? {
+                Some(equal) => Ok(equal),
+                None => {
+                    self.host.unknown_operand_call(&MethodRef {
+                        owner: "java/lang/Object".into(),
+                        name: "equals".into(),
+                        descriptor: EQUALS.into(),
+                    })?;
+                    Ok(false)
+                }
+            };
+        }
         // One level of a nested `equals` (#250).
         let _level = crate::host_recursion::enter()?;
         if let Some(equal) = self.subclass_token_equals(a, b) {
@@ -835,6 +853,23 @@ impl<H: Host> Runtime<'_, H> {
         let Some(Value::Host(handle)) = receiver else {
             return Ok(None);
         };
+        if matches!(
+            handle.kind(),
+            crate::host_ref::HostKind::GuavaTable | crate::host_ref::HostKind::GuavaCell
+        ) {
+            return match (r.name.as_str(), r.descriptor.as_str(), args) {
+                ("toString", "()Ljava/lang/String;", []) => Ok(self
+                    .guava_table_text(&Value::Host(handle.clone()))?
+                    .map(|text| Value::Ref(Some(text)))),
+                ("hashCode", "()I", []) => Ok(self
+                    .guava_table_hash(&Value::Host(handle.clone()))?
+                    .map(Value::Int)),
+                ("equals", "(Ljava/lang/Object;)Z", [other]) => Ok(self
+                    .guava_table_equals(&Value::Host(handle.clone()), other)?
+                    .map(|equal| Value::Int(i32::from(equal)))),
+                _ => Ok(None),
+            };
+        }
         // An object's methods are its class's: dispatched like any call.
         if !matches!(opcode, 0xb6 | 0xb9) || crate::jar_object::is_object_handle(handle) {
             return Ok(None);
@@ -881,6 +916,12 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<String>, NativeError> {
+        if matches!(
+            handle.kind(),
+            crate::host_ref::HostKind::GuavaTable | crate::host_ref::HostKind::GuavaCell
+        ) {
+            return self.guava_table_text(&Value::Host(handle.clone()));
+        }
         handle.to_string(&mut RuntimeNested {
             runtime: self,
             class,

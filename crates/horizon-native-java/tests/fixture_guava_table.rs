@@ -15,32 +15,35 @@ public interface Table<R,C,V> {
   Map<R,Map<C,V>> rowMap(); Map<C,Map<R,V>> columnMap();
   Set<Cell<R,C,V>> cellSet(); Set<R> rowKeySet(); Set<C> columnKeySet();
   Collection<V> values(); int size(); boolean isEmpty(); void clear();
+  interface Cell<R,C,V> { R getRowKey(); C getColumnKey(); V getValue(); }
 }
 "#;
 
 const HASH_STUB: &str = r#"package com.google.common.collect;
-public final class HashBasedTable<R,C,V> {
-  public static <R,C,V> Table<R,C,V> create() { throw new AssertionError(); }
-  public static <R,C,V> Table<R,C,V> create(int r, int c) { throw new AssertionError(); }
+public abstract class HashBasedTable<R,C,V> implements Table<R,C,V> {
+  public static <R,C,V> HashBasedTable<R,C,V> create() { throw new AssertionError(); }
+  public static <R,C,V> HashBasedTable<R,C,V> create(int r, int c) { throw new AssertionError(); }
+  public static <R,C,V> HashBasedTable<R,C,V> create(Table<? extends R, ? extends C, ? extends V> t) { throw new AssertionError(); }
 }
 "#;
 
 const TREE_STUB: &str = r#"package com.google.common.collect;
 import java.util.*;
-public final class TreeBasedTable<R,C,V> {
-  public static <R extends Comparable<? super R>,C extends Comparable<? super C>,V> Table<R,C,V> create() { throw new AssertionError(); }
-  public static <R,C,V> Table<R,C,V> create(Comparator<? super R> r, Comparator<? super C> c) { throw new AssertionError(); }
+public abstract class TreeBasedTable<R,C,V> implements Table<R,C,V> {
+  public static <R extends Comparable<? super R>,C extends Comparable<? super C>,V> TreeBasedTable<R,C,V> create() { throw new AssertionError(); }
+  public static <R,C,V> TreeBasedTable<R,C,V> create(Comparator<? super R> r, Comparator<? super C> c) { throw new AssertionError(); }
+  public static <R,C,V> TreeBasedTable<R,C,V> create(TreeBasedTable<R,C,? extends V> t) { throw new AssertionError(); }
 }
 "#;
 
 const IMMUTABLE_STUB: &str = r#"package com.google.common.collect;
-public final class ImmutableTable<R,C,V> {
-  public static <R,C,V> Table<R,C,V> of() { throw new AssertionError(); }
-  public static <R,C,V> Table<R,C,V> of(R r,C c,V v) { throw new AssertionError(); }
+public abstract class ImmutableTable<R,C,V> {
+  public static <R,C,V> ImmutableTable<R,C,V> of() { throw new AssertionError(); }
+  public static <R,C,V> ImmutableTable<R,C,V> of(R r,C c,V v) { throw new AssertionError(); }
   public static <R,C,V> Builder<R,C,V> builder() { throw new AssertionError(); }
   public static final class Builder<R,C,V> {
     public Builder<R,C,V> put(R r,C c,V v) { throw new AssertionError(); }
-    public Table<R,C,V> build() { throw new AssertionError(); }
+    public ImmutableTable<R,C,V> build() { throw new AssertionError(); }
   }
 }
 "#;
@@ -48,13 +51,10 @@ public final class ImmutableTable<R,C,V> {
 const TABLES_STUB: &str = r#"package com.google.common.collect;
 import java.util.*; import java.util.function.Supplier;
 public final class Tables {
+  public static <R,C,V> Table.Cell<R,C,V> immutableCell(R r, C c, V v) { throw new AssertionError(); }
   public static <R,C,V> Table<R,C,V> newCustomTable(Map<R,Map<C,V>> m, Supplier<Map<C,V>> s) { throw new AssertionError(); }
   public static <R,C,V> Table<R,C,V> synchronizedTable(Table<R,C,V> t) { throw new AssertionError(); }
 }
-"#;
-
-const CELL_STUB: &str = r#"package com.google.common.collect;
-public interface Cell<R,C,V> { R getRowKey(); C getColumnKey(); V getValue(); }
 "#;
 
 const PROBE: &str = r#"package demo;
@@ -75,12 +75,27 @@ public class Probe {
     Table<String,String,Integer> t = HashBasedTable.create();
     t.put("r", "c", 7);
     Map<String,Integer> row = t.row("r");
-    Cell<String,String,Integer> cell = t.cellSet().iterator().next();
+    Table.Cell<String,String,Integer> cell = t.cellSet().iterator().next();
     return t.get("r", "c") + "," + t.contains("r", "c") + ","
       + row.get("c") + "," + row.size() + "," + t.rowKeySet().size() + ","
       + t.cellSet().size() + "," + cell.getRowKey() + "," + cell.getColumnKey()
       + "," + cell.getValue();
   }
+  public static String equalityHashAndCell() {
+    Table<String,String,Integer> t = HashBasedTable.create();
+    t.put("r", "c", 7);
+    Table<String,String,Integer> same = HashBasedTable.create();
+    same.put("r", "c", 7);
+    Table.Cell<String,String,Integer> cell = t.cellSet().iterator().next();
+    Table.Cell<String,String,Integer> equal = Tables.immutableCell("r", "c", 7);
+    Table.Cell<String,String,Integer> different = Tables.immutableCell("r", "c", 8);
+    return t.toString() + "|" + t.equals(same) + "," + t.equals("x")
+      + "|" + (t.hashCode() == t.cellSet().hashCode()) + "|" + cell
+      + "|" + cell.equals(equal) + "," + cell.equals(different)
+      + "|" + cell.hashCode() + "," + equal.hashCode()
+      + "|" + t.cellSet().contains(equal) + "," + t.cellSet().contains(different);
+  }
+
   public static String liveAndFailFast() {
     Table<String,String,Integer> t = HashBasedTable.create();
     t.put("r", "a", 1);
@@ -115,7 +130,6 @@ fn fixture() -> Fixture {
                 IMMUTABLE_STUB,
             ),
             ("com/google/common/collect/Tables.java", TABLES_STUB),
-            ("com/google/common/collect/Cell.java", CELL_STUB),
             ("demo/Probe.java", PROBE),
         ],
     )
@@ -127,7 +141,7 @@ fn table_surface_counts_unmodelled_members() {
     let mut host = fixture.jar.seed_host(StdHost::new());
     assert_eq!(
         fixture.text_on(&mut host, "core"),
-        "2,4,false,false,4,null,[],[],null"
+        "2,4,false,false,4,{b={y=4, z=3}, a={x=1, q=7}},[],[],{b={y=4, z=3}, a={x=1, q=7}}"
     );
     let calls = host.unknown_host_calls();
     for expected in [
@@ -143,6 +157,10 @@ fn table_surface_counts_unmodelled_members() {
         );
     }
     assert_eq!(fixture.text_on(&mut host, "narrow"), "7,true,7,1,1,1,r,c,7");
+    assert_eq!(
+        fixture.text_on(&mut host, "equalityHashAndCell"),
+        "{r={c=7}}|true,false|true|(r,c)=7|true,false|142421,142421|true,false"
+    );
     assert_eq!(fixture.text_on(&mut host, "liveAndFailFast"), "true,true");
     assert_eq!(fixture.text_on(&mut host, "nulls"), "npe");
 }

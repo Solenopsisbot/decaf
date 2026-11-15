@@ -119,20 +119,30 @@ fn value_text(value: &Value) -> String {
         .to_owned()
 }
 
-fn new_cell(table: &Value, row: &Value, column: &Value) -> Value {
+fn new_cell(table: &Value, row: &Value, column: &Value, cell_value: &Value) -> Value {
     Value::Host(HostRef::of_values(
         HostKind::GuavaCell,
-        &[table.clone(), row.clone(), column.clone()],
+        &[
+            table.clone(),
+            row.clone(),
+            column.clone(),
+            cell_value.clone(),
+        ],
     ))
 }
 
-fn cell_parts(value: &Value) -> Option<(Value, Value, Value)> {
+fn cell_parts(value: &Value) -> Option<(Value, Value, Value, Value)> {
     let handle = cell_key(value)?;
     let values = handle.values()?;
-    let [table, row, column] = values.as_slice() else {
+    let [table, row, column, cell_value] = values.as_slice() else {
         return None;
     };
-    Some((table.clone(), row.clone(), column.clone()))
+    Some((
+        table.clone(),
+        row.clone(),
+        column.clone(),
+        cell_value.clone(),
+    ))
 }
 
 impl Store {
@@ -239,7 +249,7 @@ impl Store {
             }
             ViewKind::Cells => cells
                 .into_iter()
-                .map(|(row, column, _)| new_cell(&table_handle(&root), &row, &column))
+                .map(|(row, column, value)| new_cell(&table_handle(&root), &row, &column, &value))
                 .collect(),
         })
     }
@@ -350,27 +360,36 @@ impl Store {
                 && r.name == "create"
                 && matches!(
                     r.descriptor.as_str(),
-                    "()Lcom/google/common/collect/Table;" | "(II)Lcom/google/common/collect/Table;"
+                    "()Lcom/google/common/collect/HashBasedTable;"
+                        | "(II)Lcom/google/common/collect/HashBasedTable;"
+                        | "(Lcom/google/common/collect/Table;)Lcom/google/common/collect/HashBasedTable;"
                 )
             {
                 return Ok(Some(self.new_table()));
+            }
+            if r.owner == "com/google/common/collect/Tables"
+                && r.name == "immutableCell"
+                && r.descriptor
+                    == "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Lcom/google/common/collect/Table$Cell;"
+            {
+                let row = require(args.first())?.clone();
+                let column = require(args.get(1))?.clone();
+                let value = require(args.get(2))?.clone();
+                return Ok(Some(new_cell(&Value::Ref(None), &row, &column, &value)));
             }
             return Ok(None);
         }
         let Some(receiver) = receiver else {
             return Ok(None);
         };
-        if let Some((table, row, column)) = cell_parts(receiver) {
-            let Some(table) = table_key(&table).map(str::to_owned) else {
+        if let Some((table, row, column, cell_value)) = cell_parts(receiver) {
+            let Some(_table) = table_key(&table).map(str::to_owned) else {
                 return Ok(None);
             };
             return Ok(match (r.name.as_str(), r.descriptor.as_str()) {
                 ("getRowKey", "()Ljava/lang/Object;") => Some(row),
                 ("getColumnKey", "()Ljava/lang/Object;") => Some(column),
-                ("getValue", "()Ljava/lang/Object;") => Some(
-                    self.row_lookup(&table, &row, &column)
-                        .unwrap_or(Value::Ref(None)),
-                ),
+                ("getValue", "()Ljava/lang/Object;") => Some(cell_value),
                 _ => None,
             });
         }
@@ -417,11 +436,16 @@ impl Store {
                         )));
                     }
                     ("contains", "(Ljava/lang/Object;)Z") => {
-                        let wanted = args.first();
-                        let found = wanted.and_then(cell_parts).is_some_and(
-                            |(table_value, row, column)| {
-                                table_key(&table_value).is_some_and(|table_key| table_key == root)
-                                    && self.row_lookup(&root, &row, &column).is_some()
+                        let Some((_, wanted_row, wanted_column, wanted_value)) =
+                            args.first().and_then(cell_parts)
+                        else {
+                            return Ok(Some(Value::Int(0)));
+                        };
+                        let found = self.rows_for(&root).unwrap_or_default().into_iter().any(
+                            |(row, column, value)| {
+                                same(&row, &wanted_row)
+                                    && same(&column, &wanted_column)
+                                    && same(&value, &wanted_value)
                             },
                         );
                         return Ok(Some(Value::Int(found as i32)));
@@ -582,6 +606,15 @@ impl Store {
         Ok(host_iterator::iterator(key))
     }
 
+    pub(crate) fn cells_for(&self, value: &Value) -> Option<Vec<(Value, Value, Value)>> {
+        let key = table_key(value)?;
+        self.rows_for(&self.table_root(key)?)
+    }
+
+    pub(crate) fn cell_snapshot(&self, value: &Value) -> Option<(Value, Value, Value, Value)> {
+        cell_parts(value)
+    }
+
     pub(crate) fn host_invoke(
         &mut self,
         r: &MethodRef,
@@ -700,6 +733,173 @@ impl Store {
 }
 
 impl<H: Host> Runtime<'_, H> {
+    pub(crate) fn guava_table_text(
+        &mut self,
+        value: &Value,
+    ) -> Result<Option<String>, NativeError> {
+        let text = if let Some((_, row, column, cell_value)) = self
+            .host
+            .guava_table_store()
+            .and_then(|store| store.cell_snapshot(value))
+        {
+            let row = self.value_of_text(&row, "Ljava/lang/Object;", "", "")?;
+            let column = self.value_of_text(&column, "Ljava/lang/Object;", "", "")?;
+            let value = self.value_of_text(&cell_value, "Ljava/lang/Object;", "", "")?;
+            format!("({row},{column})={value}")
+        } else {
+            let Some(cells) = self
+                .host
+                .guava_table_store()
+                .and_then(|store| store.cells_for(value))
+            else {
+                return Ok(None);
+            };
+            let mut rows: Vec<(Value, Vec<(Value, Value)>)> = Vec::new();
+            for (row, column, cell_value) in cells {
+                if let Some((_, values)) = rows.iter_mut().find(|(key, _)| *key == row) {
+                    values.push((column, cell_value));
+                } else {
+                    rows.push((row, vec![(column, cell_value)]));
+                }
+            }
+            let mut result = String::from("{");
+            for (index, (row, values)) in rows.into_iter().enumerate() {
+                if index > 0 {
+                    result.push_str(", ");
+                }
+                result.push_str(&self.value_of_text(&row, "Ljava/lang/Object;", "", "")?);
+                result.push_str("={");
+                for (column_index, (column, cell_value)) in values.into_iter().enumerate() {
+                    if column_index > 0 {
+                        result.push_str(", ");
+                    }
+                    result.push_str(&self.value_of_text(&column, "Ljava/lang/Object;", "", "")?);
+                    result.push('=');
+                    result.push_str(&self.value_of_text(
+                        &cell_value,
+                        "Ljava/lang/Object;",
+                        "",
+                        "",
+                    )?);
+                }
+                result.push('}');
+            }
+            result.push('}');
+            result
+        };
+        Ok(Some(text))
+    }
+
+    pub(crate) fn guava_table_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
+        let snapshot = self
+            .host
+            .guava_table_store()
+            .and_then(|store| store.cell_snapshot(value));
+        let Some((_, row, column, cell_value)) = snapshot else {
+            let cells = self
+                .host
+                .guava_table_store()
+                .and_then(|store| store.cells_for(value));
+            let Some(cells) = cells else {
+                return Ok(None);
+            };
+            let mut hash = 0i32;
+            for (row, column, cell_value) in cells {
+                let Some(row) = self.java_hash(&row)? else {
+                    return Ok(None);
+                };
+                let Some(column) = self.java_hash(&column)? else {
+                    return Ok(None);
+                };
+                let Some(cell_value) = self.java_hash(&cell_value)? else {
+                    return Ok(None);
+                };
+                hash = hash.wrapping_add(
+                    row.wrapping_add(31)
+                        .wrapping_mul(31)
+                        .wrapping_add(column)
+                        .wrapping_mul(31)
+                        .wrapping_add(cell_value),
+                );
+            }
+            return Ok(Some(hash));
+        };
+        let Some(row) = self.java_hash(&row)? else {
+            return Ok(None);
+        };
+        let Some(column) = self.java_hash(&column)? else {
+            return Ok(None);
+        };
+        let Some(cell_value) = self.java_hash(&cell_value)? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            row.wrapping_add(31)
+                .wrapping_mul(31)
+                .wrapping_add(column)
+                .wrapping_mul(31)
+                .wrapping_add(cell_value),
+        ))
+    }
+
+    pub(crate) fn guava_table_equals(
+        &mut self,
+        value: &Value,
+        other: &Value,
+    ) -> Result<Option<bool>, NativeError> {
+        let snapshot = self
+            .host
+            .guava_table_store()
+            .and_then(|store| store.cell_snapshot(value));
+        if let Some((_, row, column, cell_value)) = snapshot {
+            let other_snapshot = self
+                .host
+                .guava_table_store()
+                .and_then(|store| store.cell_snapshot(other));
+            let Some((_, other_row, other_column, other_value)) = other_snapshot else {
+                return Ok(Some(false));
+            };
+            return Ok(Some(
+                self.objects_equals(&row, &other_row)?
+                    && self.objects_equals(&column, &other_column)?
+                    && self.objects_equals(&cell_value, &other_value)?,
+            ));
+        }
+        let cells = self
+            .host
+            .guava_table_store()
+            .and_then(|store| store.cells_for(value));
+        let Some(cells) = cells else {
+            return Ok(None);
+        };
+        let other_cells = self
+            .host
+            .guava_table_store()
+            .and_then(|store| store.cells_for(other));
+        let Some(other_cells) = other_cells else {
+            return Ok(Some(false));
+        };
+        if cells.len() != other_cells.len() {
+            return Ok(Some(false));
+        }
+        for (row, column, cell_value) in cells {
+            let mut matched = false;
+            for (other_row, other_column, other_value) in &other_cells {
+                if self.objects_equals(&row, other_row)?
+                    && self.objects_equals(&column, other_column)?
+                    && self.objects_equals(&cell_value, other_value)?
+                {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return Ok(Some(false));
+            }
+        }
+        Ok(Some(true))
+    }
+
     /// The narrow Table surface; a host without a persistent Table store leaves
     /// every call unmodelled so the normal counted path handles it.
     pub(super) fn invoke_guava_table(
