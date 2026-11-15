@@ -1,0 +1,1 @@
+T|true|HTTP_2|NEVER|5|HTTP_1_1|ALWAYS|https://example.com/b|GET|missing-uri|bad-header|bad-value|zero-Invalid duration: PT0S|request-zero-Invalid duration: PT0S|restricted-restricted header name: "Host"|method-host|method-empty-illegal method <empty string>|method-bad-illegal method "bad name"|version-null|no-error

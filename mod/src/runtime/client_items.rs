@@ -600,6 +600,10 @@ fn item_member(
     Some(match (name, returns) {
         // Item.toString: its registered name.
         ("toString", _) => marker(id.to_owned()),
+        ("asItem", _) if block => {
+            let item_id = crate::runtime::vanilla_block_items::item_id(id)?;
+            marker(format!("{ITEM}{item_id}"))
+        }
         ("asItem", _) => item,
         ("getDescriptionId", _) => marker(format!(
             "{}.{namespace}.{path}",

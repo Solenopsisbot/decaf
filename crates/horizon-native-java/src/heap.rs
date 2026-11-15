@@ -294,6 +294,9 @@ impl StdHost {
         out.extend(self.packet_types.keys().map(String::as_str));
         out.extend(self.item_property_builders.keys().map(String::as_str));
         out.extend(self.block_property_builders.keys().map(String::as_str));
+        // `ItemLike.asItem()`'s bounded `Item.BY_BLOCK` knowledge is keyed by
+        // allocated mod objects. It is traced and pruned with the object
+        // rather than becoming a lifetime root.
         out.extend(self.resource_streams.keys().map(String::as_str));
         // The command tree's callbacks and requirement lambdas (`brigadier.rs`).
         self.brigadier_root_texts(out);
@@ -357,6 +360,7 @@ impl StdHost {
         push(self.hash_tables.get(marker), out);
         push(self.red_black_trees.get(marker), out);
         push(self.probe_tables.get(marker), out);
+        push(self.block_items.get(marker), out);
         // An `Arrays.asList` view's array, which its `get`/`set` work on, and
         // the view an iterator over one follows.
         push(self.array_view_array(marker), out);
@@ -383,6 +387,9 @@ impl StdHost {
             .chain(self.hash_tables.keys())
             .chain(self.red_black_trees.keys())
             .chain(self.probe_tables.keys())
+            .chain(self.constructed_items.iter())
+            .chain(self.constructed_blocks.iter())
+            .chain(self.block_items.keys())
             .chain(self.array_view_markers())
             .map(String::as_str)
     }
@@ -406,6 +413,9 @@ impl StdHost {
         self.hash_tables.retain(|key, _| keep(key));
         self.red_black_trees.retain(|key, _| keep(key));
         self.probe_tables.retain(|key, _| keep(key));
+        self.constructed_items.retain(|key| keep(key));
+        self.constructed_blocks.retain(|key| keep(key));
+        self.block_items.retain(|key, _| keep(key));
         self.mod_stamps.retain(|key, _| keep(key));
         self.deque_layouts.retain(|key, _| keep(key));
         self.empty_collections.retain(|key| keep(key));
@@ -1300,6 +1310,9 @@ mod tests {
             "content_builders",
             "item_property_builders",
             "block_property_builders",
+            "constructed_items",
+            "constructed_blocks",
+            "block_items",
             "payload_registrations",
             "payload_bytes",
             "fabric_entrypoint_containers",
@@ -1367,6 +1380,7 @@ mod tests {
             "resource_marks",
             "classes",
             "linked_classes",
+            "game_block_classes",
             "service_providers",
             "current_time_millis",
             "mods",
