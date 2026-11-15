@@ -5870,23 +5870,7 @@ impl Host for StdHost {
                 "java/lang/Enum",
                 "valueOf",
                 "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
-            ) => {
-                // The interpreter answers a jar enum and checks a game enum
-                // with a constant table (`enum_value_of.rs`); what reaches the
-                // host is a class whose constants nobody here knows, so the
-                // name cannot be checked: the marker is answered, and counted.
-                let class = class_binary_name(Self::argument(r, args, 0)?).replace('.', "/");
-                let name = expect_string(Self::argument(r, args, 1)?);
-                if name.is_empty() {
-                    return Err(NativeError::Metadata(
-                        "java/lang/Enum.valueOf received an empty name".into(),
-                    ));
-                }
-                if game_enum_constants(&class).is_none() {
-                    self.unknown_host_call(r)?;
-                }
-                Ok(Value::Ref(Some(format!("enum/{class}/{name}"))))
-            }
+            ) => self.unknown_host_call(r),
             // UUIDs are common in loader metadata, player identity, and
             // registration diagnostics. Keep them as canonical markers so
             // equality/string formatting is deterministic without a JVM.
@@ -11340,6 +11324,14 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
         // SLF4J ships with the game; logging shims switch over its levels
         // (javac's `$SwitchMap` sizes its table from `values()`).
         "org/slf4j/event/Level" => &["ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
+        "java/lang/Thread$State" => &[
+            "NEW",
+            "RUNNABLE",
+            "BLOCKED",
+            "WAITING",
+            "TIMED_WAITING",
+            "TERMINATED",
+        ],
         // The JDK's open options, checked by `Files`' writers (`open_options.rs`).
         "java/nio/file/StandardOpenOption" => open_options::STANDARD_OPEN_OPTIONS,
         // `Collector.of`'s characteristics (`stream_pipeline.rs`).
@@ -11746,6 +11738,12 @@ fn value_text(value: &Value) -> String {
         Value::Boxed(boxed) => boxed.text(),
         Value::Host(_) => host_text(value),
         Value::Ref(Some(value)) => {
+            if let Some((_, name)) = value
+                .strip_prefix("enum/")
+                .and_then(|rest| rest.rsplit_once('/'))
+            {
+                return name.to_owned();
+            }
             // A marker whose Java `toString` is its payload: string
             // concatenation goes through `String.valueOf`, not the modelled
             // instance method.
@@ -12337,7 +12335,6 @@ fn is_set_owner(owner: &str) -> bool {
                 | "java/util/concurrent/CopyOnWriteArraySet"
                 | "java/util/concurrent/ConcurrentSkipListSet"
                 | "java/util/concurrent/ConcurrentHashMap$KeySetView"
-                | "java/util/EnumSet"
                 | "com/google/common/collect/ImmutableSet"
         )
 }
@@ -12356,7 +12353,6 @@ fn is_map_owner(owner: &str) -> bool {
                 | "java/util/TreeMap"
                 | "java/util/IdentityHashMap"
                 | "java/util/WeakHashMap"
-                | "java/util/EnumMap"
                 | "java/util/Hashtable"
                 | "java/util/Properties"
                 | "java/util/concurrent/ConcurrentMap"
@@ -12678,19 +12674,27 @@ fn object_text(host: &mut StdHost, value: &Value) -> String {
                 host_text(value)
             }
         },
-        Value::Ref(Some(marker)) => host.modelled_to_string(value).unwrap_or_else(|| {
-            // An object no model prints (a jar object, an identity hash)
-            // is counted; the element keeps its marker in the text. A
-            // stream is counted too, and never prints its marker.
-            if stream_pipeline::is_stream_marker(marker) {
-                let _ = host.unknown_host_call(&jar_text::object_to_string());
-                return stream_pipeline::STREAM_TEXT.into();
+        Value::Ref(Some(marker)) => {
+            if let Some((_, name)) = marker
+                .strip_prefix("enum/")
+                .and_then(|rest| rest.rsplit_once('/'))
+            {
+                return name.to_owned();
             }
-            if crate::runtime::jar_object::packaged_object_class(value).is_some() {
-                let _ = host.unknown_host_call(&jar_text::object_to_string());
-            }
-            marker.clone()
-        }),
+            host.modelled_to_string(value).unwrap_or_else(|| {
+                // An object no model prints (a jar object, an identity hash)
+                // is counted; the element keeps its marker in the text. A
+                // stream is counted too, and never prints its marker.
+                if stream_pipeline::is_stream_marker(marker) {
+                    let _ = host.unknown_host_call(&jar_text::object_to_string());
+                    return stream_pipeline::STREAM_TEXT.into();
+                }
+                if crate::runtime::jar_object::packaged_object_class(value).is_some() {
+                    let _ = host.unknown_host_call(&jar_text::object_to_string());
+                }
+                marker.clone()
+            })
+        }
         other => value_text(other),
     }
 }

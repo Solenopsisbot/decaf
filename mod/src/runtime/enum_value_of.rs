@@ -56,7 +56,7 @@ impl<H: Host> Runtime<'_, H> {
                     field.is_static() && field.access & ACC_ENUM != 0 && field.name == name
                 })
                 .map(|field| format!("{class}#{}{}", field.name, field.descriptor)),
-            Some(_) => return Ok(None),
+            Some(_) => return Err(no_enum_constant(&class, &name)),
             None => {
                 return match game_enum_constants(&class) {
                     Some(constants) if !constants.contains(&name.as_str()) => {

@@ -5,6 +5,8 @@ import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.EnumSet;
+import java.util.EnumMap;
 import java.util.RandomAccess;
 import java.util.concurrent.ThreadPoolExecutor;
 
@@ -33,6 +35,14 @@ public class Probe {
       public String toString() {
         return "kind-a";
       }
+    },
+    B
+  }
+
+  public enum E {
+    A {
+      @Override
+      public String toString() { return "a-body"; }
     },
     B
   }
@@ -204,6 +214,35 @@ public class Probe {
   }
 
   /** Enum declaring classes differ from constant-specific runtime classes. */
+  public static String enumReview() {
+    StringBuilder out = new StringBuilder();
+    try { Enum.valueOf((Class) E.A.getClass(), "A"); out.append("ok"); }
+    catch (IllegalArgumentException expected) { out.append("iae"); }
+    out.append(":");
+    try { Enum.valueOf(E.class, "enum/demo/Probe$E/A"); out.append("ok"); }
+    catch (IllegalArgumentException expected) { out.append("iae"); }
+    out.append(":");
+    try { Enum.valueOf(E.class, "NO_SUCH"); out.append("ok"); }
+    catch (IllegalArgumentException expected) { out.append("iae"); }
+    try {
+      EnumSet<E> set = EnumSet.of(E.A, E.B);
+      EnumMap<E, String> map = new EnumMap<>(E.class);
+      map.put(E.A, "aye"); map.put(E.B, "bee");
+      out.append(":").append(set.size()).append(":").append(E.A).append(":").append(E.B)
+        .append(":").append(set.contains(E.A)).append(":").append(set)
+        .append(":").append(map);
+    } catch (NullPointerException counted) {
+      out.append("counted");
+    }
+    Object[] states = Thread.State.class.getEnumConstants();
+    Object[] statesAgain = Thread.State.class.getEnumConstants();
+    out.append(":").append(states.length).append(":")
+      .append(states[0]).append(":").append(statesAgain != states).append(":")
+      .append(Thread.State.class.getEnumConstants()[0]).append(":")
+      .append(E.A.getDeclaringClass().getName());
+    return out.toString();
+  }
+
   public static String enumClasses() {
     Object[] first = Kind.class.getEnumConstants();
     Object[] second = Kind.class.getEnumConstants();

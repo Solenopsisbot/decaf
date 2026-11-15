@@ -161,6 +161,22 @@ fn a_jar_class_answers_from_its_class_file() {
 }
 
 #[test]
+fn enum_value_of_collections_and_jdk_reflection_match_java_25() {
+    let (text, unknown) = run("enumReview");
+    assert_eq!(text, "iae:iae:iae:counted:6:NEW:true:NEW:demo.Probe$E");
+    assert!(
+        unknown
+            .iter()
+            .any(|(call, _)| call.contains("java/util/EnumSet"))
+    );
+    assert!(
+        unknown
+            .iter()
+            .any(|(call, _)| call.contains("java/util/EnumMap"))
+    );
+}
+
+#[test]
 fn enum_declaring_class_handles_constant_specific_bodies() {
     assert_eq!(
         run("enumClasses"),
