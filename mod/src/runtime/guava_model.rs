@@ -75,6 +75,9 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        if let Some(value) = self.invoke_guava_table(r, receiver, args)? {
+            return Ok(Some(value));
+        }
         if let Some(value) = self.invoke_memoized_supplier(r, receiver, args)? {
             return Ok(Some(value));
         }

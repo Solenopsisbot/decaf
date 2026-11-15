@@ -84,6 +84,11 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        if let Some(text) =
+            self.invoke_library_model(&object_to_string(), Some(value), &[], class, method)?
+        {
+            return Ok(Some(text));
+        }
         // A private JDK collection the skeletons built (a sublist).
         if let Some(text) = self.invoke_jdk_skeleton(&object_to_string(), 0xb6, Some(value), &[])? {
             return Ok(Some(text));
@@ -218,6 +223,9 @@ impl<H: Host> Runtime<'_, H> {
         // `File.toString()` is its path.
         if let Some(path) = self.file_path(value) {
             return Ok(Some(Value::Ref(Some(path.to_owned()))));
+        }
+        if marker.starts_with("guava-table/") {
+            return self.invoke_library_model(&object_to_string(), Some(value), &[], class, method);
         }
         if crate::jar_object::packaged_object_class(value).is_none() {
             return Ok(None);
