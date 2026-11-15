@@ -172,12 +172,12 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("zipEntry_concat", Counted),
         ("zipEntry_contains", Exact(r#"false"#)),
         ("zipEntry_objects", Exact(r#"false"#)),
-        // `BigDecimal`, `BigInteger`, `Date`, `BitSet`, `DecimalFormat`, `InetSocketAddress`: own `equals` no model answers: counted, also inside `List.contains`/`Objects.equals`; the same object equals itself (`createUnresolved` itself is unmodelled).
-        ("decimal_equals", Counted),
+        // BigDecimal bounded slice answers its direct value operations; the other JDK value types remain counted. BigDecimal same-object identity is exact, while jar subclass rows stay counted.
+        ("decimal_equals", Exact(r#"true"#)),
         ("decimal_same", Exact(r#"truetrue"#)),
-        ("decimal_other", Counted),
-        ("decimal_hash", Counted),
-        ("decimal_text", Counted),
+        ("decimal_other", Exact(r#"falsefalse"#)),
+        ("decimal_hash", Exact(r#"true"#)),
+        ("decimal_text", Exact(r#"1.0"#)),
         ("decimal_concat", Counted),
         ("decimal_contains", Counted),
         ("decimal_objects", Counted),
@@ -262,7 +262,7 @@ fn jdk_objects_answer_as_java_25_or_count() {
         ("sub_random_equals", Exact(r#"falsefalse"#)),
         ("sub_decimal_equals", Counted),
         ("sub_decimal_objects", Counted),
-        ("as_object_equals", Counted),
+        ("as_object_equals", Exact(r#"true"#)),
         ("set_objects", Exact(r#"true"#)),
         ("set_equals", Exact(r#"true"#)),
         // Jar classes extending JDK classes outside the full rows (`Handler`, `EventObject`, `InheritableThreadLocal`, `RecursiveTask`): the `object` rows show `Object.equals`, so identity; `hashCode` an identity hash.

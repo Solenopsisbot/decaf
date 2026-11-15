@@ -58,6 +58,14 @@ pub(crate) fn time_unit_name(value: &Value) -> Option<&str> {
     key_of(value, HostKind::TimeUnit)
 }
 
+pub(crate) fn rounding_mode(name: &str) -> Value {
+    Value::Host(HostRef::new(HostKind::RoundingMode, name))
+}
+
+pub(crate) fn rounding_mode_name(value: &Value) -> Option<&str> {
+    key_of(value, HostKind::RoundingMode)
+}
+
 /// The `CodingErrorAction` constant `name`.
 pub(crate) fn coding_error_action(name: &str) -> Value {
     Value::Host(HostRef::new(HostKind::CodingErrorAction, name))
@@ -302,6 +310,7 @@ pub(crate) const TIME_UNIT_METHODS: Methods = Methods {
     compare_to: Some(time_unit_compare),
     ..CONSTANT_METHODS
 };
+pub(crate) const ROUNDING_MODE_METHODS: Methods = CONSTANT_METHODS;
 pub(crate) const CODING_ERROR_ACTION_METHODS: Methods = CONSTANT_METHODS;
 pub(crate) const STACK_WALKER_OPTION_METHODS: Methods = Methods {
     compare_to: Some(stack_walker_option_compare),

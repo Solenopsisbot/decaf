@@ -1,6 +1,6 @@
 //! `new String(...)` is counted, never answered with the allocation marker,
-//! until a model builds its text (the `char[]` and code-point constructors
-//! now do: `string_constructors.rs`).
+//! until a model builds its text (the `char[]`, code-point, `byte[]`, empty
+//! and copy constructors now do: `string_constructors.rs`).
 //!
 //! On `main` before this test, every `String` constructor left the
 //! `java/lang/String#n` marker where Java has the text, silently:
@@ -60,6 +60,11 @@ public final class Ctors {
   public static String buffer() { return new String(new StringBuffer("bf")); }
   // "q"
   public static String reference() { Function<char[], String> f = String::new; return f.apply(new char[] {'q'}); }
+  // Java 25: "abcd|bc|abcd|bc"
+  public static String valueOfChars() { char[] c = {'a', 'b', 'c', 'd'}; return String.valueOf(c) + "|" + String.valueOf(c, 1, 2) + "|" + String.copyValueOf(c) + "|" + String.copyValueOf(c, 1, 2); }
+  // Java 25: the delegated constructor's exact checks and messages.
+  public static String valueOfErrors() { char[] c = {'a', 'b', 'c', 'd'}; return attempt(() -> String.valueOf((char[]) null)) + "|" + attempt(() -> String.valueOf(c, -1, 2)) + "|" + attempt(() -> String.copyValueOf(c, 3, 2)) + "|" + attempt(() -> String.copyValueOf(c, 2, -1)); }
+  public static String valueOfUnpaired() { return String.valueOf(new char[] {'a', '\uD800'}); }
   // "0"
   public static String supplier() { Supplier<String> f = String::new; return "" + f.get().length(); }
   // "mh"
@@ -68,6 +73,7 @@ public final class Ctors {
         String.class, java.lang.invoke.MethodType.methodType(void.class, String.class));
     return (String) h.invoke("mh");
   }
+  static String attempt(Supplier<String> f) { try { return f.get(); } catch (RuntimeException e) { return e.getClass().getSimpleName() + ":" + e.getMessage(); } }
 }
 "#;
 
@@ -123,17 +129,27 @@ fn jar() -> NativeJar {
     NativeJar::from_path(&jar_path).unwrap()
 }
 
-/// The `char[]` and code-point constructors are modelled
-/// (`string_constructors.rs`): they answer the Java 25 values the comments
-/// above record, with nothing counted.
+/// The modelled constructors (`string_constructors.rs`) answer the Java 25
+/// values the comments above record, with nothing counted.
 #[test]
-fn char_and_code_point_constructors_answer_java_25() {
+fn modelled_constructors_answer_java_25() {
     let jar = jar();
     let cases = [
         ("chars", "ab|2|true"),
         ("charsRange", "bc"),
         ("codePoints", "a\u{1F600}b"),
         ("reference", "q"),
+        ("valueOfChars", "abcd|bc|abcd|bc"),
+        (
+            "valueOfErrors",
+            "NullPointerException:Cannot read the array length because \"value\" is null|StringIndexOutOfBoundsException:Range [-1, -1 + 2) out of bounds for length 4|StringIndexOutOfBoundsException:Range [3, 3 + 2) out of bounds for length 4|StringIndexOutOfBoundsException:Range [2, 2 + -1) out of bounds for length 4",
+        ),
+        ("bytes", "hi"),
+        ("bytesRange", "b"),
+        ("bytesCharset", "\u{e9}"),
+        ("bytesRangeCharset", "bc"),
+        ("bytesName", "ab"),
+        ("bytesRangeName", "ab"),
     ];
     for (name, expected) in cases {
         let mut host = StdHost::new();
@@ -161,24 +177,44 @@ fn char_and_code_point_constructors_answer_java_25() {
     }
 }
 
+/// Static char-array helpers with an unpaired surrogate remain counted under
+/// their own Java member, just as the constructor path does.
+#[test]
+fn unpaired_value_of_stays_counted() {
+    let jar = jar();
+    let mut host = StdHost::new();
+    jar.invoke_method_with_args(
+        "demo.Ctors",
+        "valueOfUnpaired",
+        "()Ljava/lang/String;",
+        None,
+        &[],
+        &mut host,
+    )
+    .unwrap();
+    assert!(
+        host.unknown_host_calls().iter().any(|(call, count)| call
+            == "java/lang/String#valueOf([C)Ljava/lang/String;"
+            && *count == 1),
+        "{:?}",
+        host.unknown_host_calls()
+    );
+}
+
 #[test]
 fn every_string_constructor_is_counted_until_it_is_modelled() {
     let jar = jar();
     // (method, the constructor descriptor it must be counted under)
     let cases = [
-        ("bytes", "([B)V"),
-        ("bytesRange", "([BII)V"),
-        ("bytesCharset", "([BLjava/nio/charset/Charset;)V"),
-        ("bytesRangeCharset", "([BIILjava/nio/charset/Charset;)V"),
-        ("bytesName", "([BLjava/lang/String;)V"),
-        ("bytesRangeName", "([BIILjava/lang/String;)V"),
         ("hibyte", "([BI)V"),
-        ("hibyteRange", "([BIII)V"),
         ("empty", "()V"),
         ("copy", "(Ljava/lang/String;)V"),
+        ("supplier", "()V"),
+        ("hibyteRange", "([BIII)V"),
         ("builder", "(Ljava/lang/StringBuilder;)V"),
         ("buffer", "(Ljava/lang/StringBuffer;)V"),
-        ("supplier", "()V"),
+        // A `MethodHandle` constructor is counted for every overload
+        // (`method_handles.rs`), modelled or not.
         ("handle", "(Ljava/lang/String;)V"),
     ];
     for (name, descriptor) in cases {

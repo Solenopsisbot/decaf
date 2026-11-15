@@ -22,6 +22,7 @@ mod array_deque;
 mod array_store;
 mod array_views;
 mod attachment_codec;
+mod bigdecimal_slice;
 mod block_item_id;
 mod boxed;
 pub mod brigadier;
@@ -5683,6 +5684,9 @@ impl Host for StdHost {
         }
         if let Some(value) = self.client_static(r) {
             return value;
+        }
+        if let Some(value) = bigdecimal_slice::static_field(r) {
+            return Ok(value);
         }
         if let Some(value) = http_client::static_field(&r.owner, &r.name, &r.descriptor) {
             return Ok(value);
@@ -26360,6 +26364,32 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
+    fn invoke_bigdecimal_static(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        match bigdecimal_slice::static_call(self, r, args) {
+            Some(result) => result.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn invoke_bigdecimal_instance(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        match bigdecimal_slice::instance_call(self, r, receiver, args) {
+            Some(result) => result.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// One jar frame, executed instruction by instruction.
     fn invoke_throwable_suppressed(
         &mut self,
@@ -27766,6 +27796,15 @@ impl<H: Host> Runtime<'_, H> {
                         at,
                         dfu_either::runtime_call(self, &r, receiver.as_ref(), &args)
                     ) {
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_bigdecimal_instance(&r, receiver.as_ref(), &args)
+                    ) {
+                        value
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_bigdecimal_static(&r, &args))
+                    {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,

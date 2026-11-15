@@ -29,6 +29,9 @@ impl<H: Host> Runtime<'_, H> {
         {
             return value.map(Some);
         }
+        if let Some(value) = string_constructors::value_of(self, r, args)? {
+            return Ok(Some(value));
+        }
         // Loggers named after a class (`jdk_model.rs`).
         if let Some(value) = self.invoke_logger_factory(r, args)? {
             return Ok(Some(value));

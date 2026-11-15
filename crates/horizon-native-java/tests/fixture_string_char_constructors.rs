@@ -43,29 +43,32 @@ const LONE: &str = r#"package demo;
 
 public final class Probe {
     public static String run() {
-        return new String(new char[] {'a', '\uD800'}) + "|" + new String(new byte[] {104, 105});
+        return new String(new char[] {'a', '\uD800'});
     }
 }
 "#;
 
-/// An unpaired surrogate (which the runtime's strings cannot hold) and the
-/// `byte[]` constructors (Gabbotampo's #6) stay counted.
+/// An unpaired surrogate, which the runtime's strings cannot hold, stays counted.
 #[test]
-fn unpaired_surrogates_and_byte_constructors_stay_counted() {
+fn unpaired_surrogates_stay_counted() {
     let fixture = Fixture::build("string-chars-counted", &[("demo/Probe.java", LONE)]);
     let mut host = fixture.jar.seed_host(StdHost::new());
-    fixture.text_on(&mut host, "run");
+    fixture
+        .jar
+        .invoke_method_with_args(
+            "demo/Probe",
+            "run",
+            "()Ljava/lang/String;",
+            None,
+            &[],
+            &mut host,
+        )
+        .unwrap();
     let counted = host.unknown_host_calls();
     assert!(
         counted
             .iter()
             .any(|(call, _)| call == "java/lang/String#<init>([C)V"),
-        "{counted:?}"
-    );
-    assert!(
-        counted
-            .iter()
-            .any(|(call, _)| call == "java/lang/String#<init>([B)V"),
         "{counted:?}"
     );
 }
