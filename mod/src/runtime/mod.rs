@@ -24671,6 +24671,9 @@ impl<H: Host> Runtime<'_, H> {
         let marker = expect_ref(receiver.unwrap_or(&Value::Ref(None)));
         let recorded = marker.and_then(|marker| self.enum_constants.get(marker).cloned());
         match (r.name.as_str(), r.descriptor.as_str()) {
+            ("getDeclaringClass", "()Ljava/lang/Class;") => Ok(self
+                .enum_declaring_class(receiver)
+                .map(|class| host_class::class_value(&class))),
             ("name", "()Ljava/lang/String;") | ("toString", "()Ljava/lang/String;") => {
                 Ok(recorded.map(|(name, _)| Value::Ref(Some(name))))
             }
@@ -24683,6 +24686,36 @@ impl<H: Host> Runtime<'_, H> {
             },
             _ => Ok(None),
         }
+    }
+
+    /// The enum class that declared one constant, including a constant with
+    /// its own class body.  `Enum.getDeclaringClass()` is deliberately not
+    /// `getClass()`: the latter is `Example$1` for a constant-specific body,
+    /// while the former walks that class's superclass to `Example`.
+    fn enum_declaring_class(&self, receiver: Option<&Value>) -> Option<String> {
+        let marker = receiver.and_then(expect_ref)?;
+        let runtime_class = jar_object::object_class(receiver?).or_else(|| {
+            marker
+                .strip_prefix("enum/")
+                .and_then(|rest| rest.rsplit_once('/'))
+                .map(|(class, _)| class)
+        })?;
+        if !self.has_class(runtime_class) {
+            return game_enum_constants(runtime_class).map(|_| runtime_class.to_owned());
+        }
+
+        let mut class = runtime_class.to_owned();
+        for _ in 0..64 {
+            let file = self.class(&class)?;
+            if file.super_name == "java/lang/Enum" {
+                return Some(class);
+            }
+            if file.super_name.is_empty() || file.super_name == class {
+                return None;
+            }
+            class = file.super_name.clone();
+        }
+        None
     }
 
     /// The ordinal of one `enum/<class>/<name>` marker: its position in the

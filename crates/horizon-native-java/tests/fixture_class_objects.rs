@@ -161,6 +161,17 @@ fn a_jar_class_answers_from_its_class_file() {
 }
 
 #[test]
+fn enum_declaring_class_handles_constant_specific_bodies() {
+    assert_eq!(
+        run("enumClasses"),
+        (
+            "false,true,true,2,kind-a,B,true,demo.Probe$Kind$1".to_owned(),
+            Vec::new()
+        )
+    );
+}
+
+#[test]
 fn a_jars_own_copy_of_a_loader_class_is_the_class() {
     let fixture = Fixture::build_every_package(
         "class-objects-copy",

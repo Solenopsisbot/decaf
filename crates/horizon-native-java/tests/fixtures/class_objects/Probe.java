@@ -26,6 +26,17 @@ public class Probe {
     GREEN
   }
 
+  /** The first constant has a class body, so its runtime class is Kind$1. */
+  public enum Kind {
+    A {
+      @Override
+      public String toString() {
+        return "kind-a";
+      }
+    },
+    B
+  }
+
   static String bits(boolean... values) {
     StringBuilder out = new StringBuilder();
     for (boolean value : values) {
@@ -190,5 +201,26 @@ public class Probe {
         + Shape.class.getModifiers()
         + ","
         + Probe.class.getModifiers();
+  }
+
+  /** Enum declaring classes differ from constant-specific runtime classes. */
+  public static String enumClasses() {
+    Object[] first = Kind.class.getEnumConstants();
+    Object[] second = Kind.class.getEnumConstants();
+    return (Kind.A.getClass() == Kind.class)
+        + ","
+        + (Kind.A.getDeclaringClass() == Kind.class)
+        + ","
+        + (Kind.A.getClass().getEnumConstants() == null)
+        + ","
+        + first.length
+        + ","
+        + first[0]
+        + ","
+        + first[1]
+        + ","
+        + (first != second)
+        + ","
+        + Kind.A.getClass().getName();
   }
 }
