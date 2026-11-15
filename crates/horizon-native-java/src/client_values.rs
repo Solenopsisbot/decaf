@@ -243,13 +243,25 @@ impl Style {
     }
 }
 
+/// A coordinate token that keeps a NaN's payload across a host handle.
+pub(crate) fn coord_text(value: f64) -> String {
+    if value.is_nan() {
+        format!("nan:{:016x}", value.to_bits())
+    } else {
+        value.to_string()
+    }
+}
+
+fn parse_coord(value: &str) -> Option<f64> {
+    if let Some(bits) = value.strip_prefix("nan:") {
+        return u64::from_str_radix(bits, 16).ok().map(f64::from_bits);
+    }
+    value.parse().ok()
+}
+
 /// The `Vec3` of a key's `x,y,z`.
 pub(crate) fn vec3(coords: &str) -> Option<[f64; 3]> {
-    let parts: Vec<f64> = coords
-        .split(',')
-        .map(str::parse)
-        .collect::<Result<_, _>>()
-        .ok()?;
+    let parts: Vec<f64> = coords.split(',').map(parse_coord).collect::<Option<_>>()?;
     parts.try_into().ok()
 }
 

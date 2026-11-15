@@ -768,14 +768,14 @@ fn guava_immutable_map_collector_collects_and_rejects_duplicate_keys() {
 
 #[test]
 fn kotlin_null_checks_throw_what_the_intrinsics_throw() {
-    // `java` with kotlin-stdlib 2.4.21 prints the same, except that a
-    // parameter check also names the calling method ("method
-    // demo.Probe.lambda$..., parameter name"), which a host call cannot see.
+    // `java` with kotlin-stdlib 2.4.21 includes the caller method in the
+    // parameter-check message, which the interpreter recovers from the
+    // current frame.
     let fixture = Fixture::build("kotlin-checks");
     assert_eq!(
         fixture.text("kotlinNullChecks"),
-        "NPE:null|NPE:custom|NPE:Parameter specified as non-null is null: parameter name|\
-         IAE:Parameter specified as non-null is null: parameter name|\
+        "NPE:null|NPE:custom|NPE:Parameter specified as non-null is null: method demo.Probe.lambda$kotlinNullChecks$2, parameter name|\
+         IAE:Parameter specified as non-null is null: method demo.Probe.lambda$kotlinNullChecks$3, parameter name|\
          NPE:getFoo(...) must not be null|ISE:getFoo(...) must not be null|ok"
     );
 }

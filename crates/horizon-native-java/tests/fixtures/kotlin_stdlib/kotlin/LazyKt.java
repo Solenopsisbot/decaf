@@ -1,0 +1,1 @@
+package kotlin; import kotlin.jvm.functions.Function0; public final class LazyKt { public static <T> Lazy<T> lazy(Function0<? extends T> f){throw new AssertionError();} public static <T> Lazy<T> lazyOf(T value){throw new AssertionError();} }

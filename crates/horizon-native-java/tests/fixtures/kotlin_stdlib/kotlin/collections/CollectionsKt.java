@@ -1,0 +1,1 @@
+package kotlin.collections; import java.util.*; public final class CollectionsKt { public static <T> List<T> emptyList(){throw new AssertionError();} public static <T> List<T> listOf(T... a){throw new AssertionError();} public static <T> List<T> mutableListOf(T... a){throw new AssertionError();} }

@@ -1080,13 +1080,21 @@ fn frame_census(
             pos: [0.5, 64.0, 0.5],
             health: 20.0,
             max_health: 20.0,
+            // These stateful values are not in the census frame snapshot.
+            // The façade must count reads rather than invent answers.
+            using_item: None,
+            sleeping: None,
             ..ClientPlayer::default()
         }),
         level: Some(ClientLevel::default()),
         single_player: true,
         gui_size: [427, 240],
         window_size: [854, 480],
-        gui_scale: 2.0,
+        // The game fills these when it has a live frame; census has no such
+        // values, so every corresponding read remains explicitly counted.
+        gui_scale: None,
+        options: Default::default(),
+        hit_result: None,
         fps: 60,
         render_distance: 12,
         metrics: Arc::new(TextMetrics {

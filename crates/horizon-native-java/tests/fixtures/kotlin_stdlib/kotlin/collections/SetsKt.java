@@ -1,0 +1,1 @@
+package kotlin.collections; import java.util.*; public final class SetsKt { public static <T> Set<T> emptySet(){throw new AssertionError();} }

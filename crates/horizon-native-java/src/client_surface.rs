@@ -282,6 +282,10 @@ pub struct ClientPlayer {
     pub creative: bool,
     pub spectator: bool,
     pub sneaking: bool,
+    /// `LocalPlayer.isUsingItem`, filled by the game for a frame.
+    pub using_item: Option<bool>,
+    /// `LocalPlayer.isSleeping`, filled by the game for a frame.
+    pub sleeping: Option<bool>,
     pub sprinting: bool,
     pub on_ground: bool,
     /// `isFallFlying`: gliding with elytra.
@@ -437,7 +441,8 @@ pub struct ClientSnapshot {
     pub gui_size: [i32; 2],
     /// `Window.getWidth/Height`, in pixels.
     pub window_size: [i32; 2],
-    pub gui_scale: f64,
+    /// `Window.getGuiScale`, filled by the game for a frame; absent stays counted.
+    pub gui_scale: Option<i32>,
     /// `DeltaTracker.getGameTimeDeltaPartialTick`.
     pub partial_tick: f32,
     pub fps: i32,
@@ -454,6 +459,10 @@ pub struct ClientSnapshot {
     pub tooltip_lines: Vec<String>,
     /// `TooltipFlag.isAdvanced` (F3+H).
     pub advanced_tooltips: bool,
+    /// Option values filled by the game snapshot; absent values stay counted.
+    pub options: crate::client_frame::ClientOptions,
+    /// The crosshair target (`Minecraft.hitResult`) filled by the game.
+    pub hit_result: Option<crate::client_frame::ClientHitResult>,
 }
 
 /// One registered mapping's input state, in [`StdHost::client_key_mappings`]
@@ -1126,6 +1135,13 @@ impl StdHost {
         let state = &self.client;
         let frame = state.frame.as_deref();
         let refuse = || Some(Err(NativeError::UnknownHostCall(r.clone())));
+        if r.owner == MINECRAFT_CLASS && r.name == "hitResult" {
+            return match frame.and_then(|f| f.hit_result.as_ref()) {
+                Some(hit) => Some(Ok(crate::client_frame::hit_value(hit))),
+                None if frame.is_some() => refuse(),
+                None => None,
+            };
+        }
         if let Some(value) = text::text_static(r) {
             return Some(Ok(value));
         }
@@ -1425,6 +1441,12 @@ impl StdHost {
             return None;
         }
         let refuse = || Err(NativeError::UnknownHostCall(r.clone()));
+        if let Some(value) = crate::client_frame::block_pos_call(&text, r) {
+            return Some(Ok(value));
+        }
+        if let Some(value) = crate::client_frame::hit_call(&text, r) {
+            return Some(Ok(value));
+        }
         // `NonNullList` is a `List`: the inventory's lists answer as one.
         if r.owner == "net/minecraft/core/NonNullList" && text.starts_with("list") {
             let as_list = MethodRef {
@@ -1717,25 +1739,28 @@ impl StdHost {
         let double = |value: f64| Some(Value::Float(value));
         // A float return is rounded to f32 precision, as the interpreter's `F`.
         let float = |value: f32| Some(Value::Float(f64::from(value)));
+        if let Some(value) = crate::client_frame::vec3_call(object, r, args) {
+            return Some(value);
+        }
         if let Some(coords) = object.strip_prefix(VEC3) {
-            let v: Vec<f64> = coords.split(',').filter_map(|c| c.parse().ok()).collect();
-            let [x, y, z] = <[f64; 3]>::try_from(v).ok()?;
+            let [x, y, z] = crate::client_values::vec3(coords)?;
             return match (name, returns) {
                 ("x", "D") => double(x),
                 ("y", "D") => double(y),
                 ("z", "D") => double(z),
                 ("distanceTo", "D") | ("distanceToSqr", "D") => {
                     let o = crate::game_object::text(args.first()?)?.strip_prefix(VEC3)?;
-                    let o: Vec<f64> = o.split(',').filter_map(|c| c.parse().ok()).collect();
-                    let d2 = (x - o.first()?).powi(2)
-                        + (y - o.get(1)?).powi(2)
-                        + (z - o.get(2)?).powi(2);
+                    let [ox, oy, oz] = crate::client_values::vec3(o)?;
+                    let d2 = (x - ox).powi(2) + (y - oy).powi(2) + (z - oz).powi(2);
                     double(if name == "distanceTo" { d2.sqrt() } else { d2 })
                 }
                 _ => None,
             };
         }
         if let Some(option) = object.strip_prefix(OPTION) {
+            if let Some(value) = crate::client_frame::options_call(option, &frame.options, r) {
+                return Some(value);
+            }
             return match (option, name) {
                 ("renderDistance", "get") => {
                     Some(Value::Boxed(crate::Boxed::Integer(frame.render_distance)))
@@ -1783,6 +1808,10 @@ impl StdHost {
                     Value::Ref(None)
                 }),
                 ("getTextureManager", _) => Some(marker(TEXTURE_MANAGER)),
+                ("hitResult", _) => frame
+                    .hit_result
+                    .as_ref()
+                    .map(crate::client_frame::hit_value),
                 ("getUser", _) if frame.player.is_some() => Some(marker(USER)),
                 ("execute", "V") | ("schedule" | "submit", _) => {
                     let task = args.first()?.clone();
@@ -1805,7 +1834,9 @@ impl StdHost {
                 _ => None,
             },
             OPTIONS => match name {
-                "renderDistance" | "mainHand" => Some(marker(format!("{OPTION}{name}"))),
+                "renderDistance" | "mainHand" | "particles" | "sensitivity" => {
+                    Some(marker(format!("{OPTION}{name}")))
+                }
                 _ => None,
             },
             WINDOW => match (name, returns) {
@@ -1813,7 +1844,7 @@ impl StdHost {
                 ("getGuiScaledHeight", "I") => int(frame.gui_size[1]),
                 ("getWidth" | "getScreenWidth", "I") => int(frame.window_size[0]),
                 ("getHeight" | "getScreenHeight", "I") => int(frame.window_size[1]),
-                ("getGuiScale", "D") => double(frame.gui_scale),
+                ("getGuiScale", "I") => frame.gui_scale.map(Value::Int),
                 _ => None,
             },
             GUI | HUD => match (name, returns) {
@@ -1844,6 +1875,26 @@ impl StdHost {
             },
             PLAYER => {
                 let p = frame.player.as_ref()?;
+                if name == "blockPosition" {
+                    return Some(crate::client_frame::block_pos_value(
+                        p.pos.map(crate::client_frame::floor),
+                    ));
+                }
+                if name == "getBlockX" {
+                    return int(crate::client_frame::floor(p.pos[0]));
+                }
+                if name == "getBlockY" {
+                    return int(crate::client_frame::floor(p.pos[1]));
+                }
+                if name == "getBlockZ" {
+                    return int(crate::client_frame::floor(p.pos[2]));
+                }
+                if name == "isUsingItem" {
+                    return p.using_item.map(flag);
+                }
+                if name == "isSleeping" {
+                    return p.sleeping.map(flag);
+                }
                 if let Some(value) = self.client_player_items(frame, name, returns, args) {
                     return Some(value);
                 }
@@ -1864,6 +1915,14 @@ impl StdHost {
                         Some(Value::Void)
                     }
                     ("position", _) => Some(vec3(p.pos)),
+                    ("blockPosition", "()Lnet/minecraft/core/BlockPos;") => Some(
+                        crate::client_frame::block_pos_value(p.pos.map(crate::client_frame::floor)),
+                    ),
+                    ("getBlockX", "()I") => int(crate::client_frame::floor(p.pos[0])),
+                    ("getBlockY", "()I") => int(crate::client_frame::floor(p.pos[1])),
+                    ("getBlockZ", "()I") => int(crate::client_frame::floor(p.pos[2])),
+                    ("isUsingItem", "()Z") => p.using_item.map(flag),
+                    ("isSleeping", "()Z") => p.sleeping.map(flag),
                     ("getEyeY", "D") => double(p.pos[1] + if p.sneaking { 1.27 } else { 1.62 }),
                     ("getX", "D") => double(p.pos[0]),
                     ("getY", "D") => double(p.pos[1]),
@@ -2222,7 +2281,12 @@ impl ClientState {
 
 /// A position the façade hands out as a `Vec3`.
 fn vec3([x, y, z]: [f64; 3]) -> Value {
-    marker(format!("{VEC3}{x},{y},{z}"))
+    marker(format!(
+        "{VEC3}{},{},{}",
+        crate::client_values::coord_text(x),
+        crate::client_values::coord_text(y),
+        crate::client_values::coord_text(z),
+    ))
 }
 
 fn uuid_text(uuid: u128) -> String {

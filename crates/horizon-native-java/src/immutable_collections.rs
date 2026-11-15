@@ -398,6 +398,40 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver.filter(|_| matches!(opcode, 0xb6 | 0xb9)) else {
             return self.unordered_argument(r, args);
         };
+        if let ("equals", "(Ljava/lang/Object;)Z", [other]) =
+            (r.name.as_str(), r.descriptor.as_str(), args)
+            && matches!(
+                other,
+                Value::Host(handle)
+                    if matches!(
+                        handle.kind(),
+                        crate::host_ref::HostKind::KotlinEnumEntries
+                            | crate::host_ref::HostKind::KotlinEmptyCollection
+                    )
+            )
+            && let (Some(left_kind), Some(right_kind)) = (
+                self.host_collection_kind(receiver),
+                self.host_collection_kind(other),
+            )
+            && left_kind == right_kind
+        {
+            let left = self.collection_elements(receiver)?;
+            let right = self.collection_elements(other)?;
+            if left_kind == object_methods::CollectionKind::List {
+                if left.len() != right.len() {
+                    return Ok(Some(Value::Int(0)));
+                }
+                for (left, right) in left.iter().zip(&right) {
+                    if !self.objects_equals(left, right)? {
+                        return Ok(Some(Value::Int(0)));
+                    }
+                }
+                return Ok(Some(Value::Int(1)));
+            }
+            return Ok(Some(Value::Int(
+                (left.is_empty() && right.is_empty()) as i32,
+            )));
+        }
         if self.host_collection_class(receiver).as_deref() == Some(IDENTITY_MAP) {
             return self.identity_map_member(r, receiver, args);
         }

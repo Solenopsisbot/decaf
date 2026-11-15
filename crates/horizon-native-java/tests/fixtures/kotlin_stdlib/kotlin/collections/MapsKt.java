@@ -1,0 +1,1 @@
+package kotlin.collections; import java.util.*; public final class MapsKt { public static <K,V> Map<K,V> emptyMap(){throw new AssertionError();} }

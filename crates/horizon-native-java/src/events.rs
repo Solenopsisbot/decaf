@@ -941,6 +941,18 @@ pub(crate) fn bus_event(class: &str) -> Option<(GameEvent, EventLoader)> {
         .map(|(_, event)| (*event, loader))
 }
 
+/// Fabric client registrations whose moments are outside the bounded frame phase.
+/// Keep them in the census's unfired table: accepting a registration does not
+/// mean that a synthetic tick may fire it at the wrong time.
+fn unfired_client_fabric_field(owner: &str, field: &str) -> bool {
+    matches!(
+        owner,
+        "net/fabricmc/fabric/api/client/event/lifecycle/v1/ClientChunkEvents"
+            | "net/fabricmc/fabric/api/client/event/lifecycle/v1/ClientEntityEvents"
+            | "net/fabricmc/fabric/api/client/screen/v1/ScreenEvents"
+    ) && !field.is_empty()
+}
+
 /// The API field a Fabric event handle (`host_events.rs`) names.
 fn fabric_field(event: &Value) -> Option<&'static FabricField> {
     let (owner, field) = crate::host_events::fabric_field_of(event)?;
@@ -2068,6 +2080,12 @@ fn listeners_from(invocation: &HostInvocation, jar: &NativeJar, out: &mut GameLi
         let Some(source) = crate::host_events::fabric_event_name(event) else {
             return;
         };
+        if let Some((owner, field)) = crate::host_events::fabric_field_of(event)
+            && unfired_client_fabric_field(&owner, &field)
+        {
+            count_unsupported(out, source);
+            return;
+        }
         let Some(row) = fabric_field(event) else {
             count_unsupported(out, source);
             return;

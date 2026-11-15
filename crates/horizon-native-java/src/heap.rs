@@ -468,6 +468,15 @@ fn field_receiver(key: &str) -> &str {
     key.rsplit_once('|').map_or(key, |(receiver, _)| receiver)
 }
 
+/// Kotlin lazy cached values share the resident Java field table. The holder
+/// key is the field's ownership edge, so unreachable lazy state is pruned with
+/// the heap collector rather than retained forever (#301).
+const KOTLIN_LAZY_FIELD_PREFIX: &str = "kotlin-lazy|";
+
+fn kotlin_lazy_field_handle(key: &str) -> Option<&str> {
+    key.strip_prefix(KOTLIN_LAZY_FIELD_PREFIX)
+}
+
 fn heap_entries(heap: &JavaHeap, host: &StdHost) -> usize {
     heap.fields.len()
         + heap.arrays.len()
@@ -703,6 +712,30 @@ impl Collectable {
     }
 }
 
+fn mark_kotlin_lazy_states(
+    heap: &JavaHeap,
+    text: &str,
+    reached: &mut HashSet<String>,
+    pending: &mut Vec<String>,
+    collectable: &Collectable,
+) {
+    for (field, value) in &heap.fields {
+        let Some(holder) = kotlin_lazy_field_handle(field) else {
+            continue;
+        };
+        if holder != text && !text.contains(holder) {
+            continue;
+        }
+        if !reached.insert(holder.to_owned()) {
+            continue;
+        }
+        if let Some(value) = value_text(value) {
+            collectable.scan(value, pending);
+            mark_kotlin_lazy_states(heap, value, reached, pending, collectable);
+        }
+    }
+}
+
 /// Drop every collectable object of `heap` (and every collectable collection
 /// or iterator of `host`) that nothing reaches from the roots.
 ///
@@ -716,6 +749,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
         return;
     }
     let mut pending = Vec::new();
+    let mut reached_kotlin_lazy = HashSet::new();
     // Every allocation number a text the trace reaches names: the objects
     // found live, those without a row of their own included (`FreedObjects`).
     let mut live = Vec::new();
@@ -762,6 +796,13 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             }
         }
         for text in roots {
+            mark_kotlin_lazy_states(
+                heap,
+                text,
+                &mut reached_kotlin_lazy,
+                &mut pending,
+                &collectable,
+            );
             collectable.scan(text, &mut pending);
             note_numbers(text, &mut live);
         }
@@ -818,6 +859,13 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .chain(components)
         {
             if let Some(text) = value_text(value) {
+                mark_kotlin_lazy_states(
+                    heap,
+                    text,
+                    &mut reached_kotlin_lazy,
+                    &mut found,
+                    &collectable,
+                );
                 collectable.scan(text, &mut found);
                 note_numbers(text, &mut live);
             }
@@ -831,6 +879,13 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             let mut keyed = Vec::new();
             host.keyed_texts(&marker, &mut keyed);
             for text in &keyed {
+                mark_kotlin_lazy_states(
+                    heap,
+                    text,
+                    &mut reached_kotlin_lazy,
+                    &mut found,
+                    &collectable,
+                );
                 collectable.scan(text, &mut found);
                 note_numbers(text, &mut live);
             }
@@ -872,7 +927,13 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
         keep(cached)
             && cache_owner(identity).is_none_or(|owner| keep(&owner) && !freed.holds_key(&owner))
     });
-    heap.fields.retain(|key, _| keep(field_receiver(key)));
+    heap.fields.retain(|key, _| {
+        if let Some(holder) = kotlin_lazy_field_handle(key) {
+            reached_kotlin_lazy.contains(holder)
+        } else {
+            keep(field_receiver(key))
+        }
+    });
     heap.arrays.retain(|key, _| keep(key));
     heap.string_builders.retain(|key, _| keep(key));
     heap.enum_constants.retain(|key, _| keep(key));

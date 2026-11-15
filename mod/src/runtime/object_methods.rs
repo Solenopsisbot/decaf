@@ -600,6 +600,37 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(self.objects_equals(&left_key, &right_key)?
                         && self.objects_equals(&left_value, &right_value)?);
                 }
+                let kotlin_collection = |value: &Value| {
+                    matches!(
+                        value,
+                        Value::Host(handle)
+                            if matches!(
+                                handle.kind(),
+                                crate::runtime::host_ref::HostKind::KotlinEnumEntries
+                                    | crate::runtime::host_ref::HostKind::KotlinEmptyCollection
+                            )
+                    )
+                };
+                if (kotlin_collection(a) || kotlin_collection(b))
+                    && let (Some(left_kind), Some(right_kind)) =
+                        (self.host_collection_kind(a), self.host_collection_kind(b))
+                    && left_kind == right_kind
+                {
+                    let left = self.collection_elements(a)?;
+                    let right = self.collection_elements(b)?;
+                    if left_kind == CollectionKind::List {
+                        if left.len() != right.len() {
+                            return Ok(false);
+                        }
+                        for (left, right) in left.iter().zip(&right) {
+                            if !self.objects_equals(left, right)? {
+                                return Ok(false);
+                            }
+                        }
+                        return Ok(true);
+                    }
+                    return Ok(left.is_empty() && right.is_empty());
+                }
                 if self.host_collection_kind(a) == Some(CollectionKind::List)
                     && self.host_collection_kind(b) == Some(CollectionKind::List)
                 {
@@ -648,6 +679,37 @@ impl<H: Host> Runtime<'_, H> {
         }
         if *a == Value::Ref(None) {
             return Ok(false);
+        }
+        let is_kotlin_collection = |value: &Value| {
+            matches!(
+                value,
+                Value::Host(handle)
+                    if matches!(
+                        handle.kind(),
+                        crate::runtime::host_ref::HostKind::KotlinEnumEntries
+                            | crate::runtime::host_ref::HostKind::KotlinEmptyCollection
+                    )
+            )
+        };
+        if (is_kotlin_collection(a) || is_kotlin_collection(b))
+            && let (Some(left_kind), Some(right_kind)) =
+                (self.host_collection_kind(a), self.host_collection_kind(b))
+            && left_kind == right_kind
+        {
+            let left = self.collection_elements(a)?;
+            let right = self.collection_elements(b)?;
+            if left_kind == CollectionKind::List {
+                if left.len() != right.len() {
+                    return Ok(false);
+                }
+                for (left, right) in left.iter().zip(&right) {
+                    if !self.objects_equals(left, right)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            return Ok(left.is_empty() && right.is_empty());
         }
         self.java_equals(a, b)
     }
@@ -838,6 +900,12 @@ impl<H: Host> Runtime<'_, H> {
         // An object's methods are its class's: dispatched like any call.
         if !matches!(opcode, 0xb6 | 0xb9) || crate::runtime::jar_object::is_object_handle(handle) {
             return Ok(None);
+        }
+        if handle.kind() == crate::runtime::host_ref::HostKind::KotlinLazy
+            && let Some(value) =
+                crate::runtime::kotlin_stdlib::instance(self, r, receiver.unwrap_or(&Value::Ref(None)), args)
+        {
+            return value.map(Some);
         }
         let mut nested = RuntimeNested {
             runtime: self,
@@ -1141,6 +1209,25 @@ impl<H: Host> Runtime<'_, H> {
         if crate::runtime::jar_object::spells_key(value) {
             return None;
         }
+        // Kotlin's collection handles carry their exact concrete classes.
+        if let Value::Host(handle) = value {
+            match handle.kind() {
+                crate::runtime::host_ref::HostKind::KotlinEnumEntries => {
+                    return Some("kotlin/enums/EnumEntriesList".into());
+                }
+                crate::runtime::host_ref::HostKind::KotlinEmptyCollection => {
+                    return Some(
+                        match handle.key() {
+                            "set" => "kotlin/collections/EmptySet",
+                            "map" => "kotlin/collections/EmptyMap",
+                            _ => "kotlin/collections/EmptyList",
+                        }
+                        .into(),
+                    );
+                }
+                _ => {}
+            }
+        }
         // A collection the host made is the class it was made as (Guava's
         // `RegularImmutableList` too, #156 P14c).
         if let Value::Host(handle) = value
@@ -1205,6 +1292,21 @@ impl<H: Host> Runtime<'_, H> {
 
     /// Whether a host collection is a list, a set or a map.
     pub(crate) fn host_collection_kind(&self, value: &Value) -> Option<CollectionKind> {
+        if let Value::Host(handle) = value {
+            match handle.kind() {
+                crate::runtime::host_ref::HostKind::KotlinEnumEntries => {
+                    return Some(CollectionKind::List);
+                }
+                crate::runtime::host_ref::HostKind::KotlinEmptyCollection => {
+                    return Some(match handle.key() {
+                        "set" => CollectionKind::Set,
+                        "map" => CollectionKind::Map,
+                        _ => CollectionKind::List,
+                    });
+                }
+                _ => {}
+            }
+        }
         let class = self.host_collection_class(value)?;
         if is_map_owner(&class) || java_immutable::supertypes(&class).contains(&"java/util/Map") {
             Some(CollectionKind::Map)
@@ -1224,6 +1326,17 @@ impl<H: Host> Runtime<'_, H> {
     /// A host collection's elements (a map's keys and values interleaved),
     /// in the order the host keeps them.
     pub(crate) fn collection_elements(&self, value: &Value) -> Result<Vec<Value>, NativeError> {
+        if let Value::Host(handle) = value {
+            if handle.kind() == crate::runtime::host_ref::HostKind::KotlinEmptyCollection {
+                return Ok(Vec::new());
+            }
+            if handle.kind() == crate::runtime::host_ref::HostKind::KotlinEnumEntries {
+                return Ok(handle
+                    .values()
+                    .and_then(|values| values.get(1..).map(ToOwned::to_owned))
+                    .unwrap_or_default());
+            }
+        }
         runtime_collection_values(self.host, value)
     }
 }
@@ -1339,6 +1452,10 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
 
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError> {
         self.runtime.objects_equals(a, b).map(Some)
+    }
+
+    fn collection_entries(&mut self, value: &Value) -> Option<Vec<Value>> {
+        self.runtime.host.mutable_collection_entries(value)
     }
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
