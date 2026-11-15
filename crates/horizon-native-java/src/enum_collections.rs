@@ -45,7 +45,7 @@ impl<H: Host> Runtime<'_, H> {
             let Some(class) = args.first().and_then(host_class::class_name) else {
                 return Ok(None);
             };
-            if !self.enum_class_supported(class) {
+            if !self.enum_class_supported(class) || !self.has_constant_specific_values(class)? {
                 return self.host.unknown_operand_call(r).map(Some);
             }
             return self.make_collection("set", Vec::new()).map(Some);
@@ -93,7 +93,7 @@ impl<H: Host> Runtime<'_, H> {
                 .filter(|(index, _)| *index >= first && *index <= last)
                 .map(|(_, value)| value)
                 .collect();
-            return self.make_collection("set", values).map(Some);
+            return self.make_enum_set(r, values);
         }
         if r.name == "complementOf" && r.descriptor == "(Ljava/util/EnumSet;)Ljava/util/EnumSet;" {
             let Some(source) = args.first() else {
@@ -121,7 +121,7 @@ impl<H: Host> Runtime<'_, H> {
                 .into_iter()
                 .filter(|value| !source.iter().any(|item| item == value))
                 .collect();
-            return self.make_collection("set", values).map(Some);
+            return self.make_enum_set(r, values);
         }
         Ok(None)
     }
@@ -184,6 +184,12 @@ impl<H: Host> Runtime<'_, H> {
                 message: None,
                 frame: None,
             });
+        }
+        if !values
+            .iter()
+            .any(|value| self.is_constant_specific_value(value))
+        {
+            return self.host.unknown_operand_call(r).map(Some);
         }
         let mut values = values;
         self.sort_enum_values(&mut values, r)?;
@@ -355,6 +361,22 @@ impl<H: Host> Runtime<'_, H> {
             .map(str::to_owned)
             .filter(|marker| marker.rsplit_once('/').is_some())
             .map(|marker| format!("enum/{marker}"))
+    }
+
+    fn has_constant_specific_values(&mut self, class: &str) -> Result<bool, NativeError> {
+        let Some(values) = self.enum_values(class)? else {
+            return Ok(false);
+        };
+        Ok(values
+            .iter()
+            .any(|value| self.is_constant_specific_value(value)))
+    }
+
+    fn is_constant_specific_value(&self, value: &Value) -> bool {
+        let Some(class) = self.enum_value_class(value) else {
+            return false;
+        };
+        jar_object::object_class(value).is_some_and(|runtime| runtime != class)
     }
 
     fn enum_values(&mut self, class: &str) -> Result<Option<Vec<Value>>, NativeError> {
