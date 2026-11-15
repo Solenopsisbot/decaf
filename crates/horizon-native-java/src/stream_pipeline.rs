@@ -735,6 +735,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     /// Bind every host-collection source of `stream` to the collection's
     /// current elements (the spliterator's first use reads them).
     fn bind_sources(&mut self, stream: &str) -> Result<(), NativeError> {
+        // One level per nested `Stream.concat` (#250): Java's own concat chains overflow too.
+        let _level = crate::host_recursion::enter()?;
         match self.chain(stream)?.0 {
             Source::Values(marker) => {
                 if let Some(origin) = self.pipelines.origins.get(&marker).cloned() {
@@ -754,11 +756,16 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     /// Whether a spliterator source feeds `stream` (directly or through a
     /// concatenation).
     fn spliterator_fed(&self, stream: &str) -> bool {
-        match self.chain(stream) {
-            Ok((Source::Spliterator(_), _)) => true,
-            Ok((Source::Concat(a, b), _)) => self.spliterator_fed(&a) || self.spliterator_fed(&b),
-            _ => false,
+        // A concatenation tree as deep as a jar builds it: walked with a stack of its own (#250).
+        let mut pending = vec![stream.to_owned()];
+        while let Some(stream) = pending.pop() {
+            match self.chain(&stream) {
+                Ok((Source::Spliterator(_), _)) => return true,
+                Ok((Source::Concat(a, b), _)) => pending.extend([b, a]),
+                _ => {}
+            }
         }
+        false
     }
 
     /// Whether `collection.stream()`'s spliterator reports SIZED: a JDK
@@ -821,6 +828,18 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     /// Whether the pipeline's size is known without traversal: a `SIZED`
     /// source (`StreamOpFlag.SIZED`) through stages that keep or adjust it.
     fn sized(&self, stream: &str) -> bool {
+        // Every stream of a concatenation tree must be: a stack of its own, not recursion (#250).
+        let mut pending = vec![stream.to_owned()];
+        while let Some(stream) = pending.pop() {
+            if !self.sized_here(&stream, &mut pending) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// [`Self::sized`] of one stream; a concatenation's sides go on `pending`.
+    fn sized_here(&self, stream: &str, pending: &mut Vec<String>) -> bool {
         let Ok((source, stages)) = self.chain(stream) else {
             return false;
         };
@@ -828,7 +847,10 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             // A value list is SIZED only where its JDK spliterator reports
             // it (`Runtime::mark_sized`, #166).
             Source::Values(marker) => self.stream_is_sized(marker),
-            Source::Concat(a, b) => self.sized(a) && self.sized(b),
+            Source::Concat(a, b) => {
+                pending.extend([a.clone(), b.clone()]);
+                true
+            }
             Source::Spliterator(_) => self
                 .pipelines
                 .spliterators
@@ -1425,6 +1447,8 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 self.feed_collection(&origin, values, id)
             }
             Source::Concat(a, b) => {
+                // One level per nested `Stream.concat` (#250).
+                let _level = crate::host_recursion::enter()?;
                 let short = self
                     .pipelines
                     .drives
@@ -1708,6 +1732,11 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     }
 
     /// `accept(value)` on push `id`'s sink at stage `at`.
+    ///
+    /// Each stage hands at most one value to the next, so the push is a loop over the stages, not
+    /// one Rust call per stage: a chain as long as a jar builds it (`limit` 20,000 times) answers
+    /// as Java does instead of overflowing the native stack (#250). Only a `flatMap`, whose inner
+    /// stream is pushed into this sink, nests, one `host_recursion` level each.
     fn accept(&mut self, id: u64, at: usize, value: Value) -> Result<(), NativeError> {
         let Some(stages) = self
             .pipelines
@@ -1719,141 +1748,167 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 "stream sink outlived its push".into(),
             ));
         };
-        let Some(stage) = stages.get(at) else {
-            return self.terminal_accept(id, value);
-        };
-        let next = at + 1;
-        match stage {
-            Stage::Map(f, interface) => {
-                let mapped = self.call_sam(interface, f, &[value])?;
-                self.accept(id, next, mapped)
-            }
-            Stage::Filter(p, interface) => {
-                let keep = self.call_sam(interface, p, std::slice::from_ref(&value))?;
-                if truth(&keep) {
-                    self.accept(id, next, value)?;
+        let (mut at, mut value) = (at, value);
+        loop {
+            let Some(stage) = stages.get(at) else {
+                return self.terminal_accept(id, value);
+            };
+            let next = at + 1;
+            // The value the next stage receives; `None`: this one consumed it.
+            let passed: Option<Value> = match stage {
+                Stage::Map(f, interface) => Some(self.call_sam(interface, f, &[value])?),
+                Stage::Filter(p, interface) => {
+                    let keep = self.call_sam(interface, p, std::slice::from_ref(&value))?;
+                    truth(&keep).then_some(value)
                 }
-                Ok(())
-            }
-            Stage::Peek(c, interface) => {
-                self.call_sam(interface, c, std::slice::from_ref(&value))?;
-                self.accept(id, next, value)
-            }
-            Stage::FlatMap(f, interface) => {
-                let inner = self.call_sam(interface, f, &[value])?;
-                if inner == Value::Ref(None) {
-                    return Ok(());
+                Stage::Peek(c, interface) => {
+                    self.call_sam(interface, c, std::slice::from_ref(&value))?;
+                    Some(value)
                 }
-                let Some(inner) = self.is_stream(&inner) else {
-                    return Err(NativeError::Metadata(format!(
-                        "flatMap answered {}, not a stream",
-                        crate::describe_value(&inner)
-                    )));
-                };
-                self.consume(&inner)?;
-                self.drive(&inner, Terminal::Collect(Vec::new()), Some((id, next)))
-                    .map(drop)
-            }
-            Stage::Skip(_) => {
-                if let Some(State::Left(left)) = self.state(id, at)
-                    && *left > 0
-                {
-                    *left -= 1;
-                    return Ok(());
-                }
-                self.accept(id, next, value)
-            }
-            Stage::Limit(_) => {
-                if let Some(State::Left(left)) = self.state(id, at)
-                    && *left > 0
-                {
-                    *left -= 1;
-                    return self.accept(id, next, value);
-                }
-                Ok(())
-            }
-            Stage::Distinct => {
-                if let Some(State::None) = self.state(id, at) {
-                    return self.accept(id, next, value);
-                }
-                if let Some(State::Adjacent(seen_null, last)) = self.state(id, at) {
-                    // `if (t == null) { if (!seenNull) pass } else if
-                    // (lastSeen == null || !t.equals(lastSeen)) pass`.
-                    let (seen_null, last) = (*seen_null, last.clone());
-                    let passes = if value == Value::Ref(None) {
-                        !seen_null
-                    } else {
-                        match last {
-                            None => true,
-                            Some(last) => !self.java_equals(&value, &last)?,
-                        }
-                    };
-                    if passes {
-                        if let Some(State::Adjacent(seen_null, last)) = self.state(id, at) {
-                            if value == Value::Ref(None) {
-                                *seen_null = true;
-                                *last = None;
-                            } else {
-                                *last = Some(value.clone());
-                            }
-                        }
-                        self.accept(id, next, value)?;
+                Stage::FlatMap(f, interface) => {
+                    let inner = self.call_sam(interface, f, &[value])?;
+                    if inner == Value::Ref(None) {
+                        return Ok(());
                     }
-                    return Ok(());
+                    let Some(inner) = self.is_stream(&inner) else {
+                        return Err(NativeError::Metadata(format!(
+                            "flatMap answered {}, not a stream",
+                            crate::describe_value(&inner)
+                        )));
+                    };
+                    // The inner stream pushes into this sink: one level of nesting.
+                    let _level = crate::host_recursion::enter()?;
+                    self.consume(&inner)?;
+                    return self
+                        .drive(&inner, Terminal::Collect(Vec::new()), Some((id, next)))
+                        .map(drop);
                 }
-                let Some(State::Seen(set, _)) = self.state(id, at) else {
-                    return self.accept(id, next, value);
-                };
-                let set = set.clone();
-                let passes = match self.distinct_accept(&set, &value)? {
-                    Some(added) => added,
-                    // Counted: kept by value.
-                    None => match self.state(id, at) {
-                        Some(State::Seen(_, by_value)) if !by_value.contains(&value) => {
-                            by_value.push(value.clone());
-                            true
-                        }
-                        _ => false,
-                    },
-                };
-                if passes {
-                    self.accept(id, next, value)?;
+                Stage::Skip(_) => {
+                    if let Some(State::Left(left)) = self.state(id, at)
+                        && *left > 0
+                    {
+                        *left -= 1;
+                        None
+                    } else {
+                        Some(value)
+                    }
                 }
-                Ok(())
-            }
-            Stage::Sorted(_) => {
-                if let Some(State::Buffer(buffer)) = self.state(id, at) {
-                    buffer.push(value);
-                    return Ok(());
+                Stage::Limit(_) => {
+                    if let Some(State::Left(left)) = self.state(id, at)
+                        && *left > 0
+                    {
+                        *left -= 1;
+                        Some(value)
+                    } else {
+                        None
+                    }
                 }
-                // A no-op `sorted()` (`State::None`): pass it on.
-                self.accept(id, next, value)
-            }
-            Stage::Pass => self.accept(id, next, value),
-            Stage::Widen(kind) => {
-                let widened = match (kind, value) {
+                Stage::Distinct => self.distinct_stage(id, at, value)?,
+                Stage::Sorted(_) => {
+                    if let Some(State::Buffer(buffer)) = self.state(id, at) {
+                        buffer.push(value);
+                        None
+                    } else {
+                        // A no-op `sorted()` (`State::None`): pass it on.
+                        Some(value)
+                    }
+                }
+                Stage::Pass => Some(value),
+                Stage::Widen(kind) => Some(match (kind, value) {
                     // `Integer.valueOf`.
                     ('I', Value::Int(v)) => Value::Boxed(crate::Boxed::Integer(v)),
                     ('J', Value::Int(v)) => Value::Long(i64::from(v)),
                     ('D', Value::Int(v)) => Value::Float(f64::from(v)),
                     ('D', Value::Long(v)) => Value::Float(v as f64),
                     (_, other) => other,
-                };
-                self.accept(id, next, widened)
+                }),
+            };
+            match passed {
+                Some(passed) => {
+                    at = next;
+                    value = passed;
+                }
+                None => return Ok(()),
             }
         }
     }
 
+    /// `DistinctOps`' sink: the value it passes on, or `None` for a repeat.
+    fn distinct_stage(
+        &mut self,
+        id: u64,
+        at: usize,
+        value: Value,
+    ) -> Result<Option<Value>, NativeError> {
+        if let Some(State::None) = self.state(id, at) {
+            return Ok(Some(value));
+        }
+        if let Some(State::Adjacent(seen_null, last)) = self.state(id, at) {
+            // `if (t == null) { if (!seenNull) pass } else if
+            // (lastSeen == null || !t.equals(lastSeen)) pass`.
+            let (seen_null, last) = (*seen_null, last.clone());
+            let passes = if value == Value::Ref(None) {
+                !seen_null
+            } else {
+                match last {
+                    None => true,
+                    Some(last) => !self.java_equals(&value, &last)?,
+                }
+            };
+            if !passes {
+                return Ok(None);
+            }
+            if let Some(State::Adjacent(seen_null, last)) = self.state(id, at) {
+                if value == Value::Ref(None) {
+                    *seen_null = true;
+                    *last = None;
+                } else {
+                    *last = Some(value.clone());
+                }
+            }
+            return Ok(Some(value));
+        }
+        let Some(State::Seen(set, _)) = self.state(id, at) else {
+            return Ok(Some(value));
+        };
+        let set = set.clone();
+        let passes = match self.distinct_accept(&set, &value)? {
+            Some(added) => added,
+            // Counted: kept by value.
+            None => match self.state(id, at) {
+                Some(State::Seen(_, by_value)) if !by_value.contains(&value) => {
+                    by_value.push(value.clone());
+                    true
+                }
+                _ => false,
+            },
+        };
+        Ok(passes.then_some(value))
+    }
+
     /// The end of the source: each `sorted` from `at` on sorts its buffer
     /// and pushes it downstream, then ends its own downstream.
+    ///
+    /// A loop over the buffering stages, never one Rust call per stage (#250).
     fn flush(&mut self, id: u64, at: usize) -> Result<(), NativeError> {
+        let mut at = at;
+        loop {
+            match self.flush_one(id, at)? {
+                Some(next) => at = next,
+                None => return Ok(()),
+            }
+        }
+    }
+
+    /// Flush the first buffering `sorted` from `at` on; the stage after it, `None` when none.
+    fn flush_one(&mut self, id: u64, at: usize) -> Result<Option<usize>, NativeError> {
         let Some(stages) = self
             .pipelines
             .drives
             .get(&id)
             .map(|drive| Arc::clone(&drive.stages))
         else {
-            return Ok(());
+            return Ok(None);
         };
         // The next `sorted` that buffers (a no-op one passed its elements on).
         let buffering: Vec<bool> = self
@@ -1880,7 +1935,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                     _ => None,
                 })
         else {
-            return Ok(());
+            return Ok(None);
         };
         let buffer = match self.state(id, index) {
             Some(State::Buffer(buffer)) => std::mem::take(buffer),
@@ -1895,7 +1950,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             }
             self.accept(id, index + 1, value)?;
         }
-        self.flush(id, index + 1)
+        Ok(Some(index + 1))
     }
 
     /// The terminal sink's `accept`.

@@ -75,12 +75,22 @@ pub(crate) fn owner(value: &Value) -> Option<String> {
 
 /// The text `String.valueOf(value)` gives for a model object.
 pub(crate) fn modelled<H: Host>(host: &mut H, value: &Value) -> Option<String> {
+    modelled_checked(host, value).ok().flatten()
+}
+
+/// [`modelled`], with a nested walk's `StackOverflowError` thrown rather than read as "no
+/// model" (#250): the host's printing walks (`HostNested`, a collection's elements) call this,
+/// so a cycle ends as Java's does, not in counted text.
+pub(crate) fn modelled_checked<H: Host>(
+    host: &mut H,
+    value: &Value,
+) -> Result<Option<String>, crate::runtime::NativeError> {
     // A jar's `new UUID(msb, lsb)` prints its halves (`host_jdk_value.rs`); one whose
     // constructor the host did not see prints nothing modelled (counted by the caller).
     if crate::runtime::host_jdk_value::is_uuid_object(value) {
-        return host
+        return Ok(host
             .constructed_uuid(value)
-            .map(|(msb, lsb)| crate::runtime::host_jdk_value::uuid_text_of(msb, lsb));
+            .map(|(msb, lsb)| crate::runtime::host_jdk_value::uuid_text_of(msb, lsb)));
     }
     // A host object (an `Optional`) prints through its class's model; an
     // allocated object through its class's, below.
@@ -94,25 +104,38 @@ pub(crate) fn modelled<H: Host>(host: &mut H, value: &Value) -> Option<String> {
             descriptor: "()Ljava/lang/String;".into(),
         };
         return match host.invoke_instance(&to_string, value, &[]) {
-            Ok(Value::Ref(Some(text))) => Some(text),
-            _ => None,
+            Ok(Value::Ref(Some(text))) => Ok(Some(text)),
+            Err(error) if crate::runtime::host_recursion::is_stack_overflow(&error) => Err(error),
+            _ => Ok(None),
         };
     }
-    modelled_marker(host, value)
+    modelled_marker_checked(host, value)
 }
 
 /// [`modelled`] for a marker or an allocated object.
 pub(crate) fn modelled_marker<H: Host>(host: &mut H, value: &Value) -> Option<String> {
-    let owner = owner(value)?;
-    let marker = expect_ref(value)?;
+    modelled_marker_checked(host, value).ok().flatten()
+}
+
+fn modelled_marker_checked<H: Host>(
+    host: &mut H,
+    value: &Value,
+) -> Result<Option<String>, crate::runtime::NativeError> {
+    let Some(owner) = owner(value) else {
+        return Ok(None);
+    };
+    let Some(marker) = expect_ref(value) else {
+        return Ok(None);
+    };
     let to_string = MethodRef {
         owner,
         name: "toString".into(),
         descriptor: "()Ljava/lang/String;".into(),
     };
     match host.invoke_instance(&to_string, value, &[]) {
-        Ok(Value::Ref(Some(text))) if text != *marker => Some(text),
-        _ => None,
+        Ok(Value::Ref(Some(text))) if text != *marker => Ok(Some(text)),
+        Err(error) if crate::runtime::host_recursion::is_stack_overflow(&error) => Err(error),
+        _ => Ok(None),
     }
 }
 

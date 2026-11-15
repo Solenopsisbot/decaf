@@ -353,6 +353,7 @@ impl StdHost {
         push(self.collection_comparators.get(marker), out);
         push(self.references.get(marker), out);
         push(self.throwable_causes.get(marker), out);
+        push(self.throwable_suppressed.get(marker), out);
         push(self.hash_tables.get(marker), out);
         push(self.red_black_trees.get(marker), out);
         push(self.probe_tables.get(marker), out);
@@ -377,6 +378,7 @@ impl StdHost {
             .chain(self.collection_comparators.keys())
             .chain(self.references.keys())
             .chain(self.throwable_causes.keys())
+            .chain(self.throwable_suppressed.keys())
             .chain(self.throwable_messages.keys())
             .chain(self.hash_tables.keys())
             .chain(self.red_black_trees.keys())
@@ -399,6 +401,7 @@ impl StdHost {
         self.collection_comparators.retain(|key, _| keep(key));
         self.references.retain(|key, _| keep(key));
         self.throwable_causes.retain(|key, _| keep(key));
+        self.throwable_suppressed.retain(|key, _| keep(key));
         self.throwable_messages.retain(|key, _| keep(key));
         self.hash_tables.retain(|key, _| keep(key));
         self.red_black_trees.retain(|key, _| keep(key));
@@ -1342,6 +1345,7 @@ mod tests {
             "capability_requests",
             "throwable_messages",
             "throwable_causes",
+            "throwable_suppressed",
             "persistent_static_fields",
             "heap",
             "retained",

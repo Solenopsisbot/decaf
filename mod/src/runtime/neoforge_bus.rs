@@ -75,6 +75,8 @@
 //!   class (the declaring class is found by walking the jar's superclasses); one whose owner is a
 //!   NeoForge class is counted, since the runtime does not know which class declares the method.
 
+use std::collections::BTreeMap;
+
 use crate::runtime::events::ListenerCallback;
 use crate::runtime::neoforge_event_classes::{ABSTRACT, CANCELLABLE, EVENT_CLASSES, MOD_BUS};
 use crate::runtime::{Host, MethodRef, NativeError, Runtime, Value, expect_ref, parse_callback_marker};
@@ -176,6 +178,29 @@ pub(crate) fn table_superclass(class: &str) -> Option<String> {
 /// `Class#toString`: `class a.b.C$D` (every event class here is a class, not an interface).
 pub(crate) fn class_text(internal: &str) -> String {
     format!("class {}", internal.replace('/', "."))
+}
+
+fn illegal_null_pointer() -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/NullPointerException".into(),
+        message: Some("Cannot invoke \"java.lang.Class.getModifiers()\" because the return value of \"java.lang.Class.getSuperclass()\" is null".into()),
+        frame: None,
+    }
+}
+
+fn raw_consumer_lambda(consumer: &Value) -> bool {
+    let Some(text) = expect_ref(consumer) else {
+        return false;
+    };
+    let Some(marker) = text
+        .strip_prefix("@indy:")
+        .and_then(|_| parse_callback_marker(text).ok())
+    else {
+        return false;
+    };
+    crate::runtime::descriptor_arguments(&marker.target.descriptor)
+        .last()
+        .is_some_and(|parameter| parameter == "Ljava/lang/Object;")
 }
 
 pub(crate) fn illegal_argument(message: String) -> NativeError {
@@ -313,6 +338,7 @@ impl<H: Host> Runtime<'_, H> {
             },
             None => match self.consumer_event_class(&consumer) {
                 Some(class) => class,
+                None if raw_consumer_lambda(&consumer) => return Err(illegal_null_pointer()),
                 None => return counted("event type not resolved"),
             },
         };
@@ -423,18 +449,13 @@ impl<H: Host> Runtime<'_, H> {
             .any(|name| name == wanted || self.implements(name, wanted, depth + 1))
     }
 
-    /// typetools' `resolveRawArgument(Consumer.class, consumer.getClass())`, where the runtime can
-    /// follow it; `None` where it cannot (counted, departure B3).
+    /// Resolve the consumer event class with a TypeResolver-style environment.
     fn consumer_event_class(&self, consumer: &Value) -> Option<String> {
         if let Some(text) = expect_ref(consumer)
             && text.starts_with("@indy:")
         {
             let marker = parse_callback_marker(text).ok()?;
             let parameters = crate::runtime::descriptor_arguments(&marker.target.descriptor);
-            // `populateLambdaArgs`: an implementation method with one parameter fewer than
-            // `accept` (none) is an unbound instance reference, and `T` is the method's declaring
-            // class, which only a jar class's own methods show (departure B6); otherwise `T` is
-            // the parameter `accept`'s argument lands on, the last.
             let raw = match parameters.last() {
                 None => return self.declaring_class(&marker.target),
                 Some(last) => last,
@@ -442,24 +463,83 @@ impl<H: Host> Runtime<'_, H> {
             return raw
                 .strip_prefix('L')
                 .and_then(|rest| rest.strip_suffix(';'))
+                .filter(|class| *class != "java/lang/Object")
                 .map(str::to_owned);
         }
-        // An object of a jar class: the `Consumer<X>` its own or a jar superclass's signature
-        // implements.
         let class = crate::runtime::jar_object::object_class(consumer)?;
-        let mut at = class.to_owned();
-        for _ in 0..32 {
-            let file = self.class(&at)?;
-            if let Some(found) = file
-                .class_signature()
-                .as_deref()
-                .and_then(consumer_argument)
+        self.resolve_consumer_class(class, BTreeMap::new(), 0)
+    }
+
+    fn resolve_consumer_class(
+        &self,
+        class: &str,
+        inherited: BTreeMap<String, SigType>,
+        depth: usize,
+    ) -> Option<String> {
+        if depth > 32 {
+            return None;
+        }
+        let file = self.class(class)?;
+        let parsed = file
+            .class_signature()
+            .as_deref()
+            .and_then(parse_class_signature);
+        let (bounds, superclass, interfaces) = match parsed {
+            Some((bounds, superclass, interfaces)) => (bounds, superclass, interfaces),
+            None => {
+                if file.interface_names().iter().any(|name| name == CONSUMER) {
+                    return None;
+                }
+                return self.resolve_consumer_class(&file.super_name, BTreeMap::new(), depth + 1);
+            }
+        };
+
+        let mut env = inherited;
+        let names: Vec<String> = bounds.keys().cloned().collect();
+        for name in names {
+            if env.contains_key(&name) {
+                continue;
+            }
+            if let Some(bound) = bounds.get(&name)
+                && let Some(value) = substitute_sig(bound, &env, &bounds, 0)
             {
+                env.insert(name, value);
+            }
+        }
+
+        for edge in interfaces.into_iter().chain(std::iter::once(superclass)) {
+            let edge = substitute_sig(&edge, &env, &bounds, 0)?;
+            let SigType::Class(raw, args) = edge else {
+                continue;
+            };
+            if raw == CONSUMER {
+                let argument = args.first()?;
+                return raw_class_name(&substitute_sig(argument, &env, &bounds, 0)?);
+            }
+            let child_env = self.child_type_environment(&raw, &args);
+            if let Some(found) = self.resolve_consumer_class(&raw, child_env, depth + 1) {
                 return Some(found);
             }
-            at = file.super_name.clone();
         }
         None
+    }
+
+    fn child_type_environment(&self, class: &str, args: &[SigType]) -> BTreeMap<String, SigType> {
+        let Some(file) = self.class(class) else {
+            return BTreeMap::new();
+        };
+        let Some((bounds, _, _)) = file
+            .class_signature()
+            .as_deref()
+            .and_then(parse_class_signature)
+        else {
+            return BTreeMap::new();
+        };
+        bounds
+            .keys()
+            .zip(args.iter())
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
     }
 
     /// The jar class that declares `method`, walking up from its owner.
@@ -513,61 +593,150 @@ impl<H: Host> Runtime<'_, H> {
     }
 }
 
-/// The class a generic class signature's `Consumer<X>` supertype names, when `X` is a class type
-/// (`Lpkg/Event;` or `Lpkg/Event<..>;`). A type variable or wildcard argument answers `None`.
-fn consumer_argument(signature: &str) -> Option<String> {
-    let mut rest = signature;
-    // Formal type parameters: `<T:Ljava/lang/Object;>`.
-    if rest.starts_with('<') {
-        rest = &rest[matching_angle(rest)? + 1..];
-    }
-    while !rest.is_empty() {
-        let end = class_type_end(rest)?;
-        let (one, after) = rest.split_at(end);
-        if let Some(arguments) = one
-            .strip_prefix('L')
-            .and_then(|s| s.strip_prefix(CONSUMER))
-            .and_then(|s| s.strip_prefix('<'))
-        {
-            let argument = arguments.strip_prefix('L')?;
-            let stop = argument.find([';', '<'])?;
-            return Some(argument[..stop].to_owned());
-        }
-        rest = after;
-    }
-    None
+/// One reference type in a class Signature.
+#[derive(Clone, Debug)]
+enum SigType {
+    Class(String, Vec<SigType>),
+    Var(String),
 }
 
-/// The index of the `>` that closes the `<` at `text[0]`.
-fn matching_angle(text: &str) -> Option<usize> {
-    let mut depth = 0usize;
-    for (at, ch) in text.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(at);
-                }
+fn parse_class_signature(
+    signature: &str,
+) -> Option<(BTreeMap<String, SigType>, SigType, Vec<SigType>)> {
+    let mut parser = SigParser {
+        text: signature,
+        at: 0,
+    };
+    let bounds = parser.formals()?;
+    let superclass = parser.ty()?;
+    let mut interfaces = Vec::new();
+    while parser.at < parser.text.len() {
+        interfaces.push(parser.ty()?);
+    }
+    Some((bounds, superclass, interfaces))
+}
+
+struct SigParser<'a> {
+    text: &'a str,
+    at: usize,
+}
+
+impl SigParser<'_> {
+    fn formals(&mut self) -> Option<BTreeMap<String, SigType>> {
+        let mut bounds = BTreeMap::new();
+        if self.peek() != Some('<') {
+            return Some(bounds);
+        }
+        self.at += 1;
+        while self.peek()? != '>' {
+            let begin = self.at;
+            while self.peek()? != ':' {
+                self.at += 1;
             }
-            _ => {}
+            let name = self.text[begin..self.at].to_owned();
+            self.at += 1;
+            let bound = if self.peek() == Some(':') {
+                SigType::Class("java/lang/Object".into(), Vec::new())
+            } else {
+                self.ty()?
+            };
+            bounds.insert(name, bound);
+            while self.peek() == Some(':') {
+                self.at += 1;
+                self.ty()?;
+            }
+        }
+        self.at += 1;
+        Some(bounds)
+    }
+
+    fn ty(&mut self) -> Option<SigType> {
+        match self.peek()? {
+            'T' => {
+                self.at += 1;
+                let begin = self.at;
+                while self.peek()? != ';' {
+                    self.at += 1;
+                }
+                let name = self.text[begin..self.at].to_owned();
+                self.at += 1;
+                Some(SigType::Var(name))
+            }
+            'L' => {
+                self.at += 1;
+                let begin = self.at;
+                while !matches!(self.peek()?, '<' | ';') {
+                    self.at += 1;
+                }
+                let raw = self.text[begin..self.at].to_owned();
+                let mut args = Vec::new();
+                if self.peek() == Some('<') {
+                    self.at += 1;
+                    while self.peek()? != '>' {
+                        args.push(self.ty()?);
+                    }
+                    self.at += 1;
+                }
+                if self.peek()? != ';' {
+                    return None;
+                }
+                self.at += 1;
+                Some(SigType::Class(raw, args))
+            }
+            _ => None,
         }
     }
-    None
+
+    fn peek(&self) -> Option<char> {
+        self.text[self.at..].chars().next()
+    }
 }
 
-/// The length of the class type signature at the start of `text` (`Lpkg/A<..>.B<..>;`).
-fn class_type_end(text: &str) -> Option<usize> {
-    if !text.starts_with('L') {
+fn substitute_sig(
+    ty: &SigType,
+    env: &BTreeMap<String, SigType>,
+    bounds: &BTreeMap<String, SigType>,
+    depth: usize,
+) -> Option<SigType> {
+    if depth > 32 {
         return None;
     }
-    let mut depth = 0usize;
-    for (at, ch) in text.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.checked_sub(1)?,
-            ';' if depth == 0 => return Some(at + 1),
-            _ => {}
+    match ty {
+        SigType::Class(raw, args) => Some(SigType::Class(
+            raw.clone(),
+            args.iter()
+                .map(|arg| substitute_sig(arg, env, bounds, depth + 1))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        SigType::Var(name) => {
+            if let Some(value) = env.get(name) {
+                substitute_sig(value, env, bounds, depth + 1)
+            } else if let Some(value) = bounds.get(name) {
+                substitute_sig(value, env, bounds, depth + 1)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn raw_class_name(ty: &SigType) -> Option<String> {
+    match ty {
+        SigType::Class(raw, _) => Some(raw.clone()),
+        SigType::Var(_) => None,
+    }
+}
+
+#[cfg(test)]
+fn consumer_argument(signature: &str) -> Option<String> {
+    let (bounds, _, interfaces) = parse_class_signature(signature)?;
+    let env = BTreeMap::new();
+    for edge in interfaces {
+        let SigType::Class(raw, args) = edge else {
+            continue;
+        };
+        if raw == CONSUMER {
+            return raw_class_name(&substitute_sig(args.first()?, &env, &bounds, 0)?);
         }
     }
     None
@@ -633,9 +802,17 @@ mod tests {
         assert_eq!(
             consumer_argument(
                 "<T:Lnet/neoforged/bus/api/Event;>Ljava/lang/Object;Ljava/util/function/Consumer<TT;>;"
-            ),
-            None,
-            "a type variable is left to typetools' bound resolution, which is counted"
+            )
+            .as_deref(),
+            Some("net/neoforged/bus/api/Event"),
+            "a bounded type variable resolves like typetools' resolveBound"
+        );
+        assert_eq!(
+            consumer_argument(
+                "<T:Lnet/neoforged/neoforge/event/tick/ServerTickEvent$Post;>Ljava/lang/Object;Ljava/util/function/Consumer<TT;>;"
+            )
+            .as_deref(),
+            Some("net/neoforged/neoforge/event/tick/ServerTickEvent$Post")
         );
         assert_eq!(
             consumer_argument(

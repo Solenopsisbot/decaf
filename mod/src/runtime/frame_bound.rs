@@ -28,6 +28,18 @@
 //! (the regex matcher) adapts to whatever is left. A deep chain runs on a
 //! thread with room for it and is refused, never aborted, on one without.
 //!
+//! **How deep that is depends on the build.** A jar frame's native cost is
+//! `invoke_frame`'s frame: one instruction loop whose every arm's locals share
+//! it. Unoptimised that is ~150 KiB, so an 8 MiB thread nests about 50 jar
+//! frames and a 2 MiB test thread about 10; optimised, ~11 KiB, about 780 on
+//! 8 MiB. The JVM's default stack nests ~4,400 to ~37,000 (Java 25, `-Xss1m`
+//! to `-Xss2m`). So a refusal here is the bound's answer, not Java's, even for
+//! a recursion Java would also overflow: a jar handler that catches it gets
+//! Java's `StackOverflowError`, and the conversion is counted
+//! (`java/lang/StackOverflowError#<frame-bound:DEPTH>()V`, `deliver_throw`;
+//! #260 review). A test must not depend on the build: a case only one build
+//! reaches asserts Java's answer or the bound's count.
+//!
 //! Where the platform does not report the thread's stack, the bound stays a
 //! count ([`UNKNOWN_STACK_DEPTH`]), sized from the measured worst frame so a
 //! 2 MiB thread keeps 640 KiB free (what the regex matcher assumes there).

@@ -781,6 +781,9 @@ impl<H: Host> Runtime<'_, H> {
         style: &GsonStyle,
         depth: usize,
     ) -> Result<Option<String>, NativeError> {
+        // One level of a nested value (#250): Gson recurses through a cycle until a
+        // `StackOverflowError`, and so does this writer.
+        let _level = crate::runtime::host_recursion::enter()?;
         // A `JsonElement` is written by its own adapter (`gson_tree.rs`).
         if let Some(text) = self.gson_tree_json(value, &style.tree_style(), depth)? {
             return Ok(text);

@@ -387,6 +387,9 @@ fn run(jar: &NativeJar, name: &str) -> (Value, Vec<(String, usize)>) {
 
 /// The methods answered exactly as Java 25 does, with nothing counted.
 const EXACT: &[(&str, &str)] = &[
+    // `Arrays.deepToString`/`deepHashCode` are modelled (#250, `object_methods.rs`).
+    ("helperDeepToString", "[[1, 2], [3]]"),
+    ("helperDeepHashCode", "31809"),
     // Strings spelled like the old markers (`array/...`), the handle text form (`harr:...`) and the new keys (`[I#0`, `color-collection#0`) are Strings: `instanceof String`, `getClass`, `equals`, `hashCode`, a type switch, a cast to `int[]`, `int[].class.isInstance`, list elements and `HashMap` keys.
     (
         "spelled",
@@ -487,15 +490,6 @@ const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
     ),
     // Unmodelled on main and here (content based, no identity involved).
     (
-        "helperDeepToString",
-        "[[1, 2], [3]]",
-        &[(
-            "java/util/Arrays#deepToString([Ljava/lang/Object;)Ljava/lang/String;",
-            1,
-        )],
-    ),
-    // Unmodelled on main and here (content based, no identity involved).
-    (
         "helperHashCodeInts",
         "30817",
         &[("java/util/Arrays#hashCode([I)I", 1)],
@@ -505,12 +499,6 @@ const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
         "helperHashCodeDoubles",
         "569406559",
         &[("java/util/Arrays#hashCode([D)I", 1)],
-    ),
-    // Unmodelled on main and here (content based, no identity involved).
-    (
-        "helperDeepHashCode",
-        "31809",
-        &[("java/util/Arrays#deepHashCode([Ljava/lang/Object;)I", 1)],
     ),
     // Unmodelled on main and here (content based, no identity involved).
     (

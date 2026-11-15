@@ -653,6 +653,18 @@ fn main() -> ExitCode {
         return weave_main(&path, &output, json);
     }
     let mut kind = requested_kind.clone().unwrap_or_else(|| "main".to_owned());
+    // The census can ask for NeoForge's physical client side explicitly.
+    let force_client = kind == "neoforge-client";
+    if force_client {
+        kind = "neoforge".to_owned();
+    }
+    let requested_kind = requested_kind.map(|k| {
+        if k == "neoforge-client" {
+            "neoforge".to_owned()
+        } else {
+            k
+        }
+    });
     let jar = match NativeJar::from_path(&PathBuf::from(path)) {
         Ok(jar) => jar,
         Err(error) => {
@@ -714,7 +726,11 @@ fn main() -> ExitCode {
         // A NeoForge `@Mod` class can be limited to one physical side; the
         // probe runs the client role only when asked for `client`, and every
         // other role is a server, as the dedicated-server ledger is.
-        let side = if kind == "client" { "CLIENT" } else { "SERVER" };
+        let side = if kind == "client" || force_client {
+            "CLIENT"
+        } else {
+            "SERVER"
+        };
         let selected_kind = match requested_kind.as_deref() {
             Some(_) => Some(kind.clone()),
             None => ["main", "client", "server", "neoforge"]
@@ -741,7 +757,13 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     // A probe run is a dedicated server unless it asked for the client role.
-    let side = if kind == "client" { "CLIENT" } else { "SERVER" };
+    // A multi-stage run containing `client` is a physical client run.
+    let force_client = force_client || kind.split(',').any(|stage| stage == "client");
+    let side = if kind == "client" || force_client {
+        "CLIENT"
+    } else {
+        "SERVER"
+    };
     let mut seed = StdHost::new().with_environment_type(side);
     if let Some(version) = game_version {
         seed = seed.with_game_version(version);
@@ -818,7 +840,7 @@ fn main() -> ExitCode {
     match error {
         None => {
             if json {
-                let commands = command_summary(&jar, &host, kind != "client");
+                let commands = command_summary(&jar, &host, kind != "client" && !force_client);
                 println!("{}", {
                     let mut report = execution_json(&kind, &entrypoints, calls, &host, &jar);
                     report["verdict"] = horizon_native_java::verdict::verdict(
@@ -830,9 +852,37 @@ fn main() -> ExitCode {
                     report["failed"] = failures.clone().into();
                     // The listeners the game can fire, by event name, and
                     // the registrations on events it never fires.
-                    report["game_listeners"] = game_listener_counts(&host, &jar, kind != "client");
+                    report["game_listeners"] =
+                        game_listener_counts(&host, &jar, kind != "client" && !force_client);
                     // The command tree its registration callbacks build.
                     report["commands"] = commands;
+                    // Client registrations are part of the census report even
+                    // when an entrypoint has no callback that the game fires.
+                    let (layers, layer_refusals) = host.client_hud_layers(&jar);
+                    let found = host.game_listeners(&jar, false);
+                    let mut client_events = std::collections::BTreeMap::<&str, usize>::new();
+                    for listener in found
+                        .listeners
+                        .iter()
+                        .filter(|listener| listener.event.is_client())
+                    {
+                        *client_events.entry(listener.event.name()).or_default() += 1;
+                    }
+                    let refused = host
+                        .client_refused_registrations()
+                        .iter()
+                        .cloned()
+                        .chain(layer_refusals)
+                        .collect::<Vec<_>>();
+                    report["client_keys"] = host.client_key_mappings().len().into();
+                    report["hud_layers"] = layers.len().into();
+                    report["listeners"] = serde_json::to_value(client_events).unwrap_or_default();
+                    report["unfired"] = serde_json::to_value(found.unsupported).unwrap_or_default();
+                    report["refused"] = refused.into();
+                    // One in-world frame: fire every client listener and HUD layer once.
+                    if !(kind != "client" && !force_client) {
+                        report["frame"] = frame_census(&jar, &mut host.clone(), &layers);
+                    }
                     report
                 });
             } else {
@@ -998,6 +1048,76 @@ fn game_listener_counts(
         "events": events,
         "unsupported": found.unsupported,
     })
+}
+
+/// Run each client callback once in a canonical in-world frame for the census.
+fn frame_census(
+    jar: &horizon_native_java::NativeJar,
+    host: &mut StdHost,
+    layers: &[horizon_native_java::client_surface::HudLayer],
+) -> serde_json::Value {
+    use horizon_native_java::client_surface::{
+        ClientLevel, ClientPlayer, ClientSnapshot, TextMetrics,
+    };
+    use horizon_native_java::events::{EventContext, EventFacade, EventFiring, GameEvent};
+    use std::sync::Arc;
+    let snapshot = Arc::new(ClientSnapshot {
+        player: Some(ClientPlayer {
+            name: "Alex".into(),
+            pos: [0.5, 64.0, 0.5],
+            health: 20.0,
+            max_health: 20.0,
+            ..ClientPlayer::default()
+        }),
+        level: Some(ClientLevel::default()),
+        single_player: true,
+        gui_size: [427, 240],
+        window_size: [854, 480],
+        gui_scale: 2.0,
+        fps: 60,
+        render_distance: 12,
+        metrics: Arc::new(TextMetrics {
+            advances: vec![6.0; 128],
+            fallback: 6.0,
+            translations: Default::default(),
+        }),
+        ..ClientSnapshot::default()
+    });
+    let budget = horizon_native_java::ExecutionBudget::UNBOUNDED;
+    let keys = vec![Default::default(); host.client_key_mappings().len()];
+    let mut out = Vec::new();
+    let listeners: Vec<_> = host
+        .game_listeners(jar, false)
+        .listeners
+        .into_iter()
+        .filter(|l| {
+            l.event.name().starts_with("client_")
+                && !matches!(
+                    l.event,
+                    GameEvent::ClientRegisterKeyMappings | GameEvent::ClientRegisterGuiLayers
+                )
+        })
+        .collect();
+    for listener in &listeners {
+        host.begin_client_frame(snapshot.clone(), &keys);
+        let mut firing = EventFiring::new(
+            listener.event,
+            Arc::new(EventFacade::default()),
+            EventContext::default(),
+        );
+        let result = jar.run_game_listener(listener, &mut firing, host, &budget);
+        let draws = host.end_client_frame().draws.len();
+        out.push(serde_json::json!({"what": listener.event.name(), "ok": result.is_ok(),
+            "error": result.err().map(|e| e.to_string().chars().take(300).collect::<String>()), "draws": draws}));
+    }
+    for layer in layers {
+        host.begin_client_frame(snapshot.clone(), &keys);
+        let result = jar.run_hud_layer(layer, host, &budget);
+        let draws = host.end_client_frame().draws.len();
+        out.push(serde_json::json!({"what": "hud_layer", "ok": result.is_ok(),
+            "error": result.err().map(|e| e.to_string().chars().take(300).collect::<String>()), "draws": draws}));
+    }
+    out.into()
 }
 
 /// The threads the jar started whose bodies never ran (`Thread.start` is a

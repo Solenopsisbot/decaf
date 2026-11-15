@@ -1108,30 +1108,7 @@ impl StdHost {
             (FONT_CLASS, "lineHeight") => Some(Ok(Value::Int(9))),
             // `java.awt.Color`'s constants, which HUD mods turn into ARGB
             // ints with `getRGB()` (durabilityviewer's indicator colours).
-            ("java/awt/Color", name) => {
-                // The JDK exposes both `LIGHT_GRAY`/`lightGray` and
-                // `DARK_GRAY`/`darkGray`; spellings are aliases of one object.
-                let canonical = match name {
-                    "lightGray" => Some("LIGHT_GRAY"),
-                    "darkGray" => Some("DARK_GRAY"),
-                    "white" => Some("WHITE"),
-                    "gray" => Some("GRAY"),
-                    "black" => Some("BLACK"),
-                    "red" => Some("RED"),
-                    "pink" => Some("PINK"),
-                    "orange" => Some("ORANGE"),
-                    "yellow" => Some("YELLOW"),
-                    "green" => Some("GREEN"),
-                    "magenta" => Some("MAGENTA"),
-                    "cyan" => Some("CYAN"),
-                    "blue" => Some("BLUE"),
-                    _ => Some(name),
-                }?;
-                AWT_COLORS
-                    .iter()
-                    .find(|(n, _)| *n == canonical)
-                    .map(|(_, argb)| Ok(marker(format!("{AWT_COLOR}{argb:08x}"))))
-            }
+            ("java/awt/Color", name) => awt_constant(name).map(Ok),
             // Item, block and effect constants answer only in a firing: an
             // entrypoint reading `Items.DIAMOND` keeps the answer it always got.
             ("net/minecraft/world/item/Items", name) if frame.is_some() => Some(Ok(marker(
@@ -1362,6 +1339,11 @@ impl StdHost {
         if self.client.key_inits.contains_key(&text) {
             return self.key_mapping_call(&text, r, args);
         }
+        if self.client.categories.contains_key(&text)
+            && matches!(r.name.as_str(), "equals" | "hashCode")
+        {
+            return Some(self.unknown_host_call(r));
+        }
         // `equals`, `hashCode` and `toString` of a client handle are its
         // kind's (`game_object.rs`, `client_values.rs`), answered before here.
         if let Some(id) = text.strip_prefix(CATEGORY) {
@@ -1503,12 +1485,8 @@ impl StdHost {
             {
                 return Some(self.unknown_host_call(r));
             }
-            ("getCategory", _) => init.category_value.clone().unwrap_or_else(|| {
-                marker(format!(
-                    "{CATEGORY}{}",
-                    init.category.as_deref().unwrap_or("minecraft:misc")
-                ))
-            }),
+            // Java returns the constructor argument verbatim, including null.
+            ("getCategory", _) => init.category_value.clone().unwrap_or(Value::Ref(None)),
             ("hashCode", "()I") => Value::Int(stable_hash(object)),
             ("equals", "(Ljava/lang/Object;)Z") | ("same", _) => flag(
                 args.first()

@@ -318,7 +318,11 @@ impl<H: Host> Runtime<'_, H> {
         Ok(())
     }
 
-    fn sort_enum_values(&mut self, values: &mut [Value], _r: &MethodRef) -> Result<(), NativeError> {
+    fn sort_enum_values(
+        &mut self,
+        values: &mut [Value],
+        _r: &MethodRef,
+    ) -> Result<(), NativeError> {
         let mut keyed = Vec::with_capacity(values.len());
         for value in values.iter() {
             let Some(ordinal) = enum_ordinal(self, value)? else {

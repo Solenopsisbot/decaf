@@ -101,4 +101,16 @@ public final class Probe {
         }
         return out.append(loader.getModContainer("nosuchmod").isPresent()).toString();
     }
+
+    public static String allModsCollection() {
+        java.util.Collection<ModContainer> first = FabricLoader.getInstance().getAllMods();
+        java.util.Collection<ModContainer> second = FabricLoader.getInstance().getAllMods();
+        String className = first.getClass().getName();
+        try {
+            first.clear();
+            return className + ",same=" + (first == second) + ",mutable";
+        } catch (UnsupportedOperationException e) {
+            return className + ",same=" + (first == second) + ",unmodifiable";
+        }
+    }
 }

@@ -681,22 +681,41 @@ fn is_game_class(owner: &str) -> bool {
 /// field initialiser). A factory that takes elements or an expected size is
 /// not listed and stays an unknown call.
 fn empty_collection_factory(r: &MethodRef) -> Option<&'static str> {
-    if !r.descriptor.starts_with("()") {
-        return None;
-    }
-    match (r.owner.as_str(), r.name.as_str()) {
+    match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+        ("com/google/common/collect/Maps", "newHashMap", "()Ljava/util/HashMap;") => {
+            Some("java/util/HashMap")
+        }
+        ("com/google/common/collect/Maps", "newLinkedHashMap", "()Ljava/util/LinkedHashMap;") => {
+            Some("java/util/LinkedHashMap")
+        }
         (
             "com/google/common/collect/Maps",
-            "newHashMap" | "newLinkedHashMap" | "newConcurrentMap",
-        ) => Some("map"),
+            "newIdentityHashMap",
+            "()Ljava/util/IdentityHashMap;",
+        ) => Some("java/util/IdentityHashMap"),
         (
-            "com/google/common/collect/Lists",
-            "newArrayList" | "newLinkedList" | "newCopyOnWriteArrayList",
-        ) => Some("list"),
-        (
-            "com/google/common/collect/Sets",
-            "newHashSet" | "newLinkedHashSet" | "newConcurrentHashSet",
-        ) => Some("set"),
+            "com/google/common/collect/Maps",
+            "newConcurrentMap",
+            "()Ljava/util/concurrent/ConcurrentMap;",
+        ) => Some("java/util/concurrent/ConcurrentHashMap"),
+        ("com/google/common/collect/Lists", "newArrayList", "()Ljava/util/ArrayList;") => {
+            Some("java/util/ArrayList")
+        }
+        ("com/google/common/collect/Lists", "newLinkedList", "()Ljava/util/LinkedList;") => {
+            Some("java/util/LinkedList")
+        }
+        ("com/google/common/collect/Sets", "newHashSet", "()Ljava/util/HashSet;") => {
+            Some("java/util/HashSet")
+        }
+        ("com/google/common/collect/Sets", "newLinkedHashSet", "()Ljava/util/LinkedHashSet;") => {
+            Some("java/util/LinkedHashSet")
+        }
+        ("com/google/common/collect/Sets", "newConcurrentHashSet", "()Ljava/util/Set;") => {
+            Some("java/util/concurrent/ConcurrentHashMap$KeySetView")
+        }
+        ("com/google/common/collect/Sets", "newIdentityHashSet", "()Ljava/util/Set;") => {
+            Some("java/util/Collections$SetFromMap")
+        }
         _ => None,
     }
 }
@@ -1105,6 +1124,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.modelled_to_string(value)
     }
 
+    fn modelled_to_string_checked(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
+        self.inner.modelled_to_string_checked(value)
+    }
+
     fn mutable_collection_entries(&self, value: &Value) -> Option<Vec<Value>> {
         self.inner.mutable_collection_entries(value)
     }
@@ -1380,6 +1403,21 @@ impl<H: Host> Host for GameHookHost<'_, H> {
             .note_entrypoint_constructed(kind, class, instance);
     }
 
+    fn fabric_entrypoints(&self, kind: &str) -> Vec<(String, String)> {
+        self.inner.fabric_entrypoints(kind)
+    }
+
+    fn fabric_entrypoint_object(
+        &self,
+        kind: &str,
+        class: &str,
+        requested: &str,
+        ordinal: usize,
+    ) -> Option<Value> {
+        self.inner
+            .fabric_entrypoint_object(kind, class, requested, ordinal)
+    }
+
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         // An instance-field read the callbacks never wrote reaches the host
         // too. A Mixin `@Shadow` field is the game object's own field, which
@@ -1398,10 +1436,19 @@ impl<H: Host> Host for GameHookHost<'_, H> {
     }
 
     fn invoke(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
-        if let Some(kind) = empty_collection_factory(r) {
-            return self.inner.empty_mutable_collection(kind).ok_or_else(|| {
+        if let Some(result) = guava_model::sized_factory_class(r, args) {
+            let class = result?;
+            return self.inner.empty_mutable_collection(class).ok_or_else(|| {
                 NativeError::Metadata(format!(
-                    "game hook callback calls {}#{}{}, and the host models no {kind}",
+                    "game hook callback calls {}#{}{}, and the host models no collection",
+                    r.owner, r.name, r.descriptor
+                ))
+            });
+        }
+        if let Some(class) = empty_collection_factory(r) {
+            return self.inner.empty_mutable_collection(class).ok_or_else(|| {
+                NativeError::Metadata(format!(
+                    "game hook callback calls {}#{}{}, and the host models no collection",
                     r.owner, r.name, r.descriptor
                 ))
             });
@@ -1539,6 +1586,43 @@ impl<H: Host> Host for GameHookHost<'_, H> {
 
     fn record_throwable(&mut self, marker: &str, message: Option<String>) {
         self.inner.record_throwable(marker, message);
+    }
+
+    fn throwable_suppressed(&self, marker: &str) -> Option<Vec<Value>> {
+        self.inner.throwable_suppressed(marker)
+    }
+
+    fn record_throwable_suppressed(&mut self, marker: &str, value: Value) {
+        self.inner.record_throwable_suppressed(marker, value);
+    }
+
+    fn record_throwable_cause(&mut self, marker: &str, cause: Value) {
+        self.inner.record_throwable_cause(marker, cause);
+    }
+
+    fn record_wrapped_cause(&mut self, class: &str, message: Option<&str>, cause: Value) {
+        self.inner.record_wrapped_cause(class, message, cause);
+    }
+
+    fn take_wrapped_cause(&mut self, class: &str, message: &Option<String>) -> Option<Value> {
+        self.inner.take_wrapped_cause(class, message)
+    }
+
+    fn record_wrapped_suppressed(&mut self, class: &str, message: Option<&str>, value: Value) {
+        self.inner.record_wrapped_suppressed(class, message, value);
+    }
+
+    fn take_wrapped_suppressed(&mut self, class: &str, message: &Option<String>) -> Vec<Value> {
+        self.inner.take_wrapped_suppressed(class, message)
+    }
+
+    fn record_fabric_entrypoint_failure(&mut self, kind: &str, class: &str, cause: Value) {
+        self.inner
+            .record_fabric_entrypoint_failure(kind, class, cause);
+    }
+
+    fn take_fabric_entrypoint_failure(&mut self, kind: &str, class: &str) -> Option<Value> {
+        self.inner.take_fabric_entrypoint_failure(kind, class)
     }
 
     fn persistent_class_state(&self) -> (BTreeMap<String, Value>, BTreeSet<String>) {
@@ -1828,6 +1912,7 @@ impl NativeJar {
             host: &mut wrapped,
             calls: 0,
             fields: state.fields.clone(),
+            suppressed: BTreeMap::new(),
             static_fields: persistent_static_fields,
             initialized_classes: persistent_initialized_classes,
             arrays: state.arrays.clone(),

@@ -116,6 +116,17 @@ public class BusOracle {
         game.start();
         BusDemo.order(game);
         System.out.println("{\"case\":\"order\"," + post(game, new ServerTickEvent.Post()) + "}");
+        IEventBus generic = gameBus();
+        BusDemo.generic(generic);
+        System.out.println("{\"case\":\"generic\"," + post(generic, new ServerTickEvent.Post()) + "}");
+        for (int which = 0; which < 2; which++) {
+            try {
+                BusDemo.failures(game, which);
+                System.out.println("{\"case\":\"failure_" + which + "\",\"result\":\"accepted\"}");
+            } catch (Throwable error) {
+                System.out.println("{\"case\":\"failure_" + which + "\",\"result\":" + quote(error.getClass().getName() + ": " + error.getMessage()) + "}");
+            }
+        }
         BusDemo.cancel(game);
         System.out.println("{\"case\":\"cancel\"," + post(game, new LivingDeathEvent()) + "}");
         // Two mods on one bus (what `BusDemo.cancel` registers, twice): one listener list,

@@ -35,6 +35,11 @@ request one mode. A missing or version-incompatible required provider is refused
 as `missing dependency X`; it is never treated as a host model. Nested
 `META-INF/jars/` and NeoForge Jar-in-Jar providers are included in the closure.
 
+Fabric version ranges are decided by the real Fabric Loader 0.19.5 (`tools/FabricPredicateOracle.java`),
+so closure mode over a Fabric corpus needs that jar: pass `--fabric-loader PATH` unless it sits in a
+corpus or a default dependency directory. Without it the census stops with an error instead of
+refusing every Fabric closure row; `--allow-missing-fabric-oracle` keeps the old behaviour for tests.
+
 `tools/unmodelled_calls.py` prints and can save, per corpus, one row per jar
 (`verdict`, `unknown`, `calls`) and the ranked table. A single jar can be reproduced by
 hand:
@@ -53,6 +58,32 @@ The NeoForge corpus is the 85 files pinned by
 inside that corpus only, because the Fabric corpora carry Fabric builds of the same
 libraries (TerraBlender, GlitchCore) and linking one beside a NeoForge mod measures the
 wrong class path.
+
+## Client role census (15 November 2026)
+
+The same tool accepts `--role client`. It follows the loader's physical-side
+rules: Fabric `environment: client` and client-only entrypoints run as
+`main,client`; a Fabric jar with common/server stages and a client entrypoint is
+`dual-client`; NeoForge `@Mod` classes run with `neoforge-client`. Libraries and
+client-only jars without a client entrypoint are explicit `skipped` rows. The
+probe also reports `client_keys`, `hud_layers`, `listeners`, `unfired`, and
+`refused`, then fires every registered client listener and HUD layer once in a
+canonical in-world frame. These are interpreter measurements; `ran-clean` does
+not mean that a live Horizon build has run the client jar.
+
+The first client census had 321 client-only rows with something to run: **67
+clean, 94 hollow, 16 partial, 144 refused**. Fifty-seven further client-only
+Fabric jars had no client entrypoint, and six NeoForge client-corpus jars had no
+`@Mod` class. Across the remaining dual/NeoForge roles, 23 were clean, 90
+hollow, 84 partial and 86 refused. The frame phase found 200 callbacks from 106
+jars; 146 callbacks completed and 54 refused.
+
+This also corrects the server accounting. Fabric Loader never loads a jar whose
+metadata declares `environment: client` on a dedicated server, and a NeoForge
+jar without a server-side `@Mod` is a skip. The server clean count therefore
+changes from **122 to 90**. The correction removes 69 Fabric client-only rows
+(32 clean, 23 hollow, 14 refused in the old server table) and reclassifies 16
+NeoForge no-entrypoint refusals (10 client-only, 6 libraries).
 
 ## Verdicts
 

@@ -51,9 +51,9 @@ pub const JAVA_TIER_HOOK_PREFIX: &str = "java_";
 /// |---|---|---|
 /// | `java_player_list_remove` | `PlayerList#remove` `HEAD` | `native_player_logged_out`, before the next player object |
 /// | `java_server_stopped` | `MinecraftServer#stopServer` `TAIL` | after the final save and `native_lifecycle_world_closed` |
-/// | `java_player_tick_head` | `ServerPlayer#tick` `HEAD` | `tick_guests`, where a living guest's tick starts |
-/// | `java_base_player_tick_head` | `Player#tick` `HEAD` | the same point, right after `java_player_tick_head` |
-/// | `java_base_player_tick_tail` | `Player#tick` `TAIL` | `native_player_tick`, right before `player_tick` |
+/// | `java_player_tick_head` | `ServerPlayer#tick` `HEAD` | no pinned hook: `ServerPlayer.tick` is separate from `Player.tick` |
+/// | `java_base_player_tick_head` | `Player#tick` `HEAD` | `player_tick_pre` (`PlayerTickEvent.Pre`) |
+/// | `java_base_player_tick_tail` | `Player#tick` `TAIL` | `player_tick_post` (`PlayerTickEvent.Post`), currently late in the pinned fork |
 /// | `java_destroy_speed` | `Player#getDestroySpeed` `RETURN` | the mining speed `tick_mining` and `destroy_progress` compute |
 /// | `java_grow_crop` | `BoneMealItem#growCrop` `HEAD` | `use_bone_meal` and `dispense_bone_meal`, before `grow_crop` |
 /// | `java_server_tick_head` | `MinecraftServer#tickServer` `HEAD` | `native_server_tick`'s `ServerTickStart` |
@@ -106,7 +106,7 @@ pub const JAVA_TIER_SITES: &[GameHookSite] = &[
         contract: GameHookContract::Listen,
         side: Some(MixinSide::Server),
         receiver: GameHookReceiver::Named("player"),
-        note: "at the start of ServerPlayer.tick, before digging and item use, for a living player (the population of player_tick), on the authoritative server",
+        note: "unbound: ServerPlayer.tick is the level entity-loop upkeep tick; the pinned player_tick_pre hook fires at Player.tick's different doTick moment, and a native Mixin escape hatch is needed for this site",
     },
     GameHookSite {
         hook: "java_base_player_tick_head",
@@ -118,7 +118,7 @@ pub const JAVA_TIER_SITES: &[GameHookSite] = &[
         contract: GameHookContract::Listen,
         side: Some(MixinSide::Server),
         receiver: GameHookReceiver::Named("player"),
-        note: "at the start of a server player's Player.tick; Horizon runs ServerPlayer.tick and doTick's Player.tick as one step, so it fires right after ServerPlayer.tick's HEAD, for a living player, on the authoritative server only",
+        note: "at Player.tick HEAD, NeoForge's PlayerTickEvent.Pre moment, with the server player's state acting on the authoritative server; the pinned player_tick_pre hook is listen-only",
     },
     GameHookSite {
         hook: "java_base_player_tick_tail",
@@ -130,7 +130,7 @@ pub const JAVA_TIER_SITES: &[GameHookSite] = &[
         contract: GameHookContract::Listen,
         side: Some(MixinSide::Server),
         receiver: GameHookReceiver::Named("player"),
-        note: "at the end of a server player's Player.tick; Horizon runs ServerPlayer.tick and doTick's Player.tick as one step, so it fires right before ServerPlayer.tick's TAIL, for a living player, on the authoritative server only",
+        note: "the pinned fork's player_tick_post hook currently fires after the remainder of ServerPlayer.doTick (pickups, advancements, scores and death handling), later than Player.tick TAIL; callbacks still run and each firing is counted with that departure",
     },
     GameHookSite {
         hook: "java_destroy_speed",

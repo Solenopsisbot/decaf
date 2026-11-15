@@ -44,6 +44,7 @@ const MAPS: &[&str] = &[
     "java/util/ImmutableCollections$Map1",
 ];
 const IDENTITY_MAP: &str = "java/util/IdentityHashMap";
+const IDENTITY_SET: &str = "java/util/Collections$SetFromMap";
 
 /// A `SetN`/`MapN` probe table: each bucket's element (a map's key), the
 /// value itself, so a handle keeps the origin that says which object it is
@@ -409,6 +410,9 @@ impl<H: Host> Runtime<'_, H> {
         if self.host_collection_class(receiver).as_deref() == Some(IDENTITY_MAP) {
             return self.identity_map_member(r, receiver, args);
         }
+        if self.host_collection_class(receiver).as_deref() == Some(IDENTITY_SET) {
+            return self.identity_set_member(r, receiver, args);
+        }
         if let Some(answer) = self.identity_view_member(r, receiver, args)? {
             return Ok(answer);
         }
@@ -421,6 +425,52 @@ impl<H: Host> Runtime<'_, H> {
         let result = self.probed_member(r, receiver, map, &table, args);
         self.host.store_probe_table(&marker, table);
         result
+    }
+
+    /// `Sets.newIdentityHashSet()` is `Collections.newSetFromMap` over an
+    /// `IdentityHashMap`: set membership compares handles with `==`, never
+    /// their `equals` methods.
+    fn identity_set_member(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(value) = args.first() else {
+            return Ok(None);
+        };
+        let mut values = self.collection_elements(receiver)?;
+        let position = values.iter().position(|stored| stored == value);
+        let ambiguous = values
+            .iter()
+            .any(|stored| self.identity_unknown(value, stored));
+        if ambiguous {
+            self.host.unknown_operand_call(r)?;
+            return Ok(Some(Value::Ref(None)));
+        }
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("add", "(Ljava/lang/Object;)Z") => {
+                if position.is_some() {
+                    Ok(Some(Value::Int(0)))
+                } else {
+                    values.push(value.clone());
+                    self.host.replace_mutable_collection(receiver, values);
+                    Ok(Some(Value::Int(1)))
+                }
+            }
+            ("contains", "(Ljava/lang/Object;)Z") => {
+                Ok(Some(Value::Int(position.is_some() as i32)))
+            }
+            ("remove", "(Ljava/lang/Object;)Z") => {
+                let Some(index) = position else {
+                    return Ok(Some(Value::Int(0)));
+                };
+                values.remove(index);
+                self.host.replace_mutable_collection(receiver, values);
+                Ok(Some(Value::Int(1)))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// A `Set.of`/`Map.of` of two or more elements passed to a host model

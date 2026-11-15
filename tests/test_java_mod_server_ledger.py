@@ -25,8 +25,40 @@ sys.path[:] = _before
 
 class JavaModServerLedgerTests(unittest.TestCase):
     @staticmethod
+    def _mod_class(dists=()):
+        # A small valid classfile with a runtime-visible NeoForge @Mod.  The
+        # test uses this instead of a constant-pool marker so Kotlin metadata
+        # cannot be mistaken for loader metadata.
+        import struct
+        utf8 = lambda text: b"\x01" + struct.pack(">H", len(text)) + text.encode()
+        pool = [
+            utf8("example/ExampleMod"), b"\x07\x00\x01",
+            utf8("java/lang/Object"), b"\x07\x00\x03",
+            utf8("Lnet/neoforged/fml/common/Mod;"), utf8("RuntimeVisibleAnnotations"),
+            utf8("value"), utf8("demo"), utf8("dist"),
+            utf8("Lnet/neoforged/api/distmarker/Dist;"), utf8("CLIENT"),
+            utf8("DEDICATED_SERVER"),
+        ]
+        annotation = struct.pack(">H", 5)
+        pairs = [(7, b"s" + struct.pack(">H", 8))]
+        if dists:
+            values = b"[" + struct.pack(">H", len(dists)) + b"".join(
+                b"e" + struct.pack(">HH", 10, 11 if dist == "CLIENT" else 12)
+                for dist in dists
+            )
+            pairs.append((9, values))
+        annotation += struct.pack(">H", len(pairs))
+        annotation += b"".join(struct.pack(">H", name) + value for name, value in pairs)
+        attribute = struct.pack(">HI", 6, len(annotation) + 2) + struct.pack(">H", 1) + annotation
+        return (
+            b"\xca\xfe\xba\xbe" + struct.pack(">HHH", 0, 52, 13) + b"".join(pool)
+            + struct.pack(">HHHHHH", 0x21, 2, 4, 0, 0, 0)
+            + struct.pack(">H", 1) + attribute
+        )
+
+    @staticmethod
     def _jar(directory, name, *, fabric=None, neoforge=None, mod_class=False,
-             fabric_raw=None, corrupt=False):
+             fabric_raw=None, corrupt=False, legacy_mods=False):
         path = Path(directory) / name
         if corrupt:
             path.write_bytes(b"not a zip")
@@ -37,11 +69,11 @@ class JavaModServerLedgerTests(unittest.TestCase):
             elif fabric is not None:
                 jar.writestr("fabric.mod.json", json.dumps(fabric))
             if neoforge is not None:
-                jar.writestr("META-INF/neoforge.mods.toml", neoforge)
+                jar.writestr("META-INF/mods.toml" if legacy_mods else "META-INF/neoforge.mods.toml", neoforge)
             if mod_class:
                 jar.writestr(
                     "example/ExampleMod.class",
-                    b"\xca\xfe\xba\xbeLnet/neoforged/fml/common/Mod;",
+                    mod_class if isinstance(mod_class, bytes) else JavaModServerLedgerTests._mod_class(),
                 )
         return path
 
@@ -243,7 +275,8 @@ class JavaModServerLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             client = self._jar(
                 tmp, "client.jar",
-                neoforge='modLoader = "javafml"\n[[mods]]\nmodId = "client"\nclientSideOnly = true\n',
+                neoforge='clientSideOnly = true\nmodLoader = "javafml"\n[[mods]]\nmodId = "client"\n',
+                legacy_mods=True,
             )
             server = self._jar(
                 tmp, "server.jar",

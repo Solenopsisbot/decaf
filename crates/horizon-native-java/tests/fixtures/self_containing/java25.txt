@@ -1,0 +1,16 @@
+listSelf=[(this Collection), 1]|[(this Collection), 1]|[(this Collection), 1]|[(this Collection), 1]
+setSelf=[(this Collection), x]
+mapSelf={k=(this Map)}|{(this Map)=1}|{v=2, w=(this Map)}
+nestedCycle=SOESOESOE
+hashSelf=SOESOESOE
+equalsSelf=SOEtruefalseSOE
+arraysSelf=[[...], x]SOE
+gsonCycle=SOESOE
+comparatorChain=-1|1
+compareToCycle=SOE
+streamChains=[1, 2]|[1, 2]|[1, 2]|6|[1, 2]
+selfPrinting=SOE|[(this Collection)]|SOE|[(this Collection)]
+viewChain=1|[x]|x|true|false|[x]|151
+finiteRecursion=2001000
+deepNestedList=2002,31001,true
+hashtableSelf=107

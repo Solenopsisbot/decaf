@@ -1614,6 +1614,8 @@ impl<H: Host> Runtime<'_, H> {
     /// `JsonElement.equals(other)` for a tree element; `None` when a number
     /// the comparison needs cannot be typed.
     fn element_equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError> {
+        // One level of a nested element (#250): a cycle ends in a `StackOverflowError`.
+        let _level = crate::host_recursion::enter()?;
         if a == b && *a != Value::Ref(None) {
             return Ok(Some(true));
         }
@@ -1712,6 +1714,8 @@ impl<H: Host> Runtime<'_, H> {
     /// `JsonElement.hashCode()`; `None` for a `JsonNull` anywhere (an
     /// identity hash) or an untypeable number.
     fn element_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
+        // One level of a nested element (#250): a cycle ends in a `StackOverflowError`.
+        let _level = crate::host_recursion::enter()?;
         let Some(kind) = value_kind(value) else {
             return Ok(None);
         };
@@ -1773,6 +1777,8 @@ impl<H: Host> Runtime<'_, H> {
     /// `deepCopy()`: new objects and arrays all the way down, primitives
     /// shared (they are immutable), `JsonNull.INSTANCE` for any null.
     fn deep_copy(&mut self, value: &Value) -> Result<Value, NativeError> {
+        // One level of a nested element (#250): a cycle ends in a `StackOverflowError`.
+        let _level = crate::host_recursion::enter()?;
         let marker = expect_string(value).to_owned();
         match value_kind(value) {
             Some(Kind::Object) => {
@@ -1829,6 +1835,9 @@ impl<H: Host> Runtime<'_, H> {
         writer: &mut Writer<'_>,
         value: &Value,
     ) -> Result<bool, NativeError> {
+        // One level of a nested element (#250): Gson's writer recurses through a cycle until
+        // a `StackOverflowError`, and so does this one.
+        let _level = crate::host_recursion::enter()?;
         let marker = match value {
             Value::Ref(None) => {
                 writer.null_value();

@@ -181,9 +181,10 @@ def corpus_jars(name: str, directory: Path) -> list[Path]:
 
 
 SERVER_STAGES = ("main", "server")
+CLIENT_STAGES = ("main", "client")
 
 
-def entrypoint_kind(path: Path, corpus: str) -> str | None:
+def entrypoint_kind(path: Path, corpus: str, role: str = "server") -> str | None:
     """The stages a dedicated server runs for this jar, comma-joined in loader order.
 
     Fabric Loader's `Hooks.startServer` invokes every `main` entrypoint, then
@@ -191,10 +192,17 @@ def entrypoint_kind(path: Path, corpus: str) -> str | None:
     same since #31). A jar without Fabric server stages runs its NeoForge
     `@Mod` classes.
     """
-    if corpus == "neoforge":
-        return "neoforge"
-    entrypoints = ledger.read_jar_entrypoints(path)
+    entrypoints = ledger.read_jar_entrypoints(path, force_neoforge=corpus == "neoforge")
     if entrypoints is None:
+        return None
+    if role == "client":
+        if corpus == "neoforge":
+            return "neoforge-client" if entrypoints.neoforge else None
+        if entrypoints.fabric_environment == "server":
+            return None
+        stages = [kind for kind in CLIENT_STAGES if kind in entrypoints.kinds]
+        return ",".join(stages) if stages else None
+    if entrypoints.neoforge_client_only or entrypoints.client_side_only:
         return None
     stages = [kind for kind in SERVER_STAGES if kind in entrypoints.kinds]
     if stages:
@@ -202,6 +210,46 @@ def entrypoint_kind(path: Path, corpus: str) -> str | None:
     if entrypoints.neoforge:
         return "neoforge"
     return None
+
+
+def classify_client(path: Path, corpus: str) -> tuple[str, str | None, str]:
+    entrypoints = ledger.read_jar_entrypoints(path, force_neoforge=corpus == "neoforge")
+    if entrypoints is None:
+        return "unreadable", None, "metadata unreadable"
+    if corpus == "neoforge":
+        if not entrypoints.neoforge:
+            return "library", None, "no @Mod class"
+        if entrypoints.neoforge_client_only or entrypoints.client_side_only:
+            return "client-only", "neoforge-client", "client-only @Mod"
+        if entrypoints.neoforge_server_only:
+            return "server-only", None, "server-only @Mod"
+        return "neo-client", "neoforge-client", ""
+    if entrypoints.fabric_environment == "server":
+        return "server-only", None, "environment: server"
+    kinds = set(entrypoints.kinds)
+    stages = [kind for kind in CLIENT_STAGES if kind in kinds]
+    if entrypoints.client_side_only:
+        return ("client-only", ",".join(stages), "environment: client") if stages else (
+            "client-only-noentry", None, "environment: client")
+    if "client" not in kinds:
+        return "library", None, "no client entrypoint"
+    if "main" not in kinds and "server" not in kinds:
+        return "client-only", ",".join(stages), "client entrypoint only"
+    return "dual-client", ",".join(stages), ""
+
+
+def classify_server_skip(path: Path, corpus: str) -> str:
+    entrypoints = ledger.read_jar_entrypoints(path, force_neoforge=corpus == "neoforge")
+    if entrypoints is None:
+        return "metadata unreadable"
+    if entrypoints.client_side_only or entrypoints.neoforge_client_only \
+            or "client" in entrypoints.kinds:
+        return "client-only"
+    if corpus == "neoforge" and not entrypoints.neoforge:
+        return "library (no @Mod class)"
+    if not entrypoints.kinds and not entrypoints.neoforge:
+        return "library"
+    return "no server entrypoint"
 
 
 def row_verdict(result: dict) -> str:
@@ -252,7 +300,8 @@ def missing_reason(missing: list[tuple[str, str]],
 
 def result_row(jar: Path, kind: str, result: dict, deps: list[Path],
                missing: list[tuple[str, str]],
-               requirements: tuple[tuple[str, str, str], ...], mode: str) -> dict:
+               requirements: tuple[tuple[str, str, str], ...], mode: str,
+               jar_role: str | None = None) -> dict:
     """Normalize one census mode while retaining probe evidence."""
     if result.get("status") == "ok":
         unknown = result.get("unknown_host_call_count")
@@ -268,6 +317,11 @@ def result_row(jar: Path, kind: str, result: dict, deps: list[Path],
         }
         if result.get("failed"):
             row["failed"] = [str(item)[:400] for item in result["failed"]]
+        if jar_role:
+            row["role"] = jar_role
+        for field in ("client_keys", "hud_layers", "listeners", "unfired", "refused", "frame"):
+            if field in result:
+                row[field] = result[field]
         return row
     row = {
         "jar": jar.name, "mode": mode, "verdict": "refused", "kind": kind,
@@ -280,6 +334,8 @@ def result_row(jar: Path, kind: str, result: dict, deps: list[Path],
         row["counted_before_error"] = before
     if result.get("parked_threads"):
         row["parked_threads"] = result["parked_threads"]
+    if jar_role:
+        row["role"] = jar_role
     return row
 
 
@@ -324,6 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--probe", type=Path,
                         default=ROOT / "target" / "fast" / "horizon-native-java")
     parser.add_argument("--game-version", default="26.3")
+    parser.add_argument("--role", choices=("server", "client"), default="server")
     parser.add_argument("--json", type=Path, help="write the full per-jar report here")
     parser.add_argument("--limit", type=int, default=0,
                         help="probe at most N jars per corpus (0 = all)")
@@ -332,6 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="path to the real Fabric Loader 0.19.5 jar")
     parser.add_argument("--dependency-mode", choices=("both", "alone", "closure"),
                         default="both", help="run alone, closure, or both (default: both)")
+    parser.add_argument("--allow-missing-fabric-oracle", action="store_true",
+                        help="run closure mode even without the Fabric Loader oracle; every Fabric "
+                             "closure row is then refused (only for tests and partial machines)")
     return parser
 
 
@@ -376,6 +436,15 @@ def main(argv: list[str] | None = None) -> int:
                 fabric_oracle.evaluate(pairs)
             except FabricOracleUnavailable as error:
                 fabric_oracle_error = str(error)
+        # Without the oracle every Fabric closure row refuses, which reads like a census result
+        # but only says the loader jar was not found (arcweld ran like that for a day). Stop
+        # loudly instead, unless the caller asked for it.
+        if (fabric_oracle_error and args.dependency_mode != "alone"
+                and not args.allow_missing_fabric_oracle):
+            print(f"error: closure mode needs the Fabric Loader oracle: {fabric_oracle_error}; "
+                  f"pass --fabric-loader PATH (or --dependency-mode alone, or "
+                  f"--allow-missing-fabric-oracle)", file=sys.stderr)
+            return 2
 
     report: dict[str, dict] = {}
     for name, directory in corpora:
@@ -387,12 +456,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name}: {len(jars)} jars", file=sys.stderr)
         todo = []
         for jar in jars:
-            kind = entrypoint_kind(jar, name)
+            if args.role == "client":
+                jar_role, kind, reason = classify_client(jar, name)
+            else:
+                jar_role, reason = None, classify_server_skip(jar, name)
+                kind = entrypoint_kind(jar, name, args.role)
             if kind is None:
                 for mode in (("alone", "closure") if args.dependency_mode == "both"
                              else (args.dependency_mode,)):
                     rows.append({"jar": jar.name, "mode": mode, "verdict": "skipped",
-                                 "reason": "no server entrypoint"})
+                                 "reason": reason, **({"role": jar_role} if jar_role else {})})
                 continue
             closure_error = ""
             if name != "neoforge" and fabric_oracle_error:
@@ -407,12 +480,12 @@ def main(argv: list[str] | None = None) -> int:
             modes = ("alone", "closure") if args.dependency_mode == "both" else (args.dependency_mode,)
             for mode in modes:
                 if mode == "alone":
-                    todo.append((jar, kind, [], [], (), mode, ""))
+                    todo.append((jar, kind, jar_role, [], [], (), mode, ""))
                 else:
-                    todo.append((jar, kind, list(closure.jars), missing, requirements, mode, closure_error))
+                    todo.append((jar, kind, jar_role, list(closure.jars), missing, requirements, mode, closure_error))
 
         def run(item):
-            jar, kind, deps, missing, requirements, mode, closure_error = item
+            jar, kind, jar_role, deps, missing, requirements, mode, closure_error = item
             if closure_error:
                 result = {"status": "refused", "stage": "dependency", "error": closure_error}
             elif missing:
@@ -420,7 +493,7 @@ def main(argv: list[str] | None = None) -> int:
                           "error": missing_reason(missing, requirements)}
             else:
                 result = probe_one(probe, jar, kind, deps, args.game_version)
-            return result_row(jar, kind, result, deps, missing, requirements, mode)
+            return result_row(jar, kind, result, deps, missing, requirements, mode, jar_role)
 
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             rows.extend(pool.map(run, todo))

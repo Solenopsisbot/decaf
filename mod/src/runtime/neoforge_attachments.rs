@@ -1330,6 +1330,7 @@ impl NativeJar {
             host,
             calls: 0,
             fields: BTreeMap::new(),
+            suppressed: BTreeMap::new(),
             static_fields,
             initialized_classes,
             arrays: BTreeMap::new(),
