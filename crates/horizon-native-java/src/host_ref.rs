@@ -516,7 +516,9 @@ pub enum HostKind {
     HttpClientRedirect,
     /// Fabric resource-loader v0's helper, one per pack type.
     FabricResourceManagerHelper,
-    /// Vanilla's `FileToIdConverter` record.
+    /// Commons Lang's class-loader-local Consumers.nop singleton.
+    CommonsNop,
+    /// Vanilla's FileToIdConverter record.
     FileToIdConverter,
 }
 
@@ -2322,6 +2324,15 @@ const KINDS: &[KindInfo] = &[
         },
         canonical: always_canonical,
         methods: &crate::client_reload::HELPER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CommonsNop,
+        tag: "cnop",
+        class: ClassRule::Unknown {
+            declared: crate::commons_lang::consumer_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::host_events::DECLARED_TYPE_METHODS,
     },
     KindInfo {
         kind: HostKind::FileToIdConverter,

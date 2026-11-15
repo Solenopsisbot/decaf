@@ -27838,6 +27838,11 @@ impl<H: Host> Runtime<'_, H> {
                     ) {
                         // FML's `InterModComms` (`neoforge_imc.rs`).
                         value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        commons_lang::runtime_call(self, &r, receiver.as_ref(), &args)
+                    ) {
+                        value
                     } else if let Some(text) =
                         invoke_or_catch!(at, string_constructors::build(self, &r, &args))
                     {

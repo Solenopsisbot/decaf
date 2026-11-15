@@ -28,6 +28,14 @@ public final class Probe {
         return length + ":" + cache.length + ":" + cache[0] + ":" + cache[length - 1];
     }
 
+    public static String entityCullingBounded() {
+        int reach = 256;
+        int reachX2 = reach * 2;
+        int length = reachX2 * reachX2 * reachX2 / 4;
+        byte[] cache = new byte[length];
+        return reach + ":" + reachX2 + ":" + length + ":" + cache.length;
+    }
+
     public static String atBound() {
         byte[] data = new byte[1 << 24];
         return data.length + ":" + data[0] + ":" + data[data.length - 1];
@@ -112,6 +120,35 @@ fn array_lengths_match_java_25() {
         failures.is_empty(),
         "differ from JDK 25:\n{}",
         failures.join("\n")
+    );
+
+    // Java 25 allocates EntityCulling's reach=256 cache (33,554,432 bytes),
+    // but that would require roughly 1 GiB of Value slots in this host. The
+    // runtime must refuse it with the named bound, never return a shortened or
+    // otherwise guessed result.
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    let result = fixture.jar.invoke_method_with_args(
+        "demo/Probe",
+        "entityCullingBounded",
+        "()Ljava/lang/String;",
+        None,
+        &[],
+        &mut host,
+    );
+    match result {
+        Err(NativeError::Metadata(message)) => {
+            assert!(
+                message.starts_with(
+                    "array of 33554432 elements exceeds the runtime's bound of 16777216"
+                ),
+                "unexpected bound refusal: {message}"
+            );
+        }
+        other => panic!("EntityCulling Java-allocatable cache must be counted: {other:?}"),
+    }
+    assert!(
+        host.unknown_host_calls().is_empty(),
+        "EntityCulling array refusal counted a host call"
     );
 
     for method in ["overBound", "multidimOverBound", "manyArrays"] {
