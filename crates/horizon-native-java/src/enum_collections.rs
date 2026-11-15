@@ -213,7 +213,9 @@ impl<H: Host> Runtime<'_, H> {
         let map = class == "java/util/EnumMap";
         let set = class == "java/util/EnumSet"
             && !values.is_empty()
-            && values.iter().all(|item| self.enum_marker_for_value(item).is_some());
+            && values
+                .iter()
+                .all(|item| self.enum_marker_for_value(item).is_some());
         if !map && !set {
             return Ok(None);
         }

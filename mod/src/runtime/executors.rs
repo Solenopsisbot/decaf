@@ -546,7 +546,7 @@ fn invoke_future<H: Host>(
                 Err(error) => {
                     if let Some(original) = failure.clone() {
                         if let Some(key) = jar_object::instance_key(&original) {
-                            rt.suppressed.entry(key.to_owned()).or_default().push(error);
+                            rt.host.record_throwable_suppressed(key, error);
                         }
                         Ok(Some(failed_future(rt, original)))
                     } else {

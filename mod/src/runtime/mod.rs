@@ -29,6 +29,7 @@ mod charset_decoder;
 mod checkcast;
 mod class_init;
 mod class_precedence;
+mod client_reload;
 pub mod client_surface;
 mod client_values;
 mod collection_base;
@@ -36,6 +37,7 @@ mod collection_callback;
 mod collection_store;
 mod color_collection;
 mod commons_io;
+mod commons_lang;
 mod commons_pair;
 mod concurrent_sync;
 pub mod content;
@@ -191,6 +193,7 @@ mod reflect_names;
 mod reflect_override;
 mod regex_calls;
 mod registry_contents;
+mod registry_lookup;
 mod sequenced;
 mod service_loader;
 mod stack_walk;
@@ -2854,6 +2857,11 @@ pub trait Host {
         None
     }
 
+    /// A fresh immutable JDK collection with the exact unmodifiable class.
+    fn immutable_collection(&mut self, _kind: &str, _values: Vec<Value>) -> Option<Value> {
+        None
+    }
+
     /// `Arrays.asList` over the array `array` (`window`: a view's `subList`,
     /// from `offset`) holding `values`: a fixed-size view that the runtime
     /// keeps in step with the array (`array_views.rs`), for a host that
@@ -5303,6 +5311,16 @@ impl Host for StdHost {
         }
     }
 
+    fn immutable_collection(&mut self, kind: &str, values: Vec<Value>) -> Option<Value> {
+        let owner = match kind {
+            "list" => "java/util/List",
+            "set" => "java/util/Set",
+            "map" => "java/util/Map",
+            _ => return None,
+        };
+        Some(self.unmodifiable_from(owner, "of", kind, values))
+    }
+
     fn empty_mutable_collection(&mut self, kind: &str) -> Option<Value> {
         let class = match kind {
             "map" => "java/util/LinkedHashMap",
@@ -5537,6 +5555,9 @@ impl Host for StdHost {
         if let Some(value) = self.client_static(r) {
             return value;
         }
+        if let Some(value) = client_reload::static_field(&r.owner, &r.name, &r.descriptor) {
+            return Ok(value);
+        }
         if let Some(value) = jdk_model::static_field(&r.owner, &r.name) {
             return Ok(value);
         }
@@ -5565,6 +5586,19 @@ impl Host for StdHost {
             return Ok(Value::Ref(Some(format!("enum/{}/{}", r.owner, r.name))));
         }
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+            // Fabric Biome API's four shared modification phases are opaque
+            // singleton values. Their identity is all this map needs.
+            (
+                "net/fabricmc/fabric/api/biome/v1/ModificationPhase",
+                "ADDITIONS" | "REMOVALS" | "REPLACEMENTS" | "POST_PROCESSING",
+                "Lnet/fabricmc/fabric/api/biome/v1/ModificationPhase;",
+            ) => host_fabric_runtime::modification_phase(&r.name)
+                .ok_or_else(|| NativeError::UnknownHostCall(r.clone())),
+            (
+                "net/fabricmc/fabric/api/resource/v1/reloader/ResourceReloaderKeys$Server",
+                "FUNCTIONS",
+                "Lnet/minecraft/resources/Identifier;",
+            ) => Ok(host_ids::static_identifier("minecraft:functions")),
             ("java/time/Duration", "ZERO", "Ljava/time/Duration;") => Ok(duration_value(0)),
             // TimeUnit constants carry their name; the conversion accessors
             // multiply by that unit's nanosecond factor.
@@ -5706,6 +5740,9 @@ impl Host for StdHost {
         if let Some(value) = self.guava_text(r, None, args) {
             return value;
         }
+        if let Some(value) = commons_lang::static_call(self, r, args) {
+            return value;
+        }
         if let Some(value) = self.neoforge_loader_call(r, args) {
             return Ok(value);
         }
@@ -5729,6 +5766,9 @@ impl Host for StdHost {
         }
         if let Some(class) = guava_model::empty_factory_class(r) {
             return Ok(self.empty_collection_class(class));
+        }
+        if let Some(value) = client_reload::static_call(self, r, args) {
+            return value;
         }
         if let Some(value) = jdk_model::static_call(r, args) {
             return value;
@@ -6956,6 +6996,9 @@ impl Host for StdHost {
         if let Some(refusal) = native_library::refusal(r, args) {
             return Err(refusal);
         }
+        if let Some(value) = registry_lookup::instance_call(self, r, receiver, args) {
+            return value;
+        }
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
         // An object's are its class's: the models below answer them.
@@ -7026,6 +7069,9 @@ impl Host for StdHost {
         // The command dispatcher, builders, nodes and a running command's
         // context and source (`brigadier.rs`).
         if let Some(value) = self.brigadier_call(r, receiver, args) {
+            return value;
+        }
+        if let Some(value) = client_reload::host_instance_call(self, r, receiver, args) {
             return value;
         }
         if let Some(value) = jdk_model::instance_call(r, receiver, args) {
@@ -7800,6 +7846,13 @@ impl Host for StdHost {
                     if is_queue_owner(owner) =>
                 {
                     let value = Self::argument(r, args, 0)?.clone();
+                    if queue_rejects_null(owner) && value == Value::Ref(None) {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
                     self.mutable_collections
                         .entry(marker.to_owned())
                         .or_default()
@@ -7810,6 +7863,13 @@ impl Host for StdHost {
                     if is_queue_owner(owner) =>
                 {
                     let value = Self::argument(r, args, 0)?.clone();
+                    if queue_rejects_null(owner) && value == Value::Ref(None) {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
                     self.mutable_collections
                         .entry(marker.to_owned())
                         .or_default()
@@ -7818,6 +7878,13 @@ impl Host for StdHost {
                 }
                 (owner, "push", "(Ljava/lang/Object;)Z") if is_queue_owner(owner) => {
                     let value = Self::argument(r, args, 0)?.clone();
+                    if queue_rejects_null(owner) && value == Value::Ref(None) {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        });
+                    }
                     self.mutable_collections
                         .entry(marker.to_owned())
                         .or_default()
@@ -10958,6 +11025,7 @@ fn resource_key_identifier(value: &Value) -> Option<(String, String)> {
 /// the same registry id here. This is a lookup table only: no class is loaded
 /// and no game registry is inspected.
 const REGISTRY_STATICS: &[(&str, &str)] = &[
+    ("REGISTRY", "minecraft:root"),
     ("ITEM", "minecraft:item"),
     ("BLOCK", "minecraft:block"),
     ("ENTITY_TYPE", "minecraft:entity_type"),
@@ -12575,10 +12643,21 @@ fn is_list_like_owner(owner: &str) -> bool {
 /// `peek` and `push` are the queue-only members modelled above them; the
 /// table is FIFO, which is what a `PriorityQueue`'s own iteration order is not,
 /// but is a bounded order the interpreter can reproduce deterministically.
+fn queue_rejects_null(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/util/ArrayDeque"
+            | "java/util/concurrent/ConcurrentLinkedQueue"
+            | "java/util/concurrent/ConcurrentLinkedDeque"
+    )
+}
+
+/// Every queue a jar constructs directly.
 fn is_queue_owner(owner: &str) -> bool {
     matches!(
         owner,
-        "java/util/Queue"
+        "java/util/LinkedList"
+            | "java/util/Queue"
             | "java/util/Deque"
             | "java/util/BlockingQueue"
             | "java/util/BlockingDeque"
@@ -17834,7 +17913,6 @@ impl NativeJar {
             host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: persistent_static_fields,
             initialized_classes: persistent_initialized_classes,
             arrays: BTreeMap::new(),
@@ -18041,7 +18119,6 @@ impl NativeJar {
             host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields,
             initialized_classes,
             arrays: BTreeMap::new(),
@@ -18204,7 +18281,6 @@ impl NativeJar {
             host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields,
             initialized_classes,
             arrays: BTreeMap::new(),
@@ -20732,8 +20808,6 @@ struct Runtime<'a, H> {
     host: &'a mut H,
     calls: usize,
     fields: BTreeMap<String, Value>,
-    /// Suppressed callback exceptions attached to a runtime throwable.
-    suppressed: BTreeMap<String, Vec<Value>>,
     static_fields: BTreeMap<String, Value>,
     initialized_classes: std::collections::BTreeSet<String>,
     arrays: BTreeMap<String, Vec<Value>>,
@@ -25331,6 +25405,11 @@ impl<H: Host> Runtime<'_, H> {
     /// constants were declared in supplies the position. A receiver that is not
     /// such a marker, or a class this invocation never initialized, stays with
     /// the host's answer.
+    pub(crate) fn enum_ordinal_of(&self, value: &Value) -> Option<i32> {
+        let marker = expect_ref(value)?;
+        self.enum_constants.get(marker).map(|(_, ordinal)| *ordinal)
+    }
+
     fn declared_enum_ordinal(&mut self, marker: &str) -> Result<Option<Value>, NativeError> {
         let Some((class, name)) = marker
             .strip_prefix("enum/")
@@ -25962,7 +26041,12 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = receiver.and_then(jar_object::instance_key) else {
             return Ok(None);
         };
-        let values = self.suppressed.get(marker).cloned().unwrap_or_default();
+        // One store for every `addSuppressed`: the host's (#269's entrypoint failures,
+        // #278's `whenComplete`), which the heap collector traces. `None` (a throwable the
+        // host doesn't hold) falls through to the other paths.
+        let Some(values) = self.host.throwable_suppressed(marker) else {
+            return Ok(None);
+        };
         Ok(Some(self.new_array_value("[Ljava/lang/Throwable;", values)))
     }
 
@@ -26075,6 +26159,11 @@ impl<H: Host> Runtime<'_, H> {
                 name: method.to_owned(),
                 descriptor: desc.to_owned(),
             };
+            if let Some(receiver) = receiver.as_ref()
+                && let Some(value) = client_reload::runtime_instance_call(self, &r, receiver, args)
+            {
+                return value;
+            }
             return match receiver.as_ref() {
                 Some(receiver) => self.host.invoke_instance(&r, receiver, args),
                 None => self.host.invoke(&r, args),
@@ -27755,7 +27844,16 @@ impl<H: Host> Runtime<'_, H> {
                                     } else {
                                         invoke_or_catch!(
                                             at,
-                                            self.host.invoke_instance(&resolved, receiver, &args)
+                                            if let Some(value) =
+                                                client_reload::runtime_instance_call(
+                                                    self, &resolved, receiver, &args
+                                                )
+                                            {
+                                                value
+                                            } else {
+                                                self.host
+                                                    .invoke_instance(&resolved, receiver, &args)
+                                            }
                                         )
                                     }
                                 } else {
@@ -27787,13 +27885,28 @@ impl<H: Host> Runtime<'_, H> {
                                         ),
                                         None => invoke_or_catch!(
                                             at,
-                                            self.host.invoke_instance(&resolved, receiver, &args)
+                                            if let Some(value) =
+                                                client_reload::runtime_instance_call(
+                                                    self, &resolved, receiver, &args
+                                                )
+                                            {
+                                                value
+                                            } else {
+                                                self.host
+                                                    .invoke_instance(&resolved, receiver, &args)
+                                            }
                                         ),
                                     }
                                 } else {
                                     invoke_or_catch!(
                                         at,
-                                        self.host.invoke_instance(&resolved, receiver, &args)
+                                        if let Some(value) = client_reload::runtime_instance_call(
+                                            self, &resolved, receiver, &args
+                                        ) {
+                                            value
+                                        } else {
+                                            self.host.invoke_instance(&resolved, receiver, &args)
+                                        }
                                     )
                                 }
                             } else {
@@ -32262,7 +32375,6 @@ mod tests {
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::from([(
@@ -32321,7 +32433,6 @@ mod tests {
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::from([
@@ -39407,7 +39518,6 @@ mandatory = true
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::new(),
@@ -39568,7 +39678,6 @@ mandatory = true
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::new(),
@@ -39752,7 +39861,6 @@ mandatory = true
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::new(),
@@ -40104,7 +40212,6 @@ mandatory = true
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::from([
@@ -40416,7 +40523,6 @@ mandatory = true
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::new(),
@@ -45648,7 +45754,6 @@ mandatory = true
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::new(),
@@ -45702,7 +45807,6 @@ mandatory = true
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
-            suppressed: BTreeMap::new(),
             static_fields: BTreeMap::new(),
             initialized_classes: std::collections::BTreeSet::new(),
             arrays: BTreeMap::new(),

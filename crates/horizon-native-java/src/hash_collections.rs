@@ -940,6 +940,12 @@ impl<H: Host> Runtime<'_, H> {
         {
             return false;
         }
+        // Guava's immutableEnumMap copies an enum keyed map into the
+        // enum's deterministic order; it does not expose Map.of's salted
+        // iteration order to the host model.
+        if r.owner == "com/google/common/collect/Maps" && r.name == "immutableEnumMap" {
+            return false;
+        }
         if self
             .member_owner(&r.owner, &r.name, &r.descriptor)
             .is_some_and(|(_, jar)| jar)

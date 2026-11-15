@@ -210,18 +210,9 @@ impl<H: Host> Runtime<'_, H> {
     /// The host's unmodifiable `kind` (`List`/`Set`/`Map`) over `values`,
     /// through its fixed-arity factory for any count.
     fn host_unmodifiable(&mut self, kind: &str, values: &[Value]) -> Result<Value, NativeError> {
-        let descriptor = format!(
-            "({})Ljava/util/{kind};",
-            "Ljava/lang/Object;".repeat(values.len())
-        );
-        self.host.invoke(
-            &MethodRef {
-                owner: format!("java/util/{kind}"),
-                name: "of".into(),
-                descriptor,
-            },
-            values,
-        )
+        self.host
+            .immutable_collection(&kind.to_ascii_lowercase(), values.to_vec())
+            .ok_or_else(|| NativeError::Metadata("immutable collection host missing".into()))
     }
 
     /// `Set.of(elements)`: `Set12` for one or two, `SetN` otherwise.
@@ -504,6 +495,29 @@ impl<H: Host> Runtime<'_, H> {
         table: &ProbeTable,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        if (map
+            && matches!(
+                r.name.as_str(),
+                "put"
+                    | "putAll"
+                    | "putIfAbsent"
+                    | "remove"
+                    | "replace"
+                    | "replaceAll"
+                    | "compute"
+                    | "computeIfAbsent"
+                    | "computeIfPresent"
+                    | "merge"
+                    | "clear"
+            ))
+            || (!map
+                && matches!(
+                    r.name.as_str(),
+                    "add" | "remove" | "clear" | "removeAll" | "retainAll"
+                ))
+        {
+            return Err(thrown("java/lang/UnsupportedOperationException", None));
+        }
         let entries = self.collection_elements(receiver)?;
         let size = if map {
             entries.len() / 2

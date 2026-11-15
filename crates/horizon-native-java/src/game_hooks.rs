@@ -1912,7 +1912,6 @@ impl NativeJar {
             host: &mut wrapped,
             calls: 0,
             fields: state.fields.clone(),
-            suppressed: BTreeMap::new(),
             static_fields: persistent_static_fields,
             initialized_classes: persistent_initialized_classes,
             arrays: state.arrays.clone(),

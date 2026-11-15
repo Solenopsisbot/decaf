@@ -124,6 +124,17 @@ pub(crate) fn env_type_ordinal(value: &Value) -> Option<i32> {
 }
 
 /// `values()` of an enum whose constants are this module's handles.
+/// Fabric's canonical biome modification phase singleton.
+pub(crate) fn modification_phase(name: &str) -> Option<Value> {
+    const PHASES: &[&str] = &["ADDITIONS", "REMOVALS", "REPLACEMENTS", "POST_PROCESSING"];
+    PHASES.contains(&name).then(|| {
+        Value::Host(HostRef::of_values(
+            HostKind::FabricModificationPhase,
+            &[text(name)],
+        ))
+    })
+}
+
 pub(crate) fn enum_values(owner: &str) -> Option<Vec<Value>> {
     (owner == ENV_TYPE).then(|| ENV_TYPES.iter().filter_map(|name| env_type(name)).collect())
 }

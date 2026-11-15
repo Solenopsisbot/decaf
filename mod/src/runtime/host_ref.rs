@@ -377,6 +377,10 @@ pub enum HostKind {
     FabricPayloadTypes,
     /// A `ResourceLoader`: key its `PackType`.
     FabricResourceLoader,
+    /// Fabric biome modification phase singleton.
+    FabricModificationPhase,
+    /// Fabric static Identifier initialized once by its owner.
+    FabricStaticIdentifier,
     /// An object `new` (or a model) allocated: key `class#n`
     /// (`jar_object.rs`), one key per allocation.
     JarObject,
@@ -477,6 +481,10 @@ pub enum HostKind {
     /// NeoForge's `ModList`, `FMLLoader` or `LoadingModList`: key the class
     /// (`host_service.rs`).
     LoaderSingleton,
+    /// Fabric resource-loader v0's helper, one per pack type.
+    FabricResourceManagerHelper,
+    /// Vanilla's `FileToIdConverter` record.
+    FileToIdConverter,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1667,6 +1675,22 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
     },
     KindInfo {
+        kind: HostKind::FabricModificationPhase,
+        tag: "fmp",
+        class: ClassRule::Fixed("net/fabricmc/fabric/api/biome/v1/ModificationPhase"),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricStaticIdentifier,
+        tag: "fsi",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_ids::identifier_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::runtime::host_ids::IDENTIFIER_METHODS,
+    },
+    KindInfo {
         kind: HostKind::JarObject,
         tag: "obj",
         class: ClassRule::FromKey(crate::runtime::jar_object::class_of_key),
@@ -1989,6 +2013,22 @@ const KINDS: &[KindInfo] = &[
         },
         canonical: always_canonical,
         methods: &crate::runtime::host_service::METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricResourceManagerHelper,
+        tag: "rmh",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::client_reload::helper_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::runtime::client_reload::HELPER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FileToIdConverter,
+        tag: "ftid",
+        class: ClassRule::FromKey(crate::runtime::client_reload::converter_class),
+        canonical: never_canonical,
+        methods: &crate::runtime::client_reload::CONVERTER_METHODS,
     },
 ];
 
