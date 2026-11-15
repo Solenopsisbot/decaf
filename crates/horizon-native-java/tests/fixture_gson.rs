@@ -82,6 +82,42 @@ public final class Probe {
         return String.valueOf(values.size());
     }
 
+    // Gson's ObjectTypeAdapter uses Double, Boolean, ArrayList and
+    // LinkedTreeMap-shaped values for untyped JSON.
+    public static String objectShapes() {
+        Map<?, ?> values = (Map<?, ?>) new Gson().fromJson(
+            "{\"n\":1,\"b\":true,\"a\":[2]}", Object.class);
+        Object number = values.get("n");
+        Object flag = values.get("b");
+        List<?> array = (List<?>) values.get("a");
+        return number.getClass().getName() + "|" + number + "|"
+            + flag.getClass().getName() + "|" + flag + "|"
+            + array.getClass().getName() + "|" + array.get(0);
+    }
+
+    public static String scalarCoercions() {
+        Gson gson = new Gson();
+        int number = gson.fromJson("\"7\"", int.class);
+        boolean flag = gson.fromJson("\"true\"", boolean.class);
+        String text = gson.fromJson("1", String.class);
+        char character = gson.fromJson("7", char.class);
+        return number + "|" + flag + "|" + text + "|" + character;
+    }
+
+    // These targets are deliberately outside the bounded exact adapter.
+    public static Object unsupportedPoint() {
+        return new Gson().fromJson("{\"x\":1}", java.awt.Point.class);
+    }
+    public static Object unsupportedStringObject() {
+        return new Gson().fromJson("{\"x\":1}", String.class);
+    }
+    public static Object unsupportedArray() {
+        return new Gson().fromJson("[1]", int[].class);
+    }
+    public static Object unsupportedScalar() {
+        return new Gson().fromJson("true", Integer.class);
+    }
+
     // A config bootstrap that writes defaults through `FileWriter` and reads
     // them back through `FileReader`, exactly the shape of a JSON config file.
     public static String fileRoundTrip() {
@@ -244,6 +280,16 @@ impl Fixture {
         )
     }
 
+    fn call_with_host(
+        &self,
+        method: &str,
+        descriptor: &str,
+        host: &mut StdHost,
+    ) -> Result<Value, NativeError> {
+        self.jar
+            .invoke_method_with_args("demo/Probe", method, descriptor, None, &[], host)
+    }
+
     fn text_with(&self, method: &str, argument: &str) -> String {
         match self
             .call(
@@ -275,6 +321,44 @@ fn gson_round_trips_primitives_strings_lists_and_maps() {
         fixture.text("roundTrip"),
         "42|hello|3|2|2|{\n  \"a\": 1,\n  \"b\": \"x\"\n}|[\n  1,\n  \"two\",\n  [\n    3\n  ]\n]"
     );
+}
+
+#[test]
+fn object_type_adapter_uses_gsons_double_boolean_and_collection_shapes() {
+    let fixture = Fixture::build("object-shapes");
+    assert_eq!(
+        fixture.text("objectShapes"),
+        "java.lang.Double|1.0|java.lang.Boolean|true|java.util.ArrayList|2.0"
+    );
+}
+
+#[test]
+fn scalar_adapters_apply_gsons_string_coercions() {
+    let fixture = Fixture::build("scalar-coercions");
+    assert_eq!(fixture.text("scalarCoercions"), "7|true|1|7");
+}
+
+#[test]
+fn unsupported_from_json_targets_are_counted_instead_of_erased_shapes() {
+    let fixture = Fixture::build("unsupported-targets");
+    for method in [
+        "unsupportedPoint",
+        "unsupportedStringObject",
+        "unsupportedArray",
+    ] {
+        let mut host = StdHost::new();
+        let answer = fixture
+            .call_with_host(method, "()Ljava/lang/Object;", &mut host)
+            .unwrap();
+        assert_eq!(answer, Value::Ref(None), "{method}: {answer:?}");
+        assert!(
+            host.unknown_host_calls().iter().any(|(call, count)| call
+                == "com/google/gson/Gson#fromJson(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;"
+                && *count == 1),
+            "{method}: {:?}",
+            host.unknown_host_calls()
+        );
+    }
 }
 
 #[test]
@@ -322,13 +406,13 @@ fn deeply_nested_json_is_refused_by_the_depth_bound() {
 #[test]
 fn file_writer_and_file_reader_round_trip_through_the_virtual_file() {
     let fixture = Fixture::build("file-round-trip");
-    assert_eq!(fixture.text("fileRoundTrip"), "false|true|7");
+    assert_eq!(fixture.text("fileRoundTrip"), "false|true|7.0");
 }
 
 #[test]
 fn output_stream_writer_and_files_reader_share_the_same_file() {
     let fixture = Fixture::build("stream-round-trip");
-    assert_eq!(fixture.text("streamRoundTrip"), "2");
+    assert_eq!(fixture.text("streamRoundTrip"), "2.0");
 }
 
 #[test]

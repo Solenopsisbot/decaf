@@ -20949,16 +20949,110 @@ fn gson_json_value(json: &serde_json::Value, class: &str) -> Result<Value, Nativ
             ))),
         };
     }
+    if let Some(value) = gson_scalar_value(json, class) {
+        return Ok(value);
+    }
     match json {
-        serde_json::Value::Bool(value) => Ok(match class {
-            "java/lang/String" => Value::Ref(Some(value.to_string())),
-            _ => Value::Int(i32::from(*value)),
-        }),
-        serde_json::Value::Number(number) => Ok(gson_json_number(number, class)),
-        serde_json::Value::String(value) => Ok(Value::Ref(Some(value.clone()))),
         serde_json::Value::Array(values) => Ok(gson_json_collection(values, class, "list")?),
         serde_json::Value::Object(values) => Ok(gson_json_map(values)?),
-        serde_json::Value::Null => Ok(Value::Ref(None)),
+        other => Err(NativeError::Metadata(format!(
+            "Gson.fromJson cannot materialize {} as {class}",
+            gson_json_kind(other)
+        ))),
+    }
+}
+
+fn gson_scalar_target(class: &str) -> bool {
+    matches!(
+        class,
+        "boolean"
+            | "byte"
+            | "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "java/lang/Boolean"
+            | "java/lang/Byte"
+            | "java/lang/Character"
+            | "java/lang/Short"
+            | "java/lang/Integer"
+            | "java/lang/Long"
+            | "java/lang/Float"
+            | "java/lang/Double"
+            | "java/lang/String"
+    )
+}
+
+fn gson_known_target(class: &str) -> bool {
+    class == "java/lang/Object"
+        || gson_scalar_target(class)
+        || gson_list_target(class)
+        || gson_map_target(class)
+}
+
+fn gson_scalar_text(json: &serde_json::Value) -> Option<String> {
+    match json {
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+/// Gson's scalar adapters accept JSON primitives and their string coercions.
+/// The Object adapter is different: numbers are `Double` and booleans remain
+/// boxed `Boolean` values, so those cases are kept here rather than using the
+/// JVM's primitive int representation.
+fn gson_scalar_value(json: &serde_json::Value, class: &str) -> Option<Value> {
+    if class == "java/lang/Object" {
+        return match json {
+            serde_json::Value::Bool(value) => Some(boolean_value(*value)),
+            serde_json::Value::Number(value) => value.as_f64().map(Value::Float),
+            serde_json::Value::String(value) => Some(Value::Ref(Some(value.clone()))),
+            _ => None,
+        };
+    }
+    if class == "java/lang/String" {
+        return gson_scalar_text(json).map(|value| Value::Ref(Some(value)));
+    }
+    if matches!(class, "boolean" | "java/lang/Boolean") {
+        let value = match json {
+            serde_json::Value::Bool(value) => *value,
+            serde_json::Value::String(value) => value.eq_ignore_ascii_case("true"),
+            _ => return None,
+        };
+        return Some(if class == "boolean" {
+            Value::Int(i32::from(value))
+        } else {
+            boolean_value(value)
+        });
+    }
+    let text = gson_scalar_text(json)?;
+    match class {
+        "byte" | "java/lang/Byte" => text
+            .parse::<i8>()
+            .ok()
+            .map(|value| Value::Int(i32::from(value))),
+        "short" | "java/lang/Short" => text
+            .parse::<i16>()
+            .ok()
+            .map(|value| Value::Int(i32::from(value))),
+        "int" | "java/lang/Integer" => text.parse::<i32>().ok().map(Value::Int),
+        "long" | "java/lang/Long" => text.parse::<i64>().ok().map(Value::Long),
+        "float" | "java/lang/Float" | "double" | "java/lang/Double" => {
+            text.parse::<f64>().ok().map(Value::Float)
+        }
+        "char" | "java/lang/Character" => {
+            let mut units = text.encode_utf16();
+            let unit = units.next()?;
+            units
+                .next()
+                .is_none()
+                .then_some(Value::Int(i32::from(unit)))
+        }
+        _ => None,
     }
 }
 
@@ -20972,44 +21066,6 @@ fn gson_set_target(class: &str) -> bool {
 
 fn gson_map_target(class: &str) -> bool {
     is_map_owner(class)
-}
-
-fn gson_json_number(number: &serde_json::Number, class: &str) -> Value {
-    match class {
-        "int"
-        | "java/lang/Integer"
-        | "short"
-        | "java/lang/Short"
-        | "byte"
-        | "java/lang/Byte"
-        | "char"
-        | "java/lang/Character" => number.as_i64().map_or_else(
-            || Value::Float(number.as_f64().unwrap_or(0.0)),
-            |value| Value::Int(value as i32),
-        ),
-        "long" | "java/lang/Long" => number
-            .as_i64()
-            .map_or_else(|| Value::Float(number.as_f64().unwrap_or(0.0)), Value::Long),
-        "float" | "java/lang/Float" | "double" | "java/lang/Double" => {
-            Value::Float(number.as_f64().unwrap_or(0.0))
-        }
-        _ => {
-            if let Some(value) = number.as_i64() {
-                if let Ok(value) = i32::try_from(value) {
-                    Value::Int(value)
-                } else {
-                    Value::Long(value)
-                }
-            } else if let Some(value) = number.as_u64() {
-                match i32::try_from(value) {
-                    Ok(value) => Value::Int(value),
-                    Err(_) => Value::Float(number.as_f64().unwrap_or(0.0)),
-                }
-            } else {
-                Value::Float(number.as_f64().unwrap_or(0.0))
-            }
-        }
-    }
 }
 
 fn gson_json_collection(
@@ -25131,16 +25187,17 @@ impl<H: Host> Runtime<'_, H> {
     ///
     /// Gson's reflective adapter allocates the object without running a
     /// constructor and sets the declared instance fields, and a config class
-    /// then reads them back through ordinary field accesses. The interpreter
-    /// does the same: the field table is keyed by the declaring class, so the
-    /// accessors the mod generates find what the document declared. A document
-    /// that names no field this class declares, or a class the runtime does not
-    /// hold, keeps the previous JSON-shaped answer.
+    /// then reads them back through ordinary field accesses. A class the
+    /// bounded runtime cannot materialize is counted below rather than erased
+    /// into a JSON-shaped value of the wrong type.
     fn gson_from_json(
         &mut self,
         text: &str,
         class: &str,
         style: &gson_model::GsonStyle,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
     ) -> Result<Value, NativeError> {
         let Some(json) = gson_document(text)? else {
             return Ok(Value::Ref(None));
@@ -25149,7 +25206,43 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.gson_materialize(&json, &class, style)? {
             return Ok(value);
         }
-        gson_json_value(&json, &class)
+        // A reflective adapter that could not build a jar-owned class is not
+        // an erased JSON value. Gson would either construct that exact class
+        // or throw; count the bounded runtime's unsupported adapter instead of
+        // returning a map/list/String/Int that later code can miscast.
+        if !gson_known_target(&class) {
+            return self
+                .host
+                .invoke_instance(r, receiver.unwrap_or(&Value::Ref(None)), args);
+        }
+        if class == "java/lang/Object" {
+            return gson_json_value(&json, &class);
+        }
+        if gson_list_target(&class) {
+            if !json.is_array() {
+                return self
+                    .host
+                    .invoke_instance(r, receiver.unwrap_or(&Value::Ref(None)), args);
+            }
+            return gson_json_value(&json, &class);
+        }
+        if gson_map_target(&class) {
+            if !json.is_object() {
+                return self
+                    .host
+                    .invoke_instance(r, receiver.unwrap_or(&Value::Ref(None)), args);
+            }
+            return gson_json_value(&json, &class);
+        }
+        if gson_scalar_target(&class) {
+            if let Some(value) = gson_scalar_value(&json, &class) {
+                return Ok(value);
+            }
+            return self
+                .host
+                .invoke_instance(r, receiver.unwrap_or(&Value::Ref(None)), args);
+        }
+        unreachable!("gson_known_target covered every supported target")
     }
 
     /// The erased runtime type a `TypeToken` names.
@@ -25357,9 +25450,8 @@ impl<H: Host> Runtime<'_, H> {
     /// maps, and `Gson.toJson` back to text. The parsed document is bounded by
     /// [`MAX_GSON_JSON_BYTES`] and [`MAX_GSON_DEPTH`]; a malformed document is
     /// rejected with a named reason instead of answering `null` or an empty
-    /// string. Objects of a jar's own class are not instantiated (that needs
-    /// field injection the native path does not model), so their JSON shape is
-    /// returned as a modelled map, never as a masked empty value.
+    /// string. Unsupported target classes are counted, never replaced by an
+    /// erased JSON map, list, scalar or string.
     fn invoke_gson(
         &mut self,
         r: &MethodRef,
@@ -25531,7 +25623,9 @@ impl<H: Host> Runtime<'_, H> {
                                 NativeError::Metadata("Gson.fromJson needs a Class".into())
                             })?;
                         let class = &class;
-                        Ok(Some(self.gson_from_json(text, class, &style)?))
+                        Ok(Some(
+                            self.gson_from_json(text, class, &style, r, receiver, args)?,
+                        ))
                     }
                     ("fromJson", "(Ljava/io/Reader;Ljava/lang/Class;)Ljava/lang/Object;") => {
                         let reader = args.first().and_then(expect_ref).ok_or_else(|| {
@@ -25551,7 +25645,9 @@ impl<H: Host> Runtime<'_, H> {
                                 NativeError::Metadata("Gson.fromJson needs a Class".into())
                             })?;
                         let class = &class;
-                        Ok(Some(self.gson_from_json(&text, class, &style)?))
+                        Ok(Some(
+                            self.gson_from_json(&text, class, &style, r, receiver, args)?,
+                        ))
                     }
                     // `Gson.fromJson(Reader, TypeToken)` takes the token's erased
                     // type: a document that is an object becomes a map and an
@@ -25596,7 +25692,9 @@ impl<H: Host> Runtime<'_, H> {
                                 })?;
                             (text, self.type_token_class(token))
                         };
-                        Ok(Some(self.gson_from_json(&text, &class, &style)?))
+                        Ok(Some(self.gson_from_json(
+                            &text, &class, &style, r, receiver, args,
+                        )?))
                     }
                     (
                         "fromJson",
@@ -25614,7 +25712,9 @@ impl<H: Host> Runtime<'_, H> {
                                 _ => None,
                             })
                             .unwrap_or_else(|| "java/lang/Object".into());
-                        Ok(Some(self.gson_from_json(text, &raw, &style)?))
+                        Ok(Some(
+                            self.gson_from_json(text, &raw, &style, r, receiver, args)?,
+                        ))
                     }
                     _ => Ok(None),
                 }
