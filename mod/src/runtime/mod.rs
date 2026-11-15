@@ -5307,6 +5307,7 @@ impl Host for StdHost {
         let class = match kind {
             "map" => "java/util/LinkedHashMap",
             "set" => "java/util/LinkedHashSet",
+            "enum-set" => "java/util/EnumSet",
             "list" => "java/util/ArrayList",
             class => class,
         };

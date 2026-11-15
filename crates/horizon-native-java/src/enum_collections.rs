@@ -193,7 +193,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         let mut values = values;
         self.sort_enum_values(&mut values, r)?;
-        self.make_collection("set", values).map(Some)
+        self.make_collection("enum-set", values).map(Some)
     }
 
     pub(crate) fn enum_collection_text_for(
@@ -211,10 +211,9 @@ impl<H: Host> Runtime<'_, H> {
             _ => "",
         };
         let map = class == "java/util/EnumMap";
-        let set = !values.is_empty()
-            && values
-                .iter()
-                .all(|item| self.enum_marker_for_value(item).is_some());
+        let set = class == "java/util/EnumSet"
+            && !values.is_empty()
+            && values.iter().all(|item| self.enum_marker_for_value(item).is_some());
         if !map && !set {
             return Ok(None);
         }
