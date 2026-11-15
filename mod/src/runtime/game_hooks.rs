@@ -1865,8 +1865,6 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),

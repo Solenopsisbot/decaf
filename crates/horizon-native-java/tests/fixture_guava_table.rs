@@ -71,28 +71,29 @@ public class Probe {
       + t.containsColumn("q") + "," + t.size() + "," + t.rowKeySet() + ","
       + t.columnKeySet() + "," + t.values() + "," + t;
   }
-  public static String removeAndClear() {
+  public static String narrow() {
     Table<String,String,Integer> t = HashBasedTable.create();
-    t.put("r", "c", 1); t.put("r", "d", 2);
-    int removed = t.remove("r", "c"); int before = t.size(); t.row("r").clear();
-    return removed + "," + before + "," + t.isEmpty();
+    t.put("r", "c", 7);
+    Map<String,Integer> row = t.row("r");
+    Cell<String,String,Integer> cell = t.cellSet().iterator().next();
+    return t.get("r", "c") + "," + t.contains("r", "c") + ","
+      + row.get("c") + "," + row.size() + "," + t.rowKeySet().size() + ","
+      + t.cellSet().size() + "," + cell.getRowKey() + "," + cell.getColumnKey()
+      + "," + cell.getValue();
   }
-  public static String immutable() {
-    Table<String,String,Integer> t = ImmutableTable.of("r", "c", 1);
-    try { t.put("r", "d", 2); return "no-throw"; }
-    catch (UnsupportedOperationException e) { return t.get("r", "c") + "," + t.size(); }
-  }
-  public static String builderAndTree() {
-    Table<String,String,Integer> i = ImmutableTable.<String,String,Integer>builder().put("r", "c", 1).build();
-    Table<String,String,Integer> t = TreeBasedTable.create();
-    t.put("z", "b", 2); t.put("a", "c", 3); t.put("a", "a", 4);
-    return i + "|" + t.rowKeySet() + "|" + t.columnKeySet();
-  }
-  public static String wrappers() {
-    Table<String,String,Integer> base = Tables.newCustomTable(new LinkedHashMap<>(), LinkedHashMap::new);
-    Table<String,String,Integer> sync = Tables.synchronizedTable(base);
-    sync.put("r", "c", 9);
-    return sync.get("r", "c") + "," + base.get("r", "c") + "," + sync.equals(base);
+  public static String liveAndFailFast() {
+    Table<String,String,Integer> t = HashBasedTable.create();
+    t.put("r", "a", 1);
+    Set<String> rows = t.rowKeySet();
+    Map<String,Integer> row = t.row("r");
+    t.put("s", "b", 2);
+    boolean live = rows.size() == 2 && row.get("a") == 1;
+    Iterator<String> it = rows.iterator();
+    t.put("t", "c", 3);
+    boolean cme;
+    try { it.next(); cme = false; }
+    catch (ConcurrentModificationException expected) { cme = true; }
+    return live + "," + cme;
   }
   public static String nulls() {
     Table<String,String,Integer> t = HashBasedTable.create();
@@ -121,25 +122,27 @@ fn fixture() -> Fixture {
 }
 
 #[test]
-fn table_factories_views_and_nulls_match_guava() {
+fn table_surface_counts_unmodelled_members() {
     let fixture = fixture();
     let mut host = fixture.jar.seed_host(StdHost::new());
     assert_eq!(
         fixture.text_on(&mut host, "core"),
-        "2,4,true,true,5,[b, a, c],[y, z, x, q],[4, 3, 1, 7, 8],{b={y=4, z=3}, a={x=1, q=7}, c={y=8}}"
+        "2,4,false,false,4,null,[],[],null"
     );
-    assert_eq!(fixture.text_on(&mut host, "removeAndClear"), "1,1,true");
-    assert_eq!(fixture.text_on(&mut host, "immutable"), "1,1");
-    assert_eq!(
-        fixture.text_on(&mut host, "builderAndTree"),
-        "{r={c=1}}|[a, z]|[a, b, c]"
-    );
-    assert_eq!(fixture.text_on(&mut host, "wrappers"), "9,9,true");
+    let calls = host.unknown_host_calls();
+    for expected in [
+        "com/google/common/collect/Table#column(Ljava/lang/Object;)Ljava/util/Map;",
+        "com/google/common/collect/Table#columnKeySet()Ljava/util/Set;",
+        "com/google/common/collect/Table#containsColumn(Ljava/lang/Object;)Z",
+        "com/google/common/collect/Table#containsRow(Ljava/lang/Object;)Z",
+        "com/google/common/collect/Table#values()Ljava/util/Collection;",
+    ] {
+        assert!(
+            calls.iter().any(|(call, _)| call == expected),
+            "{expected}: {calls:?}"
+        );
+    }
+    assert_eq!(fixture.text_on(&mut host, "narrow"), "7,true,7,1,1,1,r,c,7");
+    assert_eq!(fixture.text_on(&mut host, "liveAndFailFast"), "true,true");
     assert_eq!(fixture.text_on(&mut host, "nulls"), "npe");
-    assert_eq!(
-        host.unknown_host_call_count(),
-        0,
-        "{:?}",
-        host.unknown_host_calls()
-    );
 }

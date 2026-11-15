@@ -313,6 +313,9 @@ impl StdHost {
             }
         }
         out.extend(self.shared_empties.values().map(String::as_str));
+        // Table rows and iterators are host-owned roots. Their values may be
+        // jar objects, so the collector must see them across callbacks.
+        self.guava_tables.root_texts(out);
     }
 
     /// The host's own state that may name a jar object without a table this
@@ -463,6 +466,7 @@ fn heap_entries(heap: &JavaHeap, host: &StdHost) -> usize {
         + host.mutable_collections.len()
         + host.iterators.len()
         + host.component_states.len()
+        + host.guava_tables.entry_count()
 }
 
 fn over_count_bound(heap: &JavaHeap) -> bool {
@@ -597,6 +601,7 @@ fn heap_bytes(heap: &JavaHeap, host: &StdHost) -> usize {
                 + values(&state.siblings)
                 + state.args.as_deref().map_or(0, values)
         }))
+        .chain(std::iter::once(host.guava_tables.estimated_bytes()))
         .sum()
 }
 
@@ -1310,6 +1315,7 @@ mod tests {
             "holders",
             "holder_rows",
             "mutable_collections",
+            "guava_tables",
             "component_states",
             "unmodifiable_collections",
             "empty_collections",

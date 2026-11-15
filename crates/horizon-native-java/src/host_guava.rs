@@ -40,6 +40,24 @@ pub(crate) fn cache_loader_types(_: &str) -> &'static [&'static str] {
     &["com/google/common/cache/CacheLoader"]
 }
 
+pub(crate) fn table_types(key: &str) -> &'static [&'static str] {
+    if key.starts_with("view-row/") {
+        &["java/util/Map"]
+    } else if key.starts_with("view-rowkeys/") || key.starts_with("view-cells/") {
+        &[
+            "java/util/Set",
+            "java/util/Collection",
+            "java/lang/Iterable",
+        ]
+    } else {
+        &["com/google/common/collect/Table"]
+    }
+}
+
+pub(crate) fn cell_types(_: &str) -> &'static [&'static str] {
+    &["com/google/common/collect/Table$Cell"]
+}
+
 /// A handle of `kind` holding one value.
 fn holding(kind: HostKind, value: &Value) -> Value {
     Value::Host(HostRef::of_values(kind, std::slice::from_ref(value)))

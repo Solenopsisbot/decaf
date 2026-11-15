@@ -289,6 +289,10 @@ pub enum HostKind {
     GuavaCacheBuilder,
     /// Guava `CacheLoader.from(function)`: key the function.
     GuavaCacheLoader,
+    /// A HashBasedTable or one of its modeled live views (`guava_table.rs`).
+    GuavaTable,
+    /// A Table.Cell returned by the modeled `cellSet` (`guava_table.rs`).
+    GuavaCell,
     /// The thread callbacks run on (`host_jdk.rs`): key `main`.
     Thread,
     /// A logger: key `of_values([api, name])`.
@@ -1318,6 +1322,24 @@ const KINDS: &[KindInfo] = &[
         },
         // A fresh loader per `from`.
         canonical: never_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaTable,
+        tag: "gtbl",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::table_types,
+        },
+        canonical: always_canonical,
+        methods: &crate::runtime::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::GuavaCell,
+        tag: "gcell",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_guava::cell_types,
+        },
+        canonical: always_canonical,
         methods: &crate::runtime::host_executors::OBJECT_METHODS,
     },
     KindInfo {

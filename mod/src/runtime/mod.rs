@@ -2789,6 +2789,12 @@ pub trait Host {
         None
     }
 
+    /// The persistent Guava Table store, when this host models the narrow
+    /// HashBasedTable surface. Other hosts leave Table calls counted.
+    fn guava_table_store(&mut self) -> Option<&mut guava_table::Store> {
+        None
+    }
+
     /// `Arrays.asList` over the array `array` (`window`: a view's `subList`,
     /// from `offset`) holding `values`: a fixed-size view that the runtime
     /// keeps in step with the array (`array_views.rs`), for a host that
@@ -3087,6 +3093,8 @@ pub struct StdHost {
     /// Every mutable collection's list, by marker, each with a generation
     /// (`collection_store.rs`).
     mutable_collections: collection_store::CollectionStore,
+    /// Persistent typed Guava Table handles and their live views.
+    guava_tables: guava_table::Store,
     /// Chat components changed in place, by marker (`host_component.rs`).
     pub(crate) component_states: host_component::States,
     /// The unmodifiable collections (`java_immutable.rs`), by marker: `None`
@@ -3299,6 +3307,7 @@ impl StdHost {
             holder_rows: Vec::new(),
             holder_binding: host_registry::Binding::Construct,
             mutable_collections: collection_store::CollectionStore::default(),
+            guava_tables: guava_table::Store::default(),
             component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             empty_collections: std::collections::BTreeSet::new(),
@@ -3918,6 +3927,9 @@ impl StdHost {
     }
 
     fn mutable_values(&self, receiver: &Value) -> Option<Vec<Value>> {
+        if let Some(values) = self.guava_tables.collection_values(receiver) {
+            return Some(values);
+        }
         // A `String` is no collection, whatever it spells (`jar_object.rs`).
         if jar_object::spells_key(receiver) {
             return None;
@@ -5181,6 +5193,10 @@ impl Host for StdHost {
             class => class,
         };
         Some(self.empty_collection_class(class))
+    }
+
+    fn guava_table_store(&mut self) -> Option<&mut guava_table::Store> {
+        Some(&mut self.guava_tables)
     }
 
     fn array_view(
@@ -6764,6 +6780,9 @@ impl Host for StdHost {
         args: &[Value],
     ) -> Result<Value, NativeError> {
         self.record(r, Some(receiver), args);
+        if let Some(value) = self.guava_tables.host_invoke(r, receiver, args)? {
+            return Ok(value);
+        }
         if let Some(refusal) = native_library::refusal(r, args) {
             return Err(refusal);
         }
@@ -17324,8 +17343,6 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -17492,8 +17509,6 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -17656,8 +17671,6 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -20185,8 +20198,6 @@ struct Runtime<'a, H> {
     /// marker: the declared name and ordinal its `java.lang.Enum` constructor
     /// received.
     enum_constants: BTreeMap<String, (String, i32)>,
-    guava_tables: BTreeMap<String, guava_table::State>,
-    next_guava_table: usize,
     /// Text of each `StringBuilder`/`StringBuffer` this invocation built,
     /// keyed by the object's marker. `append` mutates the receiver in place,
     /// so a later `toString` sees every earlier append — the JDK's contract,
@@ -31458,8 +31469,6 @@ mod tests {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -31525,8 +31534,6 @@ mod tests {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -38602,8 +38609,6 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -38764,8 +38769,6 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -38949,8 +38952,6 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -39310,8 +39311,6 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -39615,8 +39614,6 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -44781,8 +44778,6 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
@@ -44836,8 +44831,6 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
-            guava_tables: BTreeMap::new(),
-            next_guava_table: 0,
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
