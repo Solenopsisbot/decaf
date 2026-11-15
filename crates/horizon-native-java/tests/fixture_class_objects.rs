@@ -278,11 +278,7 @@ fn every_producer_finds_the_literals_entry() {
         review("lookups"),
         (
             "sasiri,truetruetrue,0v11[2]s,truetruetruetruetruetrue".to_owned(),
-            vec![(
-                "java/lang/StackWalker$Option#RETAIN_CLASS_REFERENCELjava/lang/StackWalker$Option;"
-                    .to_owned(),
-                2
-            )]
+            Vec::new()
         )
     );
 }

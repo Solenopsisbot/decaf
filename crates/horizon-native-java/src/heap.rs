@@ -1393,6 +1393,7 @@ mod tests {
             "next_fabric_event",
             "next_iterator",
             "next_neutral_collection",
+            "log4j_levels",
             // Registry ids the jar built (`registry_contents.rs`): names, no objects.
             "jar_registries",
         ];

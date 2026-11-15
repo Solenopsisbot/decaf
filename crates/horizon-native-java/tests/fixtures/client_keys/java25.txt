@@ -1,0 +1,6 @@
+unknown=KEYBOARD/0/key.keyboard.unknown/key.keyboard.unknown
+a=KEYBOARD/4/key.keyboard.a/key.keyboard.a/true
+mouse=MOUSE/1/key.mouse.left/key.mouse.left
+mapping=key.keyboard.a/key.keyboard.a/true
+identity=true/true/true/true/true
+forgery=false/false/false/false/ClassCastException/false/false/false/ClassCastException/false/false/false/ClassCastException

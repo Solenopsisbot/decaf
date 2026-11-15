@@ -319,7 +319,7 @@ def result_row(jar: Path, kind: str, result: dict, deps: list[Path],
             row["failed"] = [str(item)[:400] for item in result["failed"]]
         if jar_role:
             row["role"] = jar_role
-        for field in ("client_keys", "hud_layers", "listeners", "unfired", "refused", "frame"):
+        for field in ("client_keys", "hud_layers", "listeners", "unfired", "refused", "frame", "commands"):
             if field in result:
                 row[field] = result[field]
         return row

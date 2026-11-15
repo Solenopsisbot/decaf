@@ -724,6 +724,9 @@ fn boxing_and_printing_use_the_java_spelling() {
         call(&jar, "built", "(D)Ljava/lang/String;", &[exact(0.1 + 0.2)]),
         Value::Ref(Some("v=0.30000000000000004".into()))
     );
+    // Java 25 resolves this overload through Locale.getDefault(Locale.Category.FORMAT).
+    // The bounded host has no player FORMAT locale, so the locale-sensitive %f result
+    // is counted as unknown instead of guessed.
     assert_eq!(
         call(
             &jar,
@@ -731,7 +734,7 @@ fn boxing_and_printing_use_the_java_spelling() {
             "(D)Ljava/lang/String;",
             &[Value::Float(1.5)]
         ),
-        Value::Ref(Some("1.500000".into()))
+        Value::Ref(None)
     );
     assert_eq!(
         call(

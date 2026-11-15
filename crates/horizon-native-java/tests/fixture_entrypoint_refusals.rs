@@ -348,16 +348,22 @@ fn fabric_client_environment_marks_the_jar_client_only() {
     assert!(!jar_for("env-server", "server").client_side_only);
 }
 
-/// WorldEdit's `LogManagerCompat` names its logger after the class two frames
-/// up (`StackWalker.walk(s -> s.skip(2).findFirst())`) and throws when the
-/// walk is empty. The walk sees the interpreter's jar frames, innermost first.
+/// Java 25 exposes the caller frame in `StackWalker.walk`: the reviewer probe
+/// returns `demo.Logs.walkStream,demo.Main.main`. A complete interpreter stack
+/// answers that stream; a top-level walk has no caller frame and is counted
+/// rather than returned in shortened form. `getCallerClass` remains exact.
 #[test]
-fn stack_walker_sees_the_jar_frames_innermost_first() {
+fn stack_walker_counts_walk_without_a_caller_frame() {
     let mut sources = BTreeMap::new();
     sources.insert(
         "demo/Logs.java",
         r#"package demo;
 public final class Logs {
+    static String walkStream() {
+        return StackWalker.getInstance().walk(frames -> frames.limit(4)
+            .map(frame -> frame.getClassName() + "." + frame.getMethodName())
+            .collect(java.util.stream.Collectors.joining(",")));
+    }
     static String callerCaller() {
         return StackWalker.getInstance()
             .walk(frames -> frames.skip(2).findFirst())
@@ -367,6 +373,11 @@ public final class Logs {
     static String named() { return callerCaller(); }
     static String method() {
         return StackWalker.getInstance().walk(frames -> frames.findFirst()).get().getMethodName();
+    }
+    static void walkTop() {
+        StackWalker.getInstance().walk(frames -> frames.limit(4)
+            .map(frame -> frame.getClassName() + "." + frame.getMethodName())
+            .collect(java.util.stream.Collectors.joining(",")));
     }
 }
 "#,
@@ -378,14 +389,40 @@ public final class Main {
     public static void main() {
         Probe.check("caller", "demo.Main".equals(Logs.named()));
         Probe.check("method", "method".equals(Logs.method()));
+        Probe.check("stream", "demo.Logs.walkStream,demo.Main.main".equals(Logs.walkStream()));
     }
 }
 "#,
     );
-    assert_eq!(
-        run("stack-walker", sources, &[]),
-        all_true(&["caller", "method"])
-    );
+    let top_level_sources = sources.clone();
+    let jar = NativeJar::from_path(&build_jar("stack-walker", sources, &[], &[])).unwrap();
+    let mut host = jar.seed_host(StdHost::new());
+    jar.execute("demo.Main", Some("main"), "main", &mut host)
+        .unwrap();
+    let checks = checks(&host);
+    assert_eq!(checks.get("caller"), Some(&true));
+    assert_eq!(checks.get("method"), Some(&true));
+    assert_eq!(checks.get("stream"), Some(&true));
+    // The three excluded `Probe.check` calls are the fixture harness itself;
+    // the nested walks are fully answered and add no StackWalker refusal.
+    assert_eq!(host.unknown_host_call_count(), 3);
+
+    // The reviewer's top-level probe has only `demo.Logs.walkTop` in the
+    // interpreter stack; Java 25 would add its launcher caller to the stream.
+    let top_level = NativeJar::from_path(&build_jar(
+        "stack-walker-top-level",
+        top_level_sources,
+        &[],
+        &[],
+    ))
+    .unwrap();
+    let mut top_host = top_level.seed_host(StdHost::new());
+    top_level
+        .execute("demo.Logs", Some("walkTop"), "main", &mut top_host)
+        .unwrap();
+    assert!(top_host.unknown_host_calls().iter().any(|(method, count)| {
+        method.starts_with("java/lang/StackWalker#walk") && *count == 1
+    }));
 }
 
 /// Id validators: `String.matches` and `Pattern.matches` answer the bounded

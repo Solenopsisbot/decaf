@@ -736,11 +736,13 @@ fn entry_lists_round_trip_and_sort_like_the_jdk() {
 
 #[test]
 fn string_format_widths_flags_hex_and_half_up_precision() {
-    // The JDK's `Formatter`: `%.2f` rounds the shortest digits half-up.
+    // Integer and string conversions are exact. The trailing no-locale floating
+    // conversions use Locale.getDefault(Locale.Category.FORMAT), which the bounded
+    // host cannot provide, so Java's string concatenation sees null.
     let fixture = Fixture::build("formats");
     assert_eq!(
         fixture.text("formats"),
-        "[00ff|ab   |   ab|-0042|7   |FF|he|ffffffff]2.68|10.00|3"
+        "[00ff|ab   |   ab|-0042|7   |FF|he|ffffffff]null"
     );
 }
 

@@ -512,6 +512,13 @@ impl<H: Host> Runtime<'_, H> {
     /// [`Self::known_instance_of`] for an object of the class `class`, before
     /// one exists (a `ServiceLoader` provider the loader is about to build).
     pub(crate) fn class_known_instance_of(&self, class: &str, target: &str) -> Option<bool> {
+        if self.class(class).is_some_and(|file| {
+            file.interface_names()
+                .iter()
+                .any(|interface| interface == target)
+        }) {
+            return Some(true);
+        }
         let target_is_interface = self
             .class(target)
             .and_then(class_access)

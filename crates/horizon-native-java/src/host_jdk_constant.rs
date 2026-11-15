@@ -67,6 +67,44 @@ pub(crate) fn coding_error_action_name(value: &Value) -> Option<&str> {
     key_of(value, HostKind::CodingErrorAction)
 }
 
+const STACK_WALKER_OPTIONS: [&str; 4] = [
+    "RETAIN_CLASS_REFERENCE",
+    "DROP_METHOD_INFO",
+    "SHOW_REFLECT_FRAMES",
+    "SHOW_HIDDEN_FRAMES",
+];
+
+/// The `StackWalker.Option` enum constant `name`.
+pub(crate) fn stack_walker_option(name: &str) -> Value {
+    Value::Host(HostRef::new(HostKind::StackWalkerOption, name))
+}
+
+pub(crate) fn stack_walker_option_name(value: &Value) -> Option<&str> {
+    key_of(value, HostKind::StackWalkerOption)
+}
+
+fn stack_walker_option_compare(
+    handle: &HostRef,
+    other: &Value,
+    _: &mut dyn Nested,
+) -> Result<Option<i32>, NativeError> {
+    Ok(
+        match (
+            STACK_WALKER_OPTIONS
+                .iter()
+                .position(|name| *name == handle.key()),
+            stack_walker_option_name(other).and_then(|name| {
+                STACK_WALKER_OPTIONS
+                    .iter()
+                    .position(|candidate| *candidate == name)
+            }),
+        ) {
+            (Some(own), Some(theirs)) => Some(own as i32 - theirs as i32),
+            _ => None,
+        },
+    )
+}
+
 /// The `Character.UnicodeBlock` constant `name`.
 pub(crate) fn unicode_block(name: &str) -> Value {
     Value::Host(HostRef::new(HostKind::UnicodeBlock, name))
@@ -265,6 +303,10 @@ pub(crate) const TIME_UNIT_METHODS: Methods = Methods {
     ..CONSTANT_METHODS
 };
 pub(crate) const CODING_ERROR_ACTION_METHODS: Methods = CONSTANT_METHODS;
+pub(crate) const STACK_WALKER_OPTION_METHODS: Methods = Methods {
+    compare_to: Some(stack_walker_option_compare),
+    ..CONSTANT_METHODS
+};
 pub(crate) const UNICODE_BLOCK_METHODS: Methods = CONSTANT_METHODS;
 
 pub(crate) const LOCALE_METHODS: Methods =
