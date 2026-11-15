@@ -24122,6 +24122,11 @@ impl<H: Host> Runtime<'_, H> {
         if r.name != "values" {
             return None;
         }
+        if let Some(values) = crate::enum_value_of::known_enum_values(&r.owner)
+            && r.descriptor == format!("()[L{};", r.owner)
+        {
+            return Some(self.new_array_value(&format!("[L{};", r.owner), values));
+        }
         // A loader enum whose constants are host handles (`ModConfig.Type`).
         if let Some(values) = crate::host_neoforge_loader::enum_values(&r.owner)
             .or_else(|| crate::host_fabric_runtime::enum_values(&r.owner))

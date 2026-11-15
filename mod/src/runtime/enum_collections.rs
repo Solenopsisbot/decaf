@@ -48,7 +48,9 @@ impl<H: Host> Runtime<'_, H> {
             if !self.enum_class_supported(class) || !self.has_constant_specific_values(class)? {
                 return self.host.unknown_operand_call(r).map(Some);
             }
-            return self.make_collection("set", Vec::new()).map(Some);
+            return self
+                .make_collection("java/util/EnumSet", Vec::new())
+                .map(Some);
         }
         if r.name == "allOf" && r.descriptor == "(Ljava/lang/Class;)Ljava/util/EnumSet;" {
             let Some(class) = args.first().and_then(host_class::class_name) else {
@@ -193,7 +195,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         let mut values = values;
         self.sort_enum_values(&mut values, r)?;
-        self.make_collection("enum-set", values).map(Some)
+        self.make_collection("java/util/EnumSet", values).map(Some)
     }
 
     pub(crate) fn enum_collection_text_for(
