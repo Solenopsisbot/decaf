@@ -69,6 +69,25 @@ class CensusCompareTests(unittest.TestCase):
         self.assertEqual(report["moved"][0]["base_verdict"], "(absent)")
         self.assertEqual(report["moved"][0]["appeared"], [{"call": "y", "count": 2}])
 
+    def test_refusal_that_stops_elsewhere_is_reported(self):
+        # Same verdict and no `calls`, but the refusal's counted-before-error calls and its error moved.
+        base = payload([{"jar": "beta.jar", "verdict": "refused", "error": "A at X+3",
+                         "counted_before_error": [["a#f", 14]]}])
+        merged = payload([{"jar": "beta.jar", "verdict": "refused", "error": "B at Y+9",
+                           "counted_before_error": [["b#g", 1]]}])
+        report = tool.compare_payloads(base, merged, {"base": [base], "merged": [merged]}, "server")
+        row = report["moved"][0]
+        self.assertEqual(row["vanished"], [{"call": "a#f", "count": 14}])
+        self.assertEqual(row["appeared"], [{"call": "b#g", "count": 1}])
+        self.assertEqual([c["field"] for c in row["other_changes"]], ["error"])
+        self.assertIn("B at Y+9", tool.markdown(report))
+
+    def test_changed_failure_evidence_alone_is_reported(self):
+        base = payload([{"jar": "hud.jar", "verdict": "ran-partial", "unknown": 0, "calls": [], "failed": ["x"]}])
+        merged = payload([{"jar": "hud.jar", "verdict": "ran-partial", "unknown": 0, "calls": [], "failed": ["y"]}])
+        report = tool.compare_payloads(base, merged, {"base": [base], "merged": [merged]}, "server")
+        self.assertEqual([c["field"] for c in report["moved"][0]["other_changes"]], ["failed"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,8 +25,9 @@
 //! tables' contents, never on hashing order or time.
 //!
 //! Markers are text, and composite values embed other markers in their own
-//! text (a lambda's `@indy:...` marker carries its captures, a `map-entry/k,v`
-//! both halves, a map view its map). Rather than parse every composite format,
+//! text (a lambda's `@indy:...` marker carries its captures, a map view its
+//! map). A host map entry is a handle whose key and value (and, for a node, its
+//! map) the host keeps by its key (`host_map_entry.rs`); they are its edges. Rather than parse every composite format,
 //! the collector looks for any collectable marker that ends where a run of
 //! digits ends inside a value's text: every collectable marker ends in its
 //! allocation number, so this finds an embedded one wherever it sits. A string
@@ -182,6 +183,12 @@ impl StdHost {
     /// owner, so this follows the live set, not how many maps a jar made.
     pub fn cached_collection_count(&self) -> usize {
         self.cached_collections.len()
+    }
+
+    /// How many `Map.Entry` objects the host keeps (`host_map_entry.rs`): each as long as
+    /// something reaches it, so this follows the live entries, not how many a jar walked.
+    pub fn map_entry_count(&self) -> usize {
+        self.map_entries.len()
     }
 
     pub(crate) fn take_resident_heap(&mut self) -> JavaHeap {
@@ -447,6 +454,14 @@ fn collectable(marker: &str) -> bool {
     {
         return rest.ends_with(|c: char| c.is_ascii_digit());
     }
+    // A host map entry (`host_map_entry.rs`): `<class>#entry<n>`/`<class>#node<n>`.
+    if let Some((_, serial)) = marker.rsplit_once('#')
+        && let Some(number) = serial
+            .strip_prefix("entry")
+            .or_else(|| serial.strip_prefix("node"))
+    {
+        return !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit());
+    }
     // A collection the host made (`<class>#neutral<n>`, `#immutable<n>`,
     // `#reversed<n>`, `jar_object::collection_key`): an object like any other.
     crate::jar_object::collection_key(marker).is_some()
@@ -679,6 +694,7 @@ impl Collectable {
             .chain(host.iterators.keys().map(String::as_str))
             .chain(host.enumerations.keys().map(String::as_str))
             .chain(host.component_states.keys().map(String::as_str))
+            .chain(host.map_entries.keys().map(String::as_str))
             .chain(host.keyed_table_keys())
             .filter(|marker| collectable(marker))
             .map(str::to_owned)
@@ -851,12 +867,18 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .get(&marker)
             .into_iter()
             .flat_map(|state| state.siblings.iter().chain(state.args.iter().flatten()));
+        // A map entry's key and value, and a node's map (`host_map_entry.rs`).
+        let entries = host.map_entries.held(&marker);
+        if let Some(map) = host.map_entries.map_of(&marker) {
+            collectable.scan(map, &mut found);
+        }
         for value in fields
             .chain(arrays)
             .chain(collections)
             .chain(iterators)
             .chain(enumerations)
             .chain(components)
+            .chain(entries)
         {
             if let Some(text) = value_text(value) {
                 mark_kotlin_lazy_states(
@@ -937,10 +959,11 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     heap.arrays.retain(|key, _| keep(key));
     heap.string_builders.retain(|key, _| keep(key));
     heap.enum_constants.retain(|key, _| keep(key));
-    host.mutable_collections.retain(|key, _| keep(key));
+    host.mutable_collections.retain_markers(|key| keep(key));
     host.iterators.retain(|key, _| keep(key));
     host.enumerations.retain(|key, _| keep(key));
     host.component_states.retain(|key, _| keep(key));
+    host.map_entries.retain(keep);
     host.prune_keyed_tables(keep);
     // A collected `Arrays.asList` view mirrors nothing any more.
     host.prune_array_views();
@@ -1078,10 +1101,14 @@ mod tests {
             "demo/Mod#MAPLjava/util/List;".into(),
             text("java/util/ArrayList#7"),
         );
-        host.mutable_collections.insert(
-            "java/util/ArrayList#7".into(),
-            vec![text("map-entry/rkey,rdemo/Node#1")],
+        let entry = host.mint_map_entry(
+            None,
+            &text("key"),
+            &text("demo/Node#1"),
+            crate::host_map_entry::EntryMade::Holder,
         );
+        host.mutable_collections
+            .insert("java/util/ArrayList#7".into(), vec![entry]);
         host.mutable_collections
             .insert("java/util/ArrayList#8".into(), vec![text("demo/Node#3")]);
         collect(&mut heap, &mut host, &[]);
@@ -1386,6 +1413,9 @@ mod tests {
             "neoforge_bus",
             "holders",
             "holder_rows",
+            // Map entries: their keys join the collectable set, their key, value and map are
+            // edges, and `retain` prunes them and their maps' rows (`host_map_entry.rs`).
+            "map_entries",
             "mutable_collections",
             "component_states",
             "unmodifiable_collections",

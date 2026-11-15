@@ -5,7 +5,8 @@
 //! (`Runtime::resync_hash_table`), an O(n) pass (O(n²) with the table's
 //! linear lookups) even when nothing had touched the list. The store gives
 //! every collection a generation that moves on **every** mutable access:
-//! `insert`, `get_mut`, `entry`, `remove`, `retain`. There is no other way to
+//! `insert`, `get_mut`, `entry`, `remove` (`retain_markers` drops whole
+//! collections and changes no kept one). There is no other way to
 //! change a list (no `DerefMut`), so a table synced at generation `g` still
 //! mirrors its list while the generation is `g`, and the reconciliation can
 //! be skipped. Reads go through `Deref` to the map and move nothing. A
@@ -90,17 +91,13 @@ impl CollectionStore {
         self.watched_writes
     }
 
-    /// Keep the collections `keep` accepts; every generation moves.
-    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&String, &mut Vec<Value>) -> bool) {
-        self.next += 1;
-        let next = self.next;
-        if !self.watched.is_empty() {
-            self.watched_writes += 1;
-        }
-        self.map.retain(|marker, values| keep(marker, values));
+    /// Keep the collections whose marker `keep` accepts, dropping the others whole (the
+    /// heap's collector): no kept list changes, so no kept generation moves and no watched
+    /// collection is written.
+    pub(crate) fn retain_markers(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        self.map.retain(|marker, _| keep(marker));
         self.watched.retain(|marker| self.map.contains_key(marker));
         self.generations
             .retain(|marker, _| self.map.contains_key(marker));
-        self.generations.values_mut().for_each(|g| *g = next);
     }
 }

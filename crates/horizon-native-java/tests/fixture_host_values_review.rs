@@ -108,7 +108,14 @@ const CASES: &[(&str, &str, Outcome)] = &[
             "class java.util.Optional cannot be cast to class demo.Rv$Node (java.util.Optional is in module java.base of loader 'bootstrap'; demo.Rv$Node is in unnamed module of loader 'app')|class demo.Rv$Node cannot be cast to class java.util.Optional (demo.Rv$Node is in unnamed module of loader 'app'; java.util.Optional is in module java.base of loader 'bootstrap')|class java.util.OptionalInt cannot be cast to class demo.Rv$Rec (java.util.OptionalInt is in module java.base of loader 'bootstrap'; demo.Rv$Rec is in unnamed module of loader 'app')",
         ),
     ),
-    ("Rv", "b5Others", Counted),
+    // A map entry is a `KeyValueHolder` handle (#156 P14e): its cast fails as Java's does.
+    (
+        "Rv",
+        "b5Others",
+        Exact(
+            "class [Ljava.lang.String; cannot be cast to class java.util.Optional ([Ljava.lang.String; and java.util.Optional are in module java.base of loader 'bootstrap')|class [I cannot be cast to class java.util.Optional ([I and java.util.Optional are in module java.base of loader 'bootstrap')|class java.util.ImmutableCollections$List12 cannot be cast to class java.util.Optional (java.util.ImmutableCollections$List12 and java.util.Optional are in module java.base of loader 'bootstrap')|class java.util.ArrayList cannot be cast to class java.util.Optional (java.util.ArrayList and java.util.Optional are in module java.base of loader 'bootstrap')|class java.lang.Class cannot be cast to class java.util.Optional (java.lang.Class and java.util.Optional are in module java.base of loader 'bootstrap')|class java.util.KeyValueHolder cannot be cast to class java.util.OptionalInt (java.util.KeyValueHolder and java.util.OptionalInt are in module java.base of loader 'bootstrap')",
+        ),
+    ),
     (
         "Rv",
         "b5Boxes",

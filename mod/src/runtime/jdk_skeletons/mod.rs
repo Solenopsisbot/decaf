@@ -527,7 +527,7 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         if !matches!(opcode, 0xb6 | 0xb9)
             || (r.name.as_str(), r.descriptor.as_str()) != ("equals", "(Ljava/lang/Object;)Z")
-            || !expect_ref(this).is_some_and(|marker| marker.starts_with("map-entry/"))
+            || !crate::runtime::host_map_entry::is_entry(this)
         {
             return Ok(None);
         }
@@ -558,8 +558,21 @@ impl<H: Host> Runtime<'_, H> {
                 &other,
                 &[],
             )?;
-            let equal = mine == theirs
-                || (mine != Value::Ref(None) && self.virtual_equals(&mine, &theirs)?);
+            // `IdentityHashMap.EntryIterator.Entry.equals` compares `e.getKey() == key` and
+            // `e.getValue() == value` (#221 review B1): by reference, counted where this model
+            // keeps no identity (two texts or boxes).
+            let equal = if crate::runtime::host_map_entry::is_identity_entry(this) {
+                match crate::runtime::host_map_entry::same_reference(&mine, &theirs) {
+                    Some(equal) => equal,
+                    None => {
+                        self.host.unknown_operand_call(r)?;
+                        return Ok(Some(boolean(false)));
+                    }
+                }
+            } else {
+                mine == theirs
+                    || (mine != Value::Ref(None) && self.virtual_equals(&mine, &theirs)?)
+            };
             if !equal {
                 return Ok(Some(boolean(false)));
             }

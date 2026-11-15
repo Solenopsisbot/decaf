@@ -318,13 +318,25 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                 }
             }
             "entry-key" | "entry-value" => {
-                let (ka, va) = super::map_entry_parts(a)?;
-                let (kb, vb) = super::map_entry_parts(b)?;
-                if kind == "entry-key" {
-                    self.natural_order(&ka, &kb)
-                } else {
-                    self.natural_order(&va, &vb)
-                }
+                // `Map.Entry.comparingByKey/Value`: `c1.getKey().compareTo(c2.getKey())`, each
+                // read as the entry's own accessor reads it (`host_map_entry.rs`). An entry whose
+                // contents are unknown (a Gson reading after a write, B8) is that accessor's
+                // counted call, answering its neutral value, never an internal error (#221
+                // review 7, B12).
+                let key = kind == "entry-key";
+                let mut part = |entry: &Value| -> Result<Value, NativeError> {
+                    match self.host.map_entry_parts(entry) {
+                        Some((k, v)) => Ok(if key { k } else { v }),
+                        None => self.host.unknown_operand_call(&MethodRef {
+                            owner: "java/util/Map$Entry".into(),
+                            name: if key { "getKey" } else { "getValue" }.into(),
+                            descriptor: "()Ljava/lang/Object;".into(),
+                        }),
+                    }
+                };
+                let left = part(a)?;
+                let right = part(b)?;
+                self.natural_order(&left, &right)
             }
             _ => Err(NativeError::Metadata(format!(
                 "unsupported comparator marker {marker}"

@@ -1,0 +1,2 @@
+setup=ok
+check=truea=10true[a=10, b=2]truec=3[a=10, b=2, c=3]|truex=1|trueK1=K2true|trues=5

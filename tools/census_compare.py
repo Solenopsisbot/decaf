@@ -47,13 +47,34 @@ def row_key(corpus: str, row: dict, role: str) -> tuple[str, str, str, str]:
 
 
 def call_counts(row: dict | None) -> dict[str, int]:
+    """Counted calls of a row: `calls` for a run, `counted_before_error` for a refusal."""
     result: dict[str, int] = defaultdict(int)
-    for item in (row or {}).get("calls") or []:
-        if isinstance(item, (list, tuple)) and len(item) >= 2:
-            result[str(item[0])] += int(item[1])
-        elif isinstance(item, dict) and "call" in item:
-            result[str(item["call"])] += int(item.get("count", 0))
+    for field in ("calls", "counted_before_error"):
+        for item in (row or {}).get(field) or []:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                result[str(item[0])] += int(item[1])
+            elif isinstance(item, dict) and "call" in item:
+                result[str(item["call"])] += int(item.get("count", 0))
     return dict(result)
+
+
+# Fields compared through their own columns; every OTHER field that differs is listed by name, so a
+# refused row that now stops somewhere else (new `error`/`stage`) or a run whose `failed`, `frame`
+# or listener evidence changed is never reported as unchanged (rc261d: the tool missed two such rows).
+CALL_FIELDS = {"calls", "counted_before_error"}
+SHOWN_FIELDS = {"jar", "mode", "role", "verdict", "unknown"} | CALL_FIELDS
+
+
+def other_changes(left: dict | None, right: dict | None) -> list[dict]:
+    left, right = left or {}, right or {}
+    changes = []
+    for field in sorted((set(left) | set(right)) - SHOWN_FIELDS):
+        if left.get(field) != right.get(field):
+            def short(value) -> str:
+                text = json.dumps(value, sort_keys=True) if not isinstance(value, str) else value
+                return text if len(text) <= 160 else text[:157] + "..."
+            changes.append({"field": field, "base": short(left.get(field)), "merged": short(right.get(field))})
+    return changes
 
 
 def payload_rows(payload: dict, role: str) -> dict[tuple[str, str, str, str], dict]:
@@ -111,7 +132,9 @@ def moved_jars(base: dict, merged: dict, role: str, flaky: set[tuple[str, str, s
         old_calls, new_calls = call_counts(left), call_counts(right)
         same_verdict = (left or {}).get("verdict") == (right or {}).get("verdict")
         same_unknown = (left or {}).get("unknown") == (right or {}).get("unknown")
-        if left is not None and right is not None and same_verdict and same_unknown and old_calls == new_calls:
+        others = other_changes(left, right)
+        if left is not None and right is not None and same_verdict and same_unknown and old_calls == new_calls \
+                and not others:
             continue
         # Per-call deltas: `vanished` holds calls counted fewer times after the merge (by how many),
         # `appeared` calls counted more times; a call that disappears entirely is the full count.
@@ -123,7 +146,7 @@ def moved_jars(base: dict, merged: dict, role: str, flaky: set[tuple[str, str, s
                       "base_verdict": (left or {}).get("verdict", "(absent)"),
                       "merged_verdict": (right or {}).get("verdict", "(absent)"),
                       "base_unknown": (left or {}).get("unknown"), "merged_unknown": (right or {}).get("unknown"),
-                      "attribution": "", "vanished": vanished, "appeared": appeared})
+                      "attribution": "", "vanished": vanished, "appeared": appeared, "other_changes": others})
     return moved
 
 
@@ -152,13 +175,16 @@ def markdown(report: dict) -> str:
         def labels(data: dict) -> str:
             return ", ".join(f"{key}={data[key]}" for key in sorted(data) if key not in {"corpus", "mode", "role", "jars", "unknown_total"}) or "—"
         lines.append(f"| {source.get('corpus', group)} | {source.get('mode', '—')} | {source.get('role', '—')} | {left.get('unknown_total', 0)} | {right.get('unknown_total', 0)} | {labels(left)} | {labels(right)} |")
-    lines += ["", "## Deterministic changed rows", "", "Every row whose verdict, unknown count or counted calls changed (flaky rows excluded). Vanished/appeared are per-call count deltas.", "", "| Corpus | Mode | Role | Jar | Base → merged | Unknown | Vanished calls | Appeared calls | EXACT/SILENT attribution |", "|---|---|---|---|---|---|---|---|---|"]
+    lines += ["", "## Deterministic changed rows", "", "Every row whose verdict, unknown count or counted calls changed (flaky rows excluded). Vanished/appeared are per-call count deltas.", "", "| Corpus | Mode | Role | Jar | Base → merged | Unknown | Vanished calls | Appeared calls | Other changed fields | EXACT/SILENT attribution |", "|---|---|---|---|---|---|---|---|---|---|"]
+    def others(values: list[dict]) -> str:
+        cell = "<br>".join(f"`{entry['field']}`: {entry['base']} → {entry['merged']}" for entry in values) or "—"
+        return cell.replace("|", "\\|")
     for item in report["moved"]:
         def calls(values: list[dict]) -> str:
             return "<br>".join(f"`{entry['call']}` ({entry['count']})" for entry in values) or "—"
-        lines.append(f"| {item['corpus']} | {item['mode']} | {item['role']} | `{item['jar']}` | {item['base_verdict']} → {item['merged_verdict']} | {item['base_unknown']} → {item['merged_unknown']} | {calls(item['vanished'])} | {calls(item['appeared'])} | {item['attribution']} |")
+        lines.append(f"| {item['corpus']} | {item['mode']} | {item['role']} | `{item['jar']}` | {item['base_verdict']} → {item['merged_verdict']} | {item['base_unknown']} → {item['merged_unknown']} | {calls(item['vanished'])} | {calls(item['appeared'])} | {others(item.get('other_changes', []))} | {item['attribution']} |")
     if not report["moved"]:
-        lines.append("| — | — | — | — | — | — | — | — | — |")
+        lines.append("| — | — | — | — | — | — | — | — | — | — |")
     lines += ["", "## Flaky rows", ""]
     if report["flaky"]:
         lines += ["| Corpus | Mode | Role | Jar | Repetitions |", "|---|---|---|---|---|"]

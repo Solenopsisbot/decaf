@@ -496,6 +496,13 @@ pub enum HostKind {
     Enumeration,
     /// A list's `listIterator()`: key `list-iterator/<n>`.
     ListIterator,
+    /// A `Map.Entry` whose class the host knows (`HashMap$Node`, `TreeMap$Entry`,
+    /// `KeyValueHolder`...): key `<class>#entry<n>` (one object per key) or
+    /// `<class>#node<n>` (a map's node, identity by origin) (`host_map_entry.rs`).
+    MapEntry,
+    /// A `Map.Entry` of a map whose entry class the host does not model: key
+    /// `java/util/Map$Entry#node<n>` (`host_map_entry.rs`).
+    OpaqueMapEntry,
     /// `System.out`/`System.err`: key `system-out`/`system-err`
     /// (`host_service.rs`).
     StdStream,
@@ -586,6 +593,13 @@ pub(crate) trait Nested {
     /// `host_component.rs`); `None` where this context cannot read the
     /// host's table (the caller counts).
     fn component_json(&mut self, value: &Value) -> Option<serde_json::Value> {
+        let _ = value;
+        None
+    }
+    /// The key and value a host `Map.Entry` holds now (`host_map_entry.rs`);
+    /// `None` where this context cannot read the host's table or the entry's
+    /// contents are unknown (the caller counts).
+    fn map_entry_parts(&mut self, value: &Value) -> Option<(Value, Value)> {
         let _ = value;
         None
     }
@@ -2246,6 +2260,25 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::runtime::host_iterator::ITERATOR_METHODS,
     },
     KindInfo {
+        kind: HostKind::MapEntry,
+        tag: "ment",
+        class: ClassRule::FromKey(crate::runtime::host_map_entry::entry_class),
+        // A new `KeyValueHolder`/snapshot per key; a node's key is reused
+        // for every reading of that node, its identity told by origin.
+        canonical: crate::runtime::host_map_entry::entry_canonical,
+        methods: &crate::runtime::host_map_entry::ENTRY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::OpaqueMapEntry,
+        tag: "omen",
+        class: ClassRule::Unknown {
+            declared: crate::runtime::host_map_entry::opaque_types,
+        },
+        // Fresh or reused per reading, by a map this model does not know.
+        canonical: never_canonical,
+        methods: &crate::runtime::host_map_entry::ENTRY_METHODS,
+    },
+    KindInfo {
         kind: HostKind::StdStream,
         tag: "stds",
         // A `PrintStream`; in the game vanilla's `LoggedPrintStream`
@@ -2494,6 +2527,12 @@ impl HostRef {
     /// sides), are one object. `None` for two equal handles of a kind that
     /// is not canonical from different constructions: maybe two objects,
     /// maybe one Java object a model wrapped twice. The caller counts it.
+    /// Which construction this handle came from: two handles with one key and different
+    /// origins may be two objects (`host_map_entry.rs` keeps each one's own state by it).
+    pub(crate) fn origin(&self) -> u64 {
+        self.origin
+    }
+
     pub(crate) fn same_object(&self, other: &HostRef) -> Option<bool> {
         if self != other {
             return Some(false);
