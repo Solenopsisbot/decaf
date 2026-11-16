@@ -1,4 +1,5 @@
-//! The jars a jar bundles (`META-INF/jars/*.jar`) are on its class path.
+//! The jars a jar bundles (`META-INF/jars/*.jar` or NeoForge
+//! `META-INF/jarjar/*.jar`) are on its class path.
 //!
 //! Fabric's "Jar-in-Jar" (and NeoForge's JarJar) puts a bundled library's
 //! classes on the mod's class path: `respackopts` never declares
@@ -16,7 +17,11 @@
 use crate::{NativeJar, StdHost};
 
 /// Where Fabric and NeoForge keep the bundled jars.
-const NESTED_DIR: &str = "META-INF/jars/";
+const NESTED_DIRS: &[&str] = &["META-INF/jars/", "META-INF/jarjar/"];
+
+fn is_nested_entry(name: &str) -> bool {
+    NESTED_DIRS.iter().any(|dir| name.starts_with(dir)) && name.ends_with(".jar")
+}
 /// How many bundled jars one outer jar may contribute. A real bundle is a
 /// handful of libraries; anything past this is not a shape a loader ships.
 const MAX_NESTED_JARS: usize = 32;
@@ -31,13 +36,14 @@ pub struct NestedJar {
 }
 
 /// The bundled jars of `jar`, parsed and in entry-name order (so the class
-/// path a pack yields does not depend on zip order), up to
+/// path a pack yields does not depend on zip order), from both loader
+/// conventions, up to
 /// [`MAX_NESTED_JARS`].
 pub fn parsed(jar: &NativeJar) -> Vec<(String, NativeJar)> {
     let mut entries = jar
         .resource_bytes
         .iter()
-        .filter(|(name, _)| name.starts_with(NESTED_DIR) && name.ends_with(".jar"))
+        .filter(|(name, _)| is_nested_entry(name))
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(right.0));
     entries
@@ -61,7 +67,7 @@ pub fn link_nested_jars(host: &mut StdHost, jar: &NativeJar) -> Vec<NestedJar> {
     let mut entries = jar
         .resource_bytes
         .iter()
-        .filter(|(name, _)| name.starts_with(NESTED_DIR) && name.ends_with(".jar"))
+        .filter(|(name, _)| is_nested_entry(name))
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(right.0));
     for (entry, bytes) in entries.into_iter().take(MAX_NESTED_JARS) {

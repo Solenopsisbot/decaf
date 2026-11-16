@@ -75,6 +75,7 @@ mod game_hooks;
 mod game_object;
 mod game_rules;
 mod gson_model;
+mod gson_to_json_tree;
 mod gson_tree;
 mod gson_type_token;
 mod gson_writer;
@@ -5462,10 +5463,6 @@ impl Host for StdHost {
     }
 
     fn is_set_from_map(&self, value: &Value) -> bool {
-        eprintln!(
-            "SETMAP? {value:?} keys={:?}",
-            self.set_from_map_views.keys().collect::<Vec<_>>()
-        );
         let Value::Host(handle) = value else {
             return false;
         };
@@ -15069,6 +15066,10 @@ struct BootstrapMethod {
 }
 
 impl ClassFile {
+    pub(crate) fn is_record(&self) -> bool {
+        self.super_name == "java/lang/Record"
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, NativeError> {
         Self::parse_with_warnings(bytes).map(|(class, _)| class)
     }
@@ -15302,7 +15303,11 @@ impl ClassFile {
     /// the way [`Self::field_signature`] does. Only `RuntimeVisibleAnnotations`
     /// is read: a `CLASS`-retention annotation is invisible to reflection on
     /// the JVM too. A malformed table answers no annotations.
-    fn field_annotations(&self, field_name: &str, field_descriptor: &str) -> Vec<Annotation> {
+    pub(crate) fn field_annotations(
+        &self,
+        field_name: &str,
+        field_descriptor: &str,
+    ) -> Vec<Annotation> {
         self.read_field_annotations(field_name, field_descriptor)
             .unwrap_or_default()
     }
@@ -22717,10 +22722,6 @@ impl<H: Host> Runtime<'_, H> {
         let Some(callback) = callback_marker::lambda_of(marker) else {
             return Ok(None);
         };
-        eprintln!(
-            "CALLBACK target={:?} captures={:?} args={:?}",
-            callback.target, callback.captures, args
-        );
         // The callback target may live in a linked library jar, so resolve it
         // the same way a frame resolves its own class: the host's modelled
         // surface wins over a lookalike class in the pack.
@@ -29331,6 +29332,16 @@ impl<H: Host> Runtime<'_, H> {
                     } else if let Some(value) =
                         invoke_or_catch!(at, executors::invoke(self, &r, receiver.as_ref(), &args))
                     {
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        gson_to_json_tree::instance_call(
+                            self,
+                            &r,
+                            receiver.as_ref().unwrap_or(&Value::Ref(None)),
+                            &args,
+                        )
+                    ) {
                         value
                     } else if let Some(value) =
                         invoke_or_catch!(at, self.invoke_gson_tree(&r, receiver.as_ref(), &args))

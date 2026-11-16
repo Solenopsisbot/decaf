@@ -118,7 +118,7 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
-    fn build(test: &str) -> Self {
+    fn build_with_layout(test: &str, nested_dir: &str) -> Self {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -153,15 +153,16 @@ impl Fixture {
             ],
         );
         let classes = outer_root.join("classes");
+        let nested_entry = format!("{nested_dir}inner.jar");
         let jar_path = outer_root.join("outer.jar");
         let mut zip = zip::ZipWriter::new(fs::File::create(&jar_path).unwrap());
         zip.start_file("fabric.mod.json", SimpleFileOptions::default())
             .unwrap();
-        zip.write_all(
-            br#"{"schemaVersion":1,"id":"outer-fixture","version":"1.0","entrypoints":{"main":"demo.Entry"},"depends":{"inner-lib":">=1"},"jars":[{"file":"META-INF/jars/inner.jar"}]}"#,
-        )
-        .unwrap();
-        zip.start_file("META-INF/jars/inner.jar", SimpleFileOptions::default())
+        let metadata = format!(
+            r#"{{"schemaVersion":1,"id":"outer-fixture","version":"1.0","entrypoints":{{"main":"demo.Entry"}},"depends":{{"inner-lib":">=1"}},"jars":[{{"file":"{nested_entry}"}}]}}"#,
+        );
+        zip.write_all(metadata.as_bytes()).unwrap();
+        zip.start_file(&nested_entry, SimpleFileOptions::default())
             .unwrap();
         zip.write_all(&inner).unwrap();
         for class in files_under(&classes.join("demo")) {
@@ -177,6 +178,14 @@ impl Fixture {
 
         fixture.jar = NativeJar::from_path(&jar_path).unwrap();
         fixture
+    }
+
+    fn build(test: &str) -> Self {
+        Self::build_with_layout(test, "META-INF/jars/")
+    }
+
+    fn build_jarjar(test: &str) -> Self {
+        Self::build_with_layout(test, "META-INF/jarjar/")
     }
 
     /// Run the entrypoint and return what it printed.
@@ -200,6 +209,22 @@ impl Fixture {
         }
         host.take_stdout()
     }
+
+    fn printed_jarjar(&self) -> String {
+        let mut host = self
+            .jar
+            .seed_host(StdHost::new().with_environment_type("SERVER"));
+        self.jar
+            .execute_with_budget(
+                "demo.Entry",
+                Some("onInitialize"),
+                "main",
+                &mut host,
+                &horizon_native_java::ExecutionBudget::within(std::time::Duration::from_secs(30)),
+            )
+            .unwrap();
+        host.take_stdout()
+    }
 }
 
 #[test]
@@ -216,4 +241,10 @@ fn a_bundle_provides_the_mod_ids_of_its_bundled_jars() {
     // `outer-fixture`’s nested jar declares the id `inner-lib`; nothing else
     // is missing.
     assert!(plan.missing.is_empty(), "missing: {:?}", plan.missing);
+}
+
+#[test]
+fn a_neoforge_jarjar_library_is_on_the_outer_jar_s_class_path() {
+    let fixture = Fixture::build_jarjar("jarjar-classpath");
+    assert_eq!(fixture.printed_jarjar().trim(), "from-inner");
 }

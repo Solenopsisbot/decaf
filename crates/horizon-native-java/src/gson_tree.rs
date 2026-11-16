@@ -65,7 +65,7 @@
 
 use super::*;
 
-mod parse;
+pub(crate) mod parse;
 mod typed;
 
 pub(crate) const JSON_ELEMENT: &str = "com/google/gson/JsonElement";

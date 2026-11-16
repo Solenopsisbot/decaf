@@ -126,10 +126,7 @@ impl StdHost {
         let source = args.first()?;
         let retained = match crate::runtime_collection_values(self, source) {
             Ok(values) => values,
-            Err(error) => {
-                eprintln!("RETAIN error={error:?}");
-                return Some(Err(error));
-            }
+            Err(error) => return Some(Err(error)),
         };
         let values = self.mutable_collections.get_mut(&map)?;
         let mut changed = false;
