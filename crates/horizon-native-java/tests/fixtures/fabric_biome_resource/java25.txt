@@ -1,0 +1,4 @@
+net.fabricmc.fabric.api.biome.v1.BiomeModification
+true
+true
+dup=allowed

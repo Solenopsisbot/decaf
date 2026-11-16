@@ -6662,11 +6662,6 @@ impl Host for StdHost {
                 let value = host_fabric_runtime::biome_modification(id)
                     .ok_or_else(|| NativeError::UnknownHostCall(r.clone()))?;
                 if let Some(key) = host_fabric_runtime::biome_modification_id(&value) {
-                    if self.fabric_biome_modifications.contains(&key) {
-                        return Err(NativeError::Metadata(
-                            "duplicate biome modification identifier".into(),
-                        ));
-                    }
                     self.fabric_biome_modifications.push(key);
                 }
                 return Ok(value);

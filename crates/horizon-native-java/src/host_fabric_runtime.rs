@@ -238,22 +238,14 @@ pub(crate) fn resource_loader(pack_type: &Value) -> Option<Value> {
 
 /// Whether `value` is a `ResourceLoader` handle.
 pub(crate) fn biome_modification(id: &Value) -> Option<Value> {
-    let id = expect_identifier(id)?;
     Some(Value::Host(HostRef::of_values(
         HostKind::FabricBiomeModification,
-        &[text(&id)],
+        &[id.clone()],
     )))
 }
 
 pub(crate) fn biome_modification_id(value: &Value) -> Option<String> {
     single(value, HostKind::FabricBiomeModification)
-}
-
-fn expect_identifier(value: &Value) -> Option<String> {
-    match value {
-        Value::Ref(Some(v)) if v.starts_with("identifier/") => Some(v.clone()),
-        _ => None,
-    }
 }
 
 pub(crate) fn is_resource_loader(value: &Value) -> bool {
