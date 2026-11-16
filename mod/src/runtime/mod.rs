@@ -10504,6 +10504,38 @@ impl Host for StdHost {
             ("java/lang/String", "isEmpty", "()Z") => {
                 Ok(Value::Int(expect_string(receiver).is_empty() as i32))
             }
+            ("java/lang/String", "getBytes", "()[B")
+            | ("java/lang/String", "getBytes", "(Ljava/nio/charset/Charset;)[B")
+            | ("java/lang/String", "getBytes", "(Ljava/lang/String;)[B") => {
+                let charset = match r.descriptor.as_str() {
+                    "()[B" => "UTF-8".to_owned(),
+                    "(Ljava/nio/charset/Charset;)[B" => args
+                        .first()
+                        .and_then(expect_ref)
+                        .map(|s| s.to_ascii_uppercase())
+                        .unwrap_or_else(|| "UTF-8".into()),
+                    _ => expect_string(Self::argument(r, args, 0)?).to_owned(),
+                };
+                let text = expect_string(receiver);
+                let bytes: Vec<u8> = match charset.replace('-', "").to_ascii_uppercase().as_str() {
+                    "UTF8" => text.as_bytes().to_vec(),
+                    "ISO88591" | "LATIN1" => text.chars().map(|c| c as u32 as u8).collect(),
+                    "USASCII" | "ASCII" => text
+                        .chars()
+                        .map(|c| if (c as u32) < 128 { c as u8 } else { b'?' })
+                        .collect(),
+                    _ => return self.unknown_host_call(r).map(Some),
+                };
+                let marker = self.new_array("byte", "getBytes");
+                self.arrays.insert(
+                    marker.clone(),
+                    bytes
+                        .into_iter()
+                        .map(|b| Value::Int((b as i8) as i32))
+                        .collect(),
+                );
+                Ok(Value::Ref(Some(marker)))
+            }
             ("java/lang/String", "startsWith", "(Ljava/lang/String;)Z") => {
                 let prefix = Self::argument(r, args, 0)?;
                 Ok(Value::Int(
