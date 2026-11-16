@@ -237,6 +237,7 @@ mod stream_pipeline;
 mod string_code_points;
 mod string_constructors;
 mod synchronized_views;
+mod thread_local;
 mod tim_sort;
 mod tree_map;
 mod type_switch;
@@ -2460,6 +2461,10 @@ pub trait Host {
     fn modelled_to_string(&mut self, _value: &Value) -> Option<String> {
         None
     }
+    /// Exact text for a host registry whose lifecycle state is modelled.
+    fn registry_text(&self, _value: &Value) -> Option<String> {
+        None
+    }
 
     /// [`Self::modelled_to_string`], with a nested walk's `StackOverflowError` thrown rather
     /// than read as "no model" (#250): the runtime's `String.valueOf`, `Objects.toString` and
@@ -3404,6 +3409,8 @@ pub struct StdHost {
     /// (`FabricRegistryBuilder.buildAndRegister`), by id: the only ones whose
     /// every entry the host saw registered (`registry_contents.rs`).
     jar_registries: BTreeSet<String>,
+    /// Built-in registry ids and whether every observed registration stayed stable.
+    registry_lifecycles: BTreeMap<String, bool>,
     /// The id each `new LevelResource(id)` a jar built carries
     /// (`facade_server.rs`), by the object's marker.
     level_resources: BTreeMap<String, String>,
@@ -3590,6 +3597,13 @@ impl Default for StdHost {
 }
 
 impl StdHost {
+    pub(crate) fn registry_lifecycle_stable(&self, id: &str) -> bool {
+        self.registry_lifecycles
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| crate::vanilla_registries::is_built_in(id))
+    }
+
     pub fn new() -> Self {
         Self {
             properties: BTreeMap::from([
@@ -3662,6 +3676,7 @@ impl StdHost {
             identifier_objects: BTreeMap::new(),
             deferred_registers: BTreeMap::new(),
             jar_registries: BTreeSet::new(),
+            registry_lifecycles: BTreeMap::new(),
             level_resources: BTreeMap::new(),
             saved_data: facade_saved_data::SavedDataState::default(),
             neoforge_attachments: neoforge_attachments::AttachmentState::default(),
@@ -4734,6 +4749,30 @@ impl StdHost {
         &self.registrations
     }
 
+    /// Record a registry entry whose id and value were observed by a bounded
+    /// `Registry.registerForHolder` call.  The row is deliberately kept in
+    /// the same table as `Registry.register` so later holder lookups can only
+    /// answer for registrations this runtime actually saw.
+    pub(crate) fn record_observed_registry(&mut self, registry: &str, id: String, value: Value) {
+        self.registrations.push(RegistryEntry {
+            registry: registry.to_owned(),
+            id,
+            value,
+            declaration: None,
+        });
+    }
+
+    pub(crate) fn observed_registry_entry(
+        &self,
+        registry: &str,
+        id: &str,
+    ) -> Option<&RegistryEntry> {
+        self.registrations
+            .iter()
+            .rev()
+            .find(|entry| entry.registry == registry && entry.id == id)
+    }
+
     /// The property chain recorded for a constructed item marker, in the
     /// builder's own vocabulary (`stacksTo`, `durability`, `rarity`, ...).
     ///
@@ -5120,22 +5159,48 @@ impl StdHost {
         Some(Value::Void)
     }
 
+    fn registration_lifecycle_stable(value: &Value) -> Option<bool> {
+        match value {
+            Value::Ref(Some(text)) => match text.as_str() {
+                "registration/stable" | "lifecycle/stable" => Some(true),
+                "registration/experimental" | "lifecycle/experimental" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn registry_register(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Option<Value> {
-        if r.owner != "net/minecraft/core/Registry" || r.name != "register" || args.len() < 2 {
+        if !matches!(
+            r.owner.as_str(),
+            "net/minecraft/core/Registry"
+                | "net/minecraft/core/MappedRegistry"
+                | "net/minecraft/core/DefaultedMappedRegistry"
+        ) || r.name != "register"
+            || args.len() < 2
+        {
             return None;
         }
+        let registration_info = receiver.is_some()
+            && r.descriptor
+                == "(Lnet/minecraft/resources/ResourceKey;Ljava/lang/Object;Lnet/minecraft/core/RegistrationInfo;)Lnet/minecraft/core/Holder$Reference;";
+        let value_index = if registration_info {
+            args.len().checked_sub(2)?
+        } else {
+            args.len().checked_sub(1)?
+        };
         let registry = receiver
             .into_iter()
             .chain(args.iter())
             .find_map(host_registry::registry_id)?
             .to_owned();
         let registry = registry.as_str();
-        let id = args.iter().find_map(|value| {
+        let id = args[..value_index].iter().find_map(|value| {
             if let Some(id) = host_ids::identifier_key(value) {
                 let (namespace, path) = id.split_once(':')?;
                 return Some(format!("{namespace}:{path}"));
@@ -5144,9 +5209,24 @@ impl StdHost {
             // through the key rather than a bare identifier. Without reading
             // the id out of the key the host answers null and the caller's
             // static field ends up null. An unnamed key names no id.
-            resource_key_identifier(value).map(|(namespace, path)| format!("{namespace}:{path}"))
+            if let Some((namespace, path)) = resource_key_identifier(value) {
+                return Some(format!("{namespace}:{path}"));
+            }
+            // The legacy overload accepts a String and parses it as an
+            // Identifier (`minecraft:` is the default namespace). Only the
+            // pre-value arguments are inspected, so a registered String value
+            // cannot be mistaken for its id.
+            let text = expect_ref(value)?;
+            let (namespace, path) = text.split_once(':').unwrap_or(("minecraft", text));
+            (!namespace.is_empty() && !path.is_empty()).then(|| format!("{namespace}:{path}"))
         })?;
-        let value = args.last().cloned().unwrap_or(Value::Void);
+        let value = args.get(value_index).cloned().unwrap_or(Value::Void);
+        let lifecycle = if registration_info {
+            args.last().and_then(Self::registration_lifecycle_stable)
+        } else {
+            Some(true)
+        };
+        host_registry::note_registry_lifecycle(self, registry, lifecycle);
         let key = format!("{registry}/{id}");
         // An id the jar's metadata already describes stays opaque: the
         // metadata is the explicit adapter for that row, so inference must not
@@ -6152,6 +6232,13 @@ impl Host for StdHost {
         crate::java_tostring::modelled(self, value)
     }
 
+    fn registry_text(&self, value: &Value) -> Option<String> {
+        match crate::host_registry::registry_text(self, value) {
+            Some(Value::Ref(Some(text))) => Some(text),
+            _ => None,
+        }
+    }
+
     fn modelled_to_string_checked(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         crate::java_tostring::modelled_checked(self, value)
     }
@@ -6377,6 +6464,12 @@ impl Host for StdHost {
         // field's own type says which object it is: `Registries.X` is the
         // registry's key (`ResourceKey[minecraft:root / X]`),
         // `BuiltInRegistries.X` the registry (`host_registry.rs`).
+        if r.owner == "net/minecraft/core/RegistrationInfo"
+            && r.name == "BUILT_IN"
+            && r.descriptor == "Lnet/minecraft/core/RegistrationInfo;"
+        {
+            return Ok(Value::Ref(Some("registration/stable".into())));
+        }
         if let Some(id) = registry_static_id(&r.owner, &r.name) {
             return Ok(if r.descriptor == "Lnet/minecraft/resources/ResourceKey;" {
                 host_ids::registry_key_of(id)
@@ -6765,6 +6858,30 @@ impl Host for StdHost {
         }
         if let Some(value) = host_registry_holder::static_call(self, r, args) {
             return value;
+        }
+        match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+            (
+                "com/mojang/serialization/Lifecycle",
+                "stable",
+                "()Lcom/mojang/serialization/Lifecycle;",
+            ) => {
+                return Ok(Value::Ref(Some("lifecycle/stable".into())));
+            }
+            (
+                "com/mojang/serialization/Lifecycle",
+                "experimental",
+                "()Lcom/mojang/serialization/Lifecycle;",
+            ) => {
+                return Ok(Value::Ref(Some("lifecycle/experimental".into())));
+            }
+            (
+                "net/minecraft/core/RegistrationInfo",
+                "experimental",
+                "()Lnet/minecraft/core/RegistrationInfo;",
+            ) => {
+                return Ok(Value::Ref(Some("registration/experimental".into())));
+            }
+            _ => {}
         }
         if let Some(value) = self.registry_register(r, None, args) {
             return Ok(value);
@@ -8049,6 +8166,12 @@ impl Host for StdHost {
         // A handle's `toString`/`hashCode`/`equals` are its kind's row
         // (`host_ref.rs`), before any model that answers by the call's owner.
         // An object's are its class's: the models below answer them.
+        if r.name == "toString"
+            && r.descriptor == "()Ljava/lang/String;"
+            && let Some(value) = host_registry::registry_text(self, receiver)
+        {
+            return Ok(value);
+        }
         if matches!(receiver, Value::Host(handle) if !jar_object::is_object_handle(handle))
             && (matches!(
                 (r.name.as_str(), r.descriptor.as_str()),
@@ -23872,6 +23995,33 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// Whether `name` is `wanted` or a subclass (or implementor) of it.
+    pub(crate) fn jar_method_owner(
+        &self,
+        class: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<String> {
+        self.member_owner(class, name, descriptor)
+            .and_then(|(owner, jar)| jar.then_some(owner))
+    }
+
+    pub(crate) fn jar_extends(&self, class: &str, wanted: &str) -> bool {
+        let mut current = class.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            if current == wanted {
+                return true;
+            }
+            let Some(file) = self.class(&current) else {
+                return false;
+            };
+            if file.super_name.is_empty() || file.super_name == current {
+                return false;
+            }
+            current = file.super_name.clone();
+        }
+        false
+    }
+
     pub(crate) fn class_is_instance(&self, name: &str, wanted: &str) -> bool {
         let mut current = jar_object::marker_class_or_text(name).to_owned();
         for _ in 0..MAX_SUPERCLASS_WALK {
@@ -25752,9 +25902,25 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        if let Some(value) = thread_local::call(self, r, receiver, args) {
+            return value.map(Some);
+        }
+        if let Some(value) = dfu_codec::runtime_instance_call(self, r, receiver, args)? {
+            return Ok(Some(value));
+        }
         // A game codec factory whose result a class only stores.
         if let Some(value) = stream_codec::static_call(r, args) {
             return Ok(Some(value));
+        }
+        if let Some(value) = receiver
+            .and_then(|receiver| stream_codec::runtime_instance_call(self, r, Some(receiver), args))
+        {
+            return value.map(Some);
+        }
+        if let Some(value) =
+            receiver.and_then(|receiver| stream_codec::instance_call(r, receiver, args))
+        {
+            return value.map(Some);
         }
         if let Some(value) = self.invoke_game_codec_factory(r) {
             return Ok(Some(value));
@@ -28264,7 +28430,7 @@ impl<H: Host> Runtime<'_, H> {
     /// inside the callee's frame counted one extra frame per lazily initialized
     /// class on the chain (two of the 12 that refused
     /// `structure_layout_optimizer`).
-    fn invoke(
+    pub(crate) fn invoke(
         &mut self,
         class: &str,
         method: &str,
@@ -29863,6 +30029,12 @@ impl<H: Host> Runtime<'_, H> {
                         ))
                     } else if let Some(value) = invoke_or_catch!(
                         at,
+                        thread_local::call(self, &r, receiver.as_ref(), &args)
+                            .map_or(Ok(None), |value| value.map(Some))
+                    ) {
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
                         self.invoke_jdk_skeleton(&r, op, receiver.as_ref(), &args)
                     ) {
                         // A JDK skeleton's body or a JDK interface default the
@@ -29919,6 +30091,11 @@ impl<H: Host> Runtime<'_, H> {
                         invoke_or_catch!(at, string_constructors::count(self, &r))
                     {
                         // `new String(...)` builds no text yet: counted.
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        dfu_codec::runtime_instance_call(self, &r, receiver.as_ref(), &args)
+                    ) {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,

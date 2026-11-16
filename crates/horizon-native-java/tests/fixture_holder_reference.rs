@@ -8,7 +8,7 @@ mod javac_fixture;
 use horizon_native_java::{RunLoader, StdHost, Value};
 
 const REAL_ORACLE: &str = include_str!("fixtures/holder_reference/java25.txt");
-const EXPECTED: &str = "demo:item|Optional[demo:item]|Trying to access unbound value 'ResourceKey[minecraft:item / demo:item]' from registry Registry[ResourceKey[minecraft:root / minecraft:item] (Stable)]|truefalse|truefalse|Optional[ResourceKey[minecraft:item / demo:item]]|Left[ResourceKey[minecraft:item / demo:item]]|REFERENCE|falsefalse|Reference{ResourceKey[minecraft:item / demo:item]=null}|truefalse|false";
+const EXPECTED: &str = "demo:item|Optional[demo:item]|value|truefalse|truefalse|Optional[ResourceKey[minecraft:item / demo:item]]|Left[ResourceKey[minecraft:item / demo:item]]|REFERENCE|truefalse|Reference{ResourceKey[minecraft:item / demo:item]=value}|truefalse|false";
 
 const IDENTIFIER: &str = r#"package net.minecraft.resources;
 public final class Identifier {
@@ -152,10 +152,7 @@ fn self_registered_holders_match_java_25() {
             &mut fabric_with_sync,
         )
         .unwrap();
-    let expected_bound = EXPECTED
-        .replace("Trying to access unbound value 'ResourceKey[minecraft:item / demo:item]' from registry Registry[ResourceKey[minecraft:root / minecraft:item] (Stable)]", "value")
-        .replace("truefalse|truefalse|Optional[ResourceKey[minecraft:item / demo:item]]|Left[ResourceKey[minecraft:item / demo:item]]|REFERENCE|falsefalse|Reference{ResourceKey[minecraft:item / demo:item]=null}", "truefalse|truefalse|Optional[ResourceKey[minecraft:item / demo:item]]|Left[ResourceKey[minecraft:item / demo:item]]|REFERENCE|truefalse|Reference{ResourceKey[minecraft:item / demo:item]=value}");
-    assert_eq!(bound, Value::Ref(Some(expected_bound)));
+    assert_eq!(bound, Value::Ref(Some(EXPECTED.into())));
 
     assert!(REAL_ORACLE.contains("before|"));
     assert!(REAL_ORACLE.contains("after|"));

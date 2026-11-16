@@ -13,6 +13,10 @@ pub(crate) fn left(value: &Value) -> Value {
     either(true, value)
 }
 
+pub(crate) fn right(value: &Value) -> Value {
+    either(false, value)
+}
+
 fn either(left: bool, value: &Value) -> Value {
     Value::Host(HostRef::of_values(
         HostKind::DfuEither,
