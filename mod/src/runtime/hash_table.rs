@@ -633,6 +633,8 @@ mod tests {
         let mut table = HashTable::new(None, 0.75);
         let mut keys: Vec<String> = Vec::new();
         let mut state = 0x9e37_79b9_u32;
+        let mut crossed_index_up = false;
+        let mut crossed_index_down = false;
 
         // This deterministic sequence exercises colliding bins, head and tail
         // insertion, several resizes, removals that shift a bin, and clear.
@@ -665,10 +667,20 @@ mod tests {
             for marker in keys.iter().step_by(13) {
                 assert_eq!(table.rank_of(marker), table.rank_of_linear(marker));
             }
+            crossed_index_up |= table.len() >= MIN_RANK_INDEX_ENTRIES;
+            crossed_index_down |= crossed_index_up && table.len() < MIN_RANK_INDEX_ENTRIES;
             assert_eq!(
                 table.locations.len(),
                 table.bins.iter().map(Vec::len).sum::<usize>()
             );
         }
+        assert!(
+            crossed_index_up,
+            "property sequence never enabled the rank index"
+        );
+        assert!(
+            crossed_index_down,
+            "property sequence never disabled the rank index"
+        );
     }
 }
