@@ -4610,7 +4610,12 @@ impl StdHost {
                 else {
                     return self.unknown_host_call(r).map(Some);
                 };
-                let text = String::from_utf8_lossy(&bytes[*index..]).into_owned();
+                let raw = &bytes[*index..];
+                let text = if r.descriptor == "(Ljava/io/InputStream;)V" {
+                    raw.iter().map(|b| *b as char).collect()
+                } else {
+                    String::from_utf8_lossy(raw).into_owned()
+                };
                 *index = bytes.len();
                 let additions = properties_entries(&text);
                 let values = self
@@ -10504,38 +10509,6 @@ impl Host for StdHost {
             ("java/lang/String", "isEmpty", "()Z") => {
                 Ok(Value::Int(expect_string(receiver).is_empty() as i32))
             }
-            ("java/lang/String", "getBytes", "()[B")
-            | ("java/lang/String", "getBytes", "(Ljava/nio/charset/Charset;)[B")
-            | ("java/lang/String", "getBytes", "(Ljava/lang/String;)[B") => {
-                let charset = match r.descriptor.as_str() {
-                    "()[B" => "UTF-8".to_owned(),
-                    "(Ljava/nio/charset/Charset;)[B" => args
-                        .first()
-                        .and_then(expect_ref)
-                        .map(|s| s.to_ascii_uppercase())
-                        .unwrap_or_else(|| "UTF-8".into()),
-                    _ => expect_string(Self::argument(r, args, 0)?).to_owned(),
-                };
-                let text = expect_string(receiver);
-                let bytes: Vec<u8> = match charset.replace('-', "").to_ascii_uppercase().as_str() {
-                    "UTF8" => text.as_bytes().to_vec(),
-                    "ISO88591" | "LATIN1" => text.chars().map(|c| c as u32 as u8).collect(),
-                    "USASCII" | "ASCII" => text
-                        .chars()
-                        .map(|c| if (c as u32) < 128 { c as u8 } else { b'?' })
-                        .collect(),
-                    _ => return self.unknown_host_call(r).map(Some),
-                };
-                let marker = self.new_array("byte", "getBytes");
-                self.arrays.insert(
-                    marker.clone(),
-                    bytes
-                        .into_iter()
-                        .map(|b| Value::Int((b as i8) as i32))
-                        .collect(),
-                );
-                Ok(Value::Ref(Some(marker)))
-            }
             ("java/lang/String", "startsWith", "(Ljava/lang/String;)Z") => {
                 let prefix = Self::argument(r, args, 0)?;
                 Ok(Value::Int(
@@ -14114,9 +14087,23 @@ fn string_from_char_code(code: i32) -> String {
 
 fn properties_entries(text: &str) -> Vec<(String, String)> {
     let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
+    let mut logical = String::new();
+    for physical in text.lines() {
+        let trimmed = physical.trim_end_matches('\r');
+        let slashes = trimmed.chars().rev().take_while(|c| *c == '\\').count();
+        let continuation = slashes % 2 == 1;
+        let part = if continuation {
+            &trimmed[..trimmed.len() - 1]
+        } else {
+            trimmed
+        };
+        logical.push_str(part);
+        if continuation {
+            continue;
+        }
+        let line = logical.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            logical.clear();
             continue;
         }
         let (key, value) = match line.split_once('=') {
@@ -14133,6 +14120,7 @@ fn properties_entries(text: &str) -> Vec<(String, String)> {
             property_unescape(key.trim()),
             property_unescape(value.trim()),
         ));
+        logical.clear();
     }
     entries
 }
@@ -14141,8 +14129,19 @@ fn properties_entries(text: &str) -> Vec<(String, String)> {
 fn property_unescape(text: &str) -> String {
     let mut value = String::with_capacity(text.len());
     let mut escaped = false;
-    for character in text.chars() {
+    let mut chars = text.chars();
+    while let Some(character) = chars.next() {
         if escaped {
+            if character == 'u' {
+                let digits: String = chars.by_ref().take(4).collect();
+                if digits.len() == 4 {
+                    if let Ok(code) = u16::from_str_radix(&digits, 16) {
+                        value.push(char::from_u32(code as u32).unwrap_or('\u{fffd}'));
+                        escaped = false;
+                        continue;
+                    }
+                }
+            }
             value.push(match character {
                 'n' => '\n',
                 'r' => '\r',
