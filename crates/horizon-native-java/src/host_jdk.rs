@@ -99,10 +99,32 @@ pub(crate) fn logger_value(api: &str, name: &str) -> Value {
 }
 
 /// The name of a logger handle, `None` for any other value.
+
+pub(crate) fn logger_factory_value(api: &str, name: &str, factory: &Value) -> Value {
+    Value::Host(HostRef::of_values(
+        HostKind::Logger,
+        &[
+            Value::Ref(Some(api.into())),
+            Value::Ref(Some(name.into())),
+            factory.clone(),
+        ],
+    ))
+}
 pub(crate) fn logger_name(value: &Value) -> Option<String> {
     match value {
         Value::Host(handle) if handle.kind() == HostKind::Logger => {
-            two_strings(handle).map(|(_, name)| name)
+            handle.values().and_then(|v| match v.as_slice() {
+                [Value::Ref(Some(_)), Value::Ref(Some(name)), ..] => Some(name.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+pub(crate) fn logger_factory(value: &Value) -> Option<Value> {
+    match value {
+        Value::Host(handle) if handle.kind() == HostKind::Logger => {
+            handle.values().and_then(|v| v.get(2).cloned())
         }
         _ => None,
     }
