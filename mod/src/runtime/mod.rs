@@ -6647,6 +6647,11 @@ impl Host for StdHost {
                     frame: None,
                 });
             }
+            if jar_object::object_key(&list)
+                .is_some_and(|marker| self.array_view_of(marker).is_some())
+            {
+                return self.unknown_host_call(r);
+            }
             let mut values = self
                 .mutable_collection_values(&list)
                 .ok_or_else(|| NativeError::UnknownHostCall(r.clone()))?;

@@ -260,12 +260,6 @@ impl StdHost {
 }
 
 impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
-    pub(crate) fn reverse_view(&mut self, value: &Value) -> bool {
-        let Some(marker) = crate::runtime::expect_ref(value) else { return false; };
-        let Some((array, offset, length, _)) = self.host.array_view_of(marker) else { return false; };
-        let Some(slots) = self.arrays.get_mut(&array).and_then(ArrayData::refs_mut) else { return false; };
-        if let Some(part) = slots.get_mut(offset..offset + length) { part.reverse(); self.push_array_views(&array); true } else { false }
-    }
     /// Bring every array a view or window was written through up to date
     /// ([`StdHost::changed_array_views`]); one comparison while none was.
     pub(crate) fn pull_array_views(&mut self) {
