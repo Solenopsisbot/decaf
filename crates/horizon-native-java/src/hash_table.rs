@@ -266,15 +266,6 @@ impl HashTable {
         }
     }
 
-    fn sync_rank_index(&mut self) {
-        if self.len() >= MIN_RANK_INDEX_ENTRIES {
-            self.rebuild_rank_index();
-        } else {
-            self.locations.clear();
-            self.bin_counts.fill(0);
-        }
-    }
-
     /// Whether the table's iteration order is unknown. One entry (or none)
     /// has only one order, wherever it sits.
     pub(crate) fn order_unknown(&self) -> bool {
@@ -508,7 +499,6 @@ impl HashTable {
         if size + 1 > self.threshold {
             self.resize()?;
         }
-        self.sync_rank_index();
         Ok(())
     }
 
@@ -552,7 +542,6 @@ impl HashTable {
         } else {
             self.unplaced.insert(marker, key.clone());
         }
-        self.sync_rank_index();
         Ok(())
     }
 
@@ -565,7 +554,6 @@ impl HashTable {
         self.synced = None;
         let Some(spread) = spread else {
             self.unplaced.remove(marker);
-            self.sync_rank_index();
             return;
         };
         let bin = spread as u32 as usize & (self.bins.len() - 1);
@@ -577,7 +565,6 @@ impl HashTable {
                 self.refresh_bin_locations(bin);
             }
         }
-        self.sync_rank_index();
     }
 
     /// `clear()`: every node goes, the table stays.
