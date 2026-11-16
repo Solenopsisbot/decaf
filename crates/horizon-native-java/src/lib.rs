@@ -28143,9 +28143,6 @@ impl<H: Host> Runtime<'_, H> {
             ("toArray", "()[Ljava/lang/Object;") => {
                 self.new_array_value("[Ljava/lang/Object;", values)
             }
-            ("toArray", "(Ljava/util/function/IntFunction;)[Ljava/lang/Object;") => {
-                self.new_array_value("[Ljava/lang/Object;", values)
-            }
             ("collect", "(Ljava/util/stream/Collector;)Ljava/lang/Object;") => {
                 // A built-in collector (`host_collector.rs`); any other is the chain's.
                 let collector = StdHost::argument(r, args, 0)?.clone();
