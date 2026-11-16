@@ -563,6 +563,9 @@ impl HashTable {
                 self.locations.remove(marker);
                 self.bin_add(bin, -1);
                 self.refresh_bin_locations(bin);
+            } else {
+                self.locations.clear();
+                self.bin_counts.fill(0);
             }
         }
     }
