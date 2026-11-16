@@ -82,7 +82,8 @@ public final class Probe {
     }
 
     public static String surrogate() {
-        return q(StringUtils.rightPad("a", 2, (char) 0xd800));
+        String value = StringUtils.rightPad("a", 2, (char) 0xd800);
+        return value.chars().mapToObj(c -> String.format("%04x", c)).collect(java.util.stream.Collectors.joining(",")) + "|len=" + value.length();
     }
 
     public static String nopIdentity() {

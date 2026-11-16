@@ -163,7 +163,11 @@ pub(crate) fn runtime_call<H: Host>(
             return Ok(None);
         };
         if matches!(format, Value::Ref(None)) {
-            return Err(invalid("The validated expression is false".into()));
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/NullPointerException".into(),
+                message: Some(r#"Cannot invoke "java.util.function.Supplier.get()" because "messageSupplier" is null"#.into()),
+                frame: None,
+            });
         }
         let Some(values) = args.get(2) else {
             return Ok(None);
