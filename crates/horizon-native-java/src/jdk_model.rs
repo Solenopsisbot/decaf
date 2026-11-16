@@ -112,6 +112,8 @@ fn is_logger_owner(owner: &str) -> bool {
         "org/apache/logging/log4j/Logger"
             | "org/apache/logging/log4j/spi/ExtendedLogger"
             | "org/apache/logging/log4j/spi/AbstractLogger"
+            | "org/apache/logging/log4j/core/Logger"
+            | "org/apache/logging/log4j/core/async/AsyncLogger"
             | "org/slf4j/Logger"
             | "java/util/logging/Logger"
             | "java/lang/System$Logger"
