@@ -1,6 +1,6 @@
 Java 25.0.5+8, real 26.3 server game jar.
 GAME=/Users/sparks/ava/minecraft-26.3-server-game.jar
-LIBS=/Users/sparks/ava/minecraft-26.3-server-libraries (all *.jar, recursively)
+LIBS=/Users/sparks/ava/scratch/vanilla-values/oracle/libraries/server (all *.jar, recursively)
 CP="$GAME:$(find "$LIBS" -type f -name '*.jar' -print0 | tr '\0' ':')"
 javac -cp "$CP" -d /Users/sparks/ava/scratch/cov15 /Users/sparks/ava/wt/cov15/crates/horizon-native-java/tests/fixtures/cov15_items/Count.java
 java -cp "$CP:/Users/sparks/ava/scratch/cov15" Count
