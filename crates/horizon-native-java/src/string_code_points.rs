@@ -73,7 +73,13 @@ impl<H: Host> Runtime<'_, H> {
                         .chars()
                         .map(|c| if (c as u32) < 128 { c as u8 } else { b'?' })
                         .collect(),
-                    _ => return Ok(None),
+                    _ => {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/io/UnsupportedEncodingException".into(),
+                            message: Some(name),
+                            frame: None,
+                        });
+                    }
                 };
                 Ok(Some(
                     self.new_array_value(
