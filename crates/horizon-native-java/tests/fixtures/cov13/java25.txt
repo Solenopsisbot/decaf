@@ -1,0 +1,13 @@
+name UTF-8=[104, -61, -87, -16, -97, -104, -128, 63]
+name utf8=[104, -61, -87, -16, -97, -104, -128, 63]
+name ISO-8859-1=[104, -23, 63, 63]
+name latin1=[104, -23, 63, 63]
+name US-ASCII=[104, 63, 63, 63]
+name UTF-16=[-2, -1, 0, 104, 0, -23, -40, 61, -34, 0, -1, -3]
+name UTF-16BE=[0, 104, 0, -23, -40, 61, -34, 0, -1, -3]
+name UTF-16LE=[104, 0, -23, 0, 61, -40, 0, -34, -3, -1]
+default=[104, -61, -87, -16, -97, -104, -128, 63]
+null=java.lang.NullPointerException:null
+bad=java.io.UnsupportedEncodingException:NOPE
+propstrue=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+propsfalse=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
