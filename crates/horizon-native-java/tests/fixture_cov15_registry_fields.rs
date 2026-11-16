@@ -15,7 +15,7 @@ fn check(owner: &str, prefix: &str, fields: &[String], host: &mut StdHost) -> (u
     for field in fields {
         let r=MethodRef { owner: owner.into(), name: field.clone(), descriptor: format!("L{prefix};") };
         match host.get_static(&r) {
-            Ok(Value::Ref(Some(v))) if v == format!("{prefix}/minecraft:{}", field.to_ascii_lowercase()) => good+=1,
+            Ok(Value::Ref(Some(v))) if v == format!("client/{prefix}/minecraft:{}", field.to_ascii_lowercase()) => good+=1,
             Ok(Value::Ref(None)) => counted+=1,
             Ok(v) => wrong.push(format!("{field}: {v:?}")),
             Err(_) => counted+=1,
