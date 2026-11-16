@@ -362,7 +362,7 @@ pub(crate) fn invoke<H: crate::runtime::Host>(
 ) -> Option<Result<Value, NativeError>> {
     if r.owner == "kotlin/enums/EnumEntriesKt" && r.name == "enumEntries" {
         if r.descriptor == "([Ljava/lang/Enum;)Lkotlin/enums/EnumEntries;" {
-            let values = runtime.owned_array(args.first()?)?.clone();
+            let values = runtime.owned_array(args.first()?)?.into_owned();
             let serial = NEXT_ENTRIES.fetch_add(1, Ordering::Relaxed);
             return Some(Ok(Value::Host(HostRef::of_values(
                 HostKind::KotlinEnumEntries,
@@ -560,7 +560,7 @@ fn kotlin_collections<H: crate::runtime::Host>(
         ("mutableListOf", "([Ljava/lang/Object;)Ljava/util/List;")
             if runtime
                 .owned_array(args.first()?)
-                .is_some_and(Vec::is_empty) =>
+                .is_some_and(|values| values.is_empty()) =>
         {
             runtime.host.empty_mutable_collection("list").map(Ok)
         }
@@ -570,7 +570,7 @@ fn kotlin_collections<H: crate::runtime::Host>(
         ("listOf", "([Ljava/lang/Object;)Ljava/util/List;")
             if runtime
                 .owned_array(args.first()?)
-                .is_some_and(Vec::is_empty) =>
+                .is_some_and(|values| values.is_empty()) =>
         {
             Some(Ok(Value::Host(HostRef::new(
                 HostKind::KotlinEmptyCollection,

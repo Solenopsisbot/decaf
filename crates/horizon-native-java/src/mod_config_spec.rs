@@ -528,7 +528,7 @@ impl<H: Host> Runtime<'_, H> {
             ) => {
                 // A null array fails `arraylength` with a helpful-NPE message
                 // this model does not reproduce: left counted.
-                let Ok(lines) = self.array(&args[0]).cloned() else {
+                let Ok(lines) = self.array(&args[0]).map(std::borrow::Cow::into_owned) else {
                     return Ok(None);
                 };
                 if let Some(index) = lines.iter().position(is_null) {

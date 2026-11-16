@@ -765,7 +765,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(DEFAULT_FIELD_MODIFIERS);
         };
         let mut mask = 0u16;
-        for value in self.array(array)? {
+        for value in self.array(array)?.iter() {
             let Value::Int(bits) = value else {
                 return Err(NativeError::Metadata(
                     "excludeFieldsWithModifiers needs an int array".into(),

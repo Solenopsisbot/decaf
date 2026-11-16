@@ -34,6 +34,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::runtime::array_data::ArrayData;
 use crate::runtime::{MethodRef, NativeError, StdHost, Value, expect_ref};
 
 /// The class Java 25's `Arrays.asList` answers.
@@ -263,7 +264,8 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     /// ([`StdHost::changed_array_views`]); one comparison while none was.
     pub(crate) fn pull_array_views(&mut self) {
         for (array, offset, values) in self.host.changed_array_views() {
-            if let Some(slots) = self.arrays.get_mut(&array)
+            // A view is only ever of a reference array (`Arrays.asList(T...)`).
+            if let Some(slots) = self.arrays.get_mut(&array).and_then(ArrayData::refs_mut)
                 && let Some(part) = slots.get_mut(offset..offset + values.len())
             {
                 part.clone_from_slice(&values);
@@ -275,7 +277,10 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     /// The runtime wrote the array `key`: its views hold what it holds now.
     pub(crate) fn push_array_views(&mut self, key: &str) {
         if self.host.has_array_views(key)
-            && let Some(values) = self.arrays.get(key).cloned()
+            && let Some(values) = self
+                .arrays
+                .get(key)
+                .map(|array| array.values().into_owned())
         {
             self.host.array_written(key, &values);
         }
@@ -292,7 +297,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             Vec::new()
         } else {
             match self.arrays.get(key) {
-                Some(values) => values.clone(),
+                Some(values) => values.values().into_owned(),
                 None => return self.host.unknown_operand_call(r),
             }
         };
@@ -321,7 +326,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         let elements = |this: &Self| -> Vec<Value> {
             this.arrays
                 .get(&key)
-                .and_then(|array| array.get(offset..offset + length))
+                .and_then(|array| array.references().get(offset..offset + length))
                 .map(<[Value]>::to_vec)
                 .unwrap_or_default()
         };
@@ -364,7 +369,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                 let at = slot(int(index)?)?;
                 self.arrays
                     .get(&key)
-                    .and_then(|array| array.get(at))
+                    .and_then(|array| array.references().get(at))
                     .cloned()
             }
             // `E old = a[index]; a[index] = element;`: the bounds, then the
@@ -376,7 +381,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                 let old = self
                     .arrays
                     .get_mut(&key)
-                    .and_then(|array| array.get_mut(at))
+                    .and_then(|array| array.refs_mut()?.get_mut(at))
                     .map(|element| std::mem::replace(element, value.clone()));
                 self.push_array_views(&key);
                 old
@@ -391,7 +396,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                     let element = self
                         .arrays
                         .get(&key)
-                        .and_then(|array| array.get(offset + index))
+                        .and_then(|array| array.references().get(offset + index))
                         .cloned()
                         .unwrap_or(Value::Ref(None));
                     self.run_functional(

@@ -947,7 +947,7 @@ impl<H: Host> Runtime<'_, H> {
                     &[a.clone(), arg(0)],
                 )?;
                 let i = call(self, "listIterator", "()Ljava/util/ListIterator;", &[])?;
-                let sorted = self.array(&a)?.clone();
+                let sorted = self.array(&a)?.into_owned();
                 for e in sorted {
                     step(self, &i, "next", "()Ljava/lang/Object;", &[])?;
                     step(self, &i, "set", "(Ljava/lang/Object;)V", &[e])?;

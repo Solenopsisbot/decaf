@@ -534,7 +534,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             }
             ("of", "([I)Ljava/util/stream/IntStream;" | "([J)Ljava/util/stream/LongStream;") => {
                 match args.first() {
-                    Some(array) => self.array(array)?.clone(),
+                    Some(array) => self.array(array)?.into_owned(),
                     None => return Ok(None),
                 }
             }

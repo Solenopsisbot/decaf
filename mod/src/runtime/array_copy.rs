@@ -114,9 +114,10 @@ impl<H: Host> Runtime<'_, H> {
             && dst_component != src_component
             && dst_component != "java/lang/Object"
             && host_array::class_assignable(&src_component, &dst_component, self) != Some(true);
-        let src_values = self.array(src)?.clone();
-        let dst_len = self.array(dst)?.len();
-        let src_len = src_values.len();
+        // Lengths only: the elements are read once the bounds hold, and only the copied range
+        // (a 4 MiB `byte[]` is never turned into `Value`s, `array_data.rs`).
+        let dst_len = self.array_data(dst)?.len();
+        let src_len = self.array_data(src)?.len();
         let src_name = kind_name(&src_component).to_owned();
         let dst_name = kind_name(&dst_component).to_owned();
         let oob =
@@ -147,7 +148,20 @@ impl<H: Host> Runtime<'_, H> {
                 dst_pos + length
             )));
         }
-        let mut slice = src_values[src_pos..src_pos + length].to_vec();
+        // `byte[]` into `byte[]`: the bytes themselves, overlap-safe as through a temporary.
+        if let Some(bytes) = self
+            .array_data(src)?
+            .bytes()
+            .map(|bytes| bytes[src_pos..src_pos + length].to_vec())
+            && let Some(target) = self.arrays.get_mut(dst_key)
+            && target.copy_bytes(dst_pos, &bytes, 0, length).is_some()
+        {
+            return Ok(Some(Value::Void));
+        }
+        let source = self.array_data(src)?;
+        let mut slice: Vec<Value> = (src_pos..src_pos + length)
+            .filter_map(|index| source.load(index))
+            .collect();
         let mut misfit = None;
         if checked {
             for (index, value) in slice.iter().enumerate() {
@@ -174,11 +188,12 @@ impl<H: Host> Runtime<'_, H> {
             }
             None => None,
         };
-        let length = slice.len();
         let Some(target) = self.arrays.get_mut(dst_key) else {
             return self.host.unknown_operand_call(r).map(Some);
         };
-        target[dst_pos..dst_pos + length].clone_from_slice(&slice);
+        for (offset, value) in slice.into_iter().enumerate() {
+            target.store(dst_pos + offset, value);
+        }
         let dst_key = dst_key.to_owned();
         self.push_array_views(&dst_key);
         match error {

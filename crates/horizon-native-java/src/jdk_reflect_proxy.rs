@@ -126,7 +126,7 @@ impl<H: Host> Runtime<'_, H> {
     /// holds, since only those can say which methods the proxy has.
     fn new_proxy(&mut self, args: &[Value]) -> Result<Value, NativeError> {
         let interfaces = match args.get(1) {
-            Some(value @ Value::Host(_)) => self.array(value)?.clone(),
+            Some(value @ Value::Host(_)) => self.array(value)?.into_owned(),
             _ => return Err(npe(Some("interfaces"))),
         };
         let handler = args.get(2).cloned().unwrap_or(Value::Ref(None));
@@ -184,6 +184,7 @@ impl<H: Host> Runtime<'_, H> {
             .get(list)
             .map(|values| {
                 values
+                    .references()
                     .iter()
                     .filter_map(|value| crate::host_class::class_name(value).map(str::to_owned))
                     .collect()
@@ -562,7 +563,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     match value {
                         array if self.owned_array(array).is_some() => {
-                            types.extend(self.array(value)?.clone());
+                            types.extend(self.array(value)?.into_owned());
                         }
                         // `methodType(rtype, List<Class<?>>)`: its elements.
                         value if self.host_collection_kind(value).is_some() => {

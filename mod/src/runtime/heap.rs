@@ -60,7 +60,7 @@ const COLLECT_SLACK: usize = 1024;
 pub struct JavaHeap {
     /// `receiver|owner#name descriptor` → value, the interpreter's own keys.
     pub(crate) fields: BTreeMap<String, Value>,
-    pub(crate) arrays: BTreeMap<String, Vec<Value>>,
+    pub(crate) arrays: BTreeMap<String, crate::runtime::array_data::ArrayData>,
     pub(crate) string_builders: BTreeMap<String, String>,
     /// Enum constants by object marker: declared name and ordinal. A later
     /// call never reruns `<clinit>`, so without these `name()` on a constant a
@@ -660,9 +660,14 @@ fn heap_bytes(heap: &JavaHeap, host: &StdHost) -> usize {
         .iter()
         .map(|(key, value)| key.len() + value_bytes(value))
         .chain(
-            heap.arrays
-                .iter()
-                .map(|(key, elements)| key.len() + values(elements)),
+            // A `byte[]` takes a byte per element (`array_data.rs`); a reference array its values.
+            heap.arrays.iter().map(|(key, array)| {
+                key.len()
+                    + match array.bytes() {
+                        Some(bytes) => bytes.len(),
+                        None => values(array.references()),
+                    }
+            }),
         )
         .chain(
             heap.string_builders
@@ -906,7 +911,12 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .range(prefix.clone()..)
             .take_while(|(key, _)| key.starts_with(&prefix))
             .map(|(_, value)| value);
-        let arrays = heap.arrays.get(&marker).into_iter().flatten();
+        // A typed array holds no references (`array_data.rs`): nothing to trace.
+        let arrays = heap
+            .arrays
+            .get(&marker)
+            .into_iter()
+            .flat_map(crate::runtime::array_data::ArrayData::references);
         let collections = host.mutable_collections.get(&marker).into_iter().flatten();
         let iterators = host
             .iterators
@@ -1127,9 +1137,9 @@ mod tests {
         heap.fields
             .insert(field("demo/Node#4", "next"), Value::Int(4));
         heap.arrays
-            .insert("[Ldemo/Node;#0".into(), vec![Value::Int(1)]);
+            .insert("[Ldemo/Node;#0".into(), vec![Value::Int(1)].into());
         heap.arrays
-            .insert("[Ldemo/Node;#1".into(), vec![Value::Int(2)]);
+            .insert("[Ldemo/Node;#1".into(), vec![Value::Int(2)].into());
         (host, heap)
     }
 

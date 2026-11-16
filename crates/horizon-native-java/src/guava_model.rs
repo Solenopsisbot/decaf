@@ -284,7 +284,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     match value {
                         array if self.owned_array(array).is_some() => {
-                            values.extend(self.array(value)?.clone());
+                            values.extend(self.array(value)?.into_owned());
                         }
                         other => {
                             let items = runtime_collection_values(&*self.host, other)?;
@@ -611,7 +611,7 @@ impl<H: Host> Runtime<'_, H> {
             });
         }
         if array {
-            return Ok(Some((class, self.array(source)?.clone(), map)));
+            return Ok(Some((class, self.array(source)?.into_owned(), map)));
         }
         let values = runtime_collection_values(&*self.host, source)?;
         Ok(Some((class, values, map)))
@@ -637,7 +637,7 @@ impl<H: Host> Runtime<'_, H> {
             if matches!(rest, Value::Ref(None)) {
                 return Err(thrown("java/lang/NullPointerException", None));
             }
-            values.extend(self.array(&rest)?.clone());
+            values.extend(self.array(&rest)?.into_owned());
         }
         if values.iter().any(|value| matches!(value, Value::Ref(None))) {
             return Err(thrown("java/lang/NullPointerException", None));

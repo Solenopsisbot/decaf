@@ -74,7 +74,7 @@ impl<H: Host> Runtime<'_, H> {
             .unwrap_or_default()
             .to_owned();
         let options = match args.get(2) {
-            Some(value @ Value::Host(_)) => self.array(value)?.clone(),
+            Some(value @ Value::Host(_)) => self.array(value)?.into_owned(),
             _ => Vec::new(),
         };
         let (mut atomic, mut replace, mut attributes) = (false, false, false);

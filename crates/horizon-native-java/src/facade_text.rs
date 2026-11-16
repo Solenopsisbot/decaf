@@ -239,7 +239,7 @@ impl<H: Host> Runtime<'_, H> {
             let Some(key) = expect_ref(key) else {
                 return Ok(None);
             };
-            let values = self.array(array)?.clone();
+            let values = self.array(array)?.into_owned();
             let with: Vec<Json> = values
                 .iter()
                 .map(|value| self.component_now(value).unwrap_or_else(|| argument(value)))
@@ -313,7 +313,7 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 let mut formats = Vec::new();
-                for format in self.array(array)?.clone() {
+                for format in self.array(array)?.into_owned() {
                     let Some(format) = formatting(&format) else {
                         return Ok(None);
                     };

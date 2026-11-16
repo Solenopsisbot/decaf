@@ -293,7 +293,10 @@ impl<H: Host> Runtime<'_, H> {
     /// `Arrays.copyOf(r, length)`: a new array of `r`'s component, padded
     /// with `null` or truncated.
     fn copy_of(&mut self, r: &Value, length: usize) -> Value {
-        let mut values = self.array(r).cloned().unwrap_or_default();
+        let mut values = self
+            .array(r)
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or_default();
         values.resize(length, Value::Ref(None));
         let component = self.skeleton_array_component(r);
         self.new_reference_array(&component, values)

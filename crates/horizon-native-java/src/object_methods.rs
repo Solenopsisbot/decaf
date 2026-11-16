@@ -431,7 +431,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(0));
         }
         let _level = crate::host_recursion::enter()?;
-        let Ok(elements) = self.array(array).cloned() else {
+        let Ok(elements) = self.array(array).map(std::borrow::Cow::into_owned) else {
             return Ok(None);
         };
         let mut hash = 1_i32;
@@ -443,7 +443,7 @@ impl<H: Host> Runtime<'_, H> {
                     let Ok(values) = self.array(element) else {
                         return Ok(None);
                     };
-                    primitive_array_hash(kind, values)
+                    primitive_array_hash(kind, &values)
                 }
             };
             let Some(part) = part else {
@@ -470,7 +470,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(key) = crate::host_array::array_key(array).map(str::to_owned) else {
             return Ok(None);
         };
-        let Ok(elements) = self.array(array).cloned() else {
+        let Ok(elements) = self.array(array).map(std::borrow::Cow::into_owned) else {
             return Ok(None);
         };
         path.push(key);
@@ -490,7 +490,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                 }
                 ArrayShape::Primitive(kind) => match self.array(element) {
-                    Ok(values) => primitive_array_text(kind, values),
+                    Ok(values) => primitive_array_text(kind, &values),
                     Err(_) => None,
                 },
             };
@@ -1064,7 +1064,7 @@ impl<H: Host> Runtime<'_, H> {
                 if *array == Value::Ref(None) {
                     return Ok(Some(Value::Int(0)));
                 }
-                let Ok(elements) = self.array(array).cloned() else {
+                let Ok(elements) = self.array(array).map(std::borrow::Cow::into_owned) else {
                     return Ok(None);
                 };
                 // `Arrays.hashCode(Object[])`: `1`, then `31 * h + hash(e)`.

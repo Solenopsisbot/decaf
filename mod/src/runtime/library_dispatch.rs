@@ -970,7 +970,7 @@ impl<H: Host> Runtime<'_, H> {
             let Some(array) = args.first().cloned() else {
                 return Ok(None);
             };
-            let Some(length) = self.owned_array(&array).map(Vec::len) else {
+            let Some(length) = self.owned_array(&array).map(|values| values.len()) else {
                 return Ok(None);
             };
             let (offset, count) = match r.descriptor.as_str() {
@@ -1073,7 +1073,11 @@ impl<H: Host> Runtime<'_, H> {
                         None => return Ok(None),
                     },
                 };
-                let Some(capacity) = self.arrays.get(&target).map(Vec::len) else {
+                let Some(capacity) = self
+                    .arrays
+                    .get(&target)
+                    .map(crate::runtime::array_data::ArrayData::len)
+                else {
                     return Ok(None);
                 };
                 let (offset, length) = if r.descriptor == "([B)I" {
@@ -1100,9 +1104,9 @@ impl<H: Host> Runtime<'_, H> {
                         Value::Int(-1)
                     } else {
                         let read = bytes.len();
-                        if let Some(slots) = self.arrays.get_mut(&target) {
-                            for (slot, byte) in slots[offset..offset + read].iter_mut().zip(bytes) {
-                                *slot = Value::Int(i32::from(byte as i8));
+                        if let Some(array) = self.arrays.get_mut(&target) {
+                            for (index, byte) in bytes.into_iter().enumerate() {
+                                array.store(offset + index, Value::Int(i32::from(byte as i8)));
                             }
                         }
                         Value::Int(read as i32)
@@ -1211,8 +1215,9 @@ impl<H: Host> Runtime<'_, H> {
                 return self.host.unknown_operand_call(r).map(Some);
             };
             if let Some(target) = &target
-                && let Some(slots) =
-                    host_array::array_key(target).and_then(|key| self.arrays.get_mut(key))
+                && let Some(slots) = host_array::array_key(target)
+                    .and_then(|key| self.arrays.get_mut(key))
+                    .and_then(crate::runtime::array_data::ArrayData::refs_mut)
                 && slots.len() >= values.len()
             {
                 for (slot, value) in slots.iter_mut().zip(&values[..misfit]) {
@@ -1229,8 +1234,9 @@ impl<H: Host> Runtime<'_, H> {
         // slot after the last element, as the JDK's `AbstractCollection` does;
         // otherwise it answers a new array of `a`'s class.
         if let Some(target) = target
-            && let Some(slots) =
-                host_array::array_key(&target).and_then(|key| self.arrays.get_mut(key))
+            && let Some(slots) = host_array::array_key(&target)
+                .and_then(|key| self.arrays.get_mut(key))
+                .and_then(crate::runtime::array_data::ArrayData::refs_mut)
             && slots.len() >= values.len()
         {
             let length = values.len();
@@ -1332,7 +1338,7 @@ impl<H: Host> Runtime<'_, H> {
             }
         };
         let more = match args.get(1) {
-            Some(value @ Value::Host(_)) => self.array(value)?.clone(),
+            Some(value @ Value::Host(_)) => self.array(value)?.into_owned(),
             _ => Vec::new(),
         };
         let mut parts = vec![first];

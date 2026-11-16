@@ -771,7 +771,9 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 let classes = match args.get(2) {
-                    Some(value) if self.owned_array(value).is_some() => self.array(value)?.clone(),
+                    Some(value) if self.owned_array(value).is_some() => {
+                        self.array(value)?.into_owned()
+                    }
                     Some(value @ Value::Ref(Some(_))) => {
                         runtime_collection_values(self.host, value)?
                     }
@@ -815,7 +817,7 @@ impl<H: Host> Runtime<'_, H> {
                 };
                 let values = match args.get(2) {
                     Some(value) if host_array::array_key(value).is_some() => {
-                        self.array(value)?.clone()
+                        self.array(value)?.into_owned()
                     }
                     _ => Vec::new(),
                 };
@@ -1025,7 +1027,7 @@ impl<H: Host> Runtime<'_, H> {
             ("invokeWithArguments", "([Ljava/lang/Object;)Ljava/lang/Object;") => {
                 let values = match args.first() {
                     Some(value) if host_array::array_key(value).is_some() => {
-                        self.array(value)?.clone()
+                        self.array(value)?.into_owned()
                     }
                     _ => Vec::new(),
                 };

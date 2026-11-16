@@ -905,7 +905,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
                 let Some(values) = args.get(1).and_then(|array| self.owned_array(array)) else {
                     return Ok(None);
                 };
-                values.clone()
+                values.into_owned()
             }
             "(Ljava/lang/CharSequence;Ljava/lang/Iterable;)Ljava/lang/String;" => {
                 let Some(items) = args

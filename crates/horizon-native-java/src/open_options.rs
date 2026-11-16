@@ -149,7 +149,7 @@ fn invoke_files<H: Host>(
     let Some(elements) = rt.owned_array(options) else {
         return Ok(Some(rt.host.unknown_operand_call(r)?));
     };
-    match check(elements) {
+    match check(&elements) {
         Verdict::Throws(error) => Err(error),
         Verdict::Unmodelled => Ok(Some(rt.host.unknown_operand_call(r)?)),
         Verdict::CreateOrTruncate => {

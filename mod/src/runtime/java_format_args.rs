@@ -39,7 +39,7 @@ impl<H: Host> Runtime<'_, H> {
             // `String.format(f, (Object[]) null)` formats every argument as
             // null.
             Value::Ref(None) => None,
-            array => Some(self.array(array).ok()?.clone()),
+            array => Some(self.array(array).ok()?.into_owned()),
         };
         if locale.is_none() && default_locale_sensitive(format, args.as_deref()) {
             return None;

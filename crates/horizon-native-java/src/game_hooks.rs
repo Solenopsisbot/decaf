@@ -440,7 +440,7 @@ impl GameHookContext {
 #[derive(Debug, Clone, Default)]
 pub struct GameHookState {
     fields: BTreeMap<String, Value>,
-    arrays: BTreeMap<String, Vec<Value>>,
+    arrays: BTreeMap<String, crate::array_data::ArrayData>,
     next_object: usize,
     next_array: usize,
     /// `mixin class|marker` for every object a Mixin class's constructor ran on.

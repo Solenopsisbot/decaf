@@ -285,7 +285,7 @@ impl<H: Host> Runtime<'_, H> {
             if *array == Value::Ref(None) {
                 return None;
             }
-            runtime.array(array).ok().cloned()
+            runtime.array(array).ok().map(std::borrow::Cow::into_owned)
         };
         match (r.owner.as_str(), r.name.as_str()) {
             ("java/util/List", "of") if varargs => {

@@ -42,16 +42,17 @@ impl<H: Host> Runtime<'_, H> {
     fn color_collection(&mut self, values: Vec<Value>) -> Value {
         let key = format!("color-collection#{}", self.next_array);
         self.next_array += 1;
-        self.arrays.insert(key.clone(), values);
+        self.arrays.insert(key.clone(), values.into());
         Value::Host(HostRef::new(HostKind::ColorCollection, key))
     }
 
     /// The sixteen values of a collection this runtime built.
     fn color_values(&self, value: &Value) -> Option<Vec<Value>> {
         match value {
-            Value::Host(handle) if handle.kind() == HostKind::ColorCollection => {
-                self.arrays.get(handle.key()).cloned()
-            }
+            Value::Host(handle) if handle.kind() == HostKind::ColorCollection => self
+                .arrays
+                .get(handle.key())
+                .map(|array| array.values().into_owned()),
             _ => None,
         }
     }

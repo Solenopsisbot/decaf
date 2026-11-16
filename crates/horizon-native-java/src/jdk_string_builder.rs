@@ -800,7 +800,7 @@ impl<H: Host> Runtime<'_, H> {
                             return Ok(None);
                         };
                         for (offset, unit) in units.into_iter().enumerate() {
-                            elements[at + offset] = Value::Int(i32::from(unit));
+                            elements.store(at + offset, Value::Int(i32::from(unit)));
                         }
                         Value::Void
                     }
@@ -855,7 +855,7 @@ impl<H: Host> Runtime<'_, H> {
                         return Ok(None);
                     };
                     let mut units = Vec::with_capacity(elements.len());
-                    for element in elements {
+                    for element in elements.iter() {
                         let Value::Int(unit) = element else {
                             return Ok(None);
                         };

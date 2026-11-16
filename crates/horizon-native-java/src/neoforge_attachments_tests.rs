@@ -611,7 +611,8 @@ fn compound_copy_is_deep_and_get_compound_or_empty_answers_the_live_child() {
         .arrays
         .get(crate::host_array::array_key(&answer).unwrap())
         .unwrap()
-        .clone();
+        .values()
+        .into_owned();
     let read = |fixture: &mut Fixture, value: &Value| {
         let marker = expect_ref(value).unwrap().clone();
         fixture
@@ -648,7 +649,8 @@ fn compound_put_answers_the_previous_tag_and_refuses_null_as_the_server_jar_does
         .arrays
         .get(crate::host_array::array_key(&answer).unwrap())
         .unwrap()
-        .clone();
+        .values()
+        .into_owned();
     // The oracle's first put answered null and the second the tag it replaced.
     assert_eq!(case["first"], serde_json::Value::Null);
     assert_eq!(elements[0], Value::Ref(None));

@@ -693,15 +693,19 @@ impl<H: Host> Runtime<'_, H> {
         value: Value,
     ) -> Result<(), NativeError> {
         let marker = expect_array_key(array)?;
-        let values = self
+        let array = self
             .arrays
             .get_mut(marker)
             .ok_or_else(|| NativeError::Metadata("array is not owned by this invocation".into()))?;
-        let length = values.len();
-        let slot = values
-            .get_mut(index)
-            .ok_or_else(|| array_index_out_of_bounds(index as i32, length))?;
-        *slot = value;
+        let length = array.len();
+        if index >= length {
+            return Err(array_index_out_of_bounds(index as i32, length));
+        }
+        if !array.store(index, value) {
+            return Err(NativeError::Metadata(
+                "a value its array cannot hold".into(),
+            ));
+        }
         Ok(())
     }
 }

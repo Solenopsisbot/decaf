@@ -288,7 +288,7 @@ pub(crate) fn runtime_call<H: Host>(
     let codes = object.strip_prefix(STYLE)?;
     let array = args.first()?;
     let formats = runtime.array(array).ok()?;
-    Some(match apply_formats(codes, formats) {
+    Some(match apply_formats(codes, &formats) {
         Some(value) => Ok(value),
         None => Err(NativeError::UnknownHostCall(r.clone())),
     })

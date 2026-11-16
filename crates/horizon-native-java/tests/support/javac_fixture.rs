@@ -97,6 +97,17 @@ impl Fixture {
         )
     }
 
+    /// [`Self::build`] with byte-level patches applied to named compiled
+    /// classes before they are packed. This keeps small JVM opcode probes
+    /// hand-written without checking generated class files into the tree.
+    pub fn build_with_patches(
+        test: &str,
+        sources: &[(&str, &str)],
+        patches: &[(&str, fn(&mut [u8]))],
+    ) -> Self {
+        Self::build_packed_with_patches(test, sources, &[], false, "demo", None, None, patches)
+    }
+
     /// [`Self::build`], with the `lib/` classes packed as a second jar
     /// (`lib`, a library the probe jar bundles or depends on) and `extra`
     /// `(entry, bytes)` files written into the probe jar.
@@ -135,6 +146,28 @@ impl Fixture {
         packed: &str,
         mod_json: Option<&str>,
         classpath: Option<&Path>,
+    ) -> Self {
+        Self::build_packed_with_patches(
+            test,
+            sources,
+            extra,
+            with_lib,
+            packed,
+            mod_json,
+            classpath,
+            &[],
+        )
+    }
+
+    fn build_packed_with_patches(
+        test: &str,
+        sources: &[(&str, &str)],
+        extra: &[(&str, &[u8])],
+        with_lib: bool,
+        packed: &str,
+        mod_json: Option<&str>,
+        classpath: Option<&Path>,
+        patches: &[(&str, fn(&mut [u8]))],
     ) -> Self {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -176,10 +209,18 @@ impl Fixture {
         )
         .unwrap();
         for class in files_under(&classes.join(packed)) {
-            let entry = class.strip_prefix(&classes).unwrap().to_string_lossy();
+            let entry = class
+                .strip_prefix(&classes)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             zip.start_file(entry.replace('\\', "/"), SimpleFileOptions::default())
                 .unwrap();
-            zip.write_all(&fs::read(class).unwrap()).unwrap();
+            let mut bytes = fs::read(class).unwrap();
+            if let Some((_, patch)) = patches.iter().find(|(name, _)| *name == entry) {
+                patch(&mut bytes);
+            }
+            zip.write_all(&bytes).unwrap();
         }
         for (entry, bytes) in extra {
             zip.start_file(*entry, SimpleFileOptions::default())
