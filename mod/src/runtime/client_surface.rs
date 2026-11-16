@@ -1175,10 +1175,14 @@ impl StdHost {
                     .map_or(Value::Ref(None), |_| marker(GAME_MODE)),
                 "gameRenderer" => marker(GAME_RENDERER),
                 "debugEntries" => marker(DEBUG),
-                // The launcher's configured java.io.File is outside this
-                // bounded host. Count it instead of forging a String-shaped
-                // File marker.
-                "gameDirectory" => return refuse(),
+                "gameDirectory" => {
+                    let value = self.new_object("java/io/File");
+                    if let Some(marker) = expect_ref(&value) {
+                        self.io_paths
+                            .insert(marker.to_owned(), "/horizon/game".to_owned());
+                    }
+                    value
+                }
                 _ if frame.is_some() => return refuse(),
                 _ => return None,
             })),
