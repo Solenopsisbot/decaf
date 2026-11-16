@@ -1626,6 +1626,35 @@ mod tests {
     }
 
     #[test]
+    fn cov14_log4j_oracle_rows_match() {
+        let oracle = include_str!("fixtures/cov14/log4j_oracle.txt");
+        let logger = static_call(
+            &method(
+                "org/apache/logging/log4j/LogManager",
+                "getLogger",
+                "(Ljava/lang/String;)Lorg/apache/logging/log4j/Logger;",
+            ),
+            &[text("x")],
+        )
+        .unwrap()
+        .unwrap();
+        let name = instance_call(
+            &method(
+                "org/apache/logging/log4j/Logger",
+                "getName",
+                "()Ljava/lang/String;",
+            ),
+            &logger,
+            &[],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(name, text("x"));
+        assert!(oracle.lines().all(|line| line.split('|').count() == 11));
+        assert!(oracle.lines().all(|line| line.ends_with("true|true|true")));
+    }
+
+    #[test]
     fn logger_factories_answer_a_named_disabled_logger() {
         // The `Class`/`Object`/no-argument overloads are named by a class
         // the runtime knows (`invoke_logger_factory`; fixture_host_values_p2b

@@ -1627,7 +1627,7 @@ mod tests {
 
     #[test]
     fn cov14_log4j_oracle_rows_match() {
-        let oracle = include_str!("../tests/fixtures/cov14/log4j_oracle.txt");
+        let oracle = include_str!("fixtures/cov14/log4j_oracle.txt");
         let logger = static_call(
             &method(
                 "org/apache/logging/log4j/LogManager",

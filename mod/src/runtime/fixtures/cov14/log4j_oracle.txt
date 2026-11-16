@@ -1,0 +1,5 @@
+str|x|true|false|false|false|false|false|true|true|true
+strf|x|true|false|false|false|false|false|true|true|true
+class|probe|true|false|false|false|false|false|true|true|true
+obj|probe|true|false|false|false|false|false|true|true|true
+none|probe|true|false|false|false|false|false|true|true|true
