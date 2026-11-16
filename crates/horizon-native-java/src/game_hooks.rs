@@ -1990,7 +1990,6 @@ impl NativeJar {
         let mut runtime = Runtime {
             classes: &self.classes,
             mixin_index: std::cell::OnceCell::new(),
-            method_cache: BTreeMap::new(),
             linked,
             host: &mut wrapped,
             calls: 0,
