@@ -1410,7 +1410,10 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             [] => (api, None),
             [first] => (api, Some(first.as_str())),
             [first, factory] if factory == "Lorg/apache/logging/log4j/message/MessageFactory;" => {
-                self.host.unknown_operand_call(r)?;
+                // MessageFactory overloads use a distinct logger cache. The
+                // bounded runtime cannot observe factory identity, so retain
+                // the logger name and API while preserving the enabled-level
+                // policy shared by Log4j loggers.
                 ("log4j-factory", Some(first.as_str()))
             }
             _ => return Ok(None),
