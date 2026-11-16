@@ -9,5 +9,3 @@ name UTF-16LE=[104, 0, -23, 0, 61, -40, 0, -34, -3, -1]
 default=[104, -61, -87, -16, -97, -104, -128, 63]
 null=java.lang.NullPointerException:null
 bad=java.io.UnsupportedEncodingException:NOPE
-propstrue=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
-propsfalse=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
