@@ -55,6 +55,14 @@ const TREEIFY_THRESHOLD: usize = 8;
 /// `HashMap.MIN_TREEIFY_CAPACITY`.
 const MIN_TREEIFY_CAPACITY: usize = 64;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static RANK_OF_CALLS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static RANK_OF_COMPARISONS: AtomicUsize = AtomicUsize::new(0);
+
 /// `HashMap.hash(key)` for a key whose `hashCode()` is `hash`. It is its
 /// own inverse: `spread(spread(h)) == h`.
 pub(crate) fn spread(hash: i32) -> i32 {
@@ -84,6 +92,16 @@ struct Node {
     hash: i32,
 }
 
+/// The location of a node in the table.  The bin slot is stable for all
+/// other bins when a node is inserted or removed, so only that bin needs its
+/// locations refreshed.  The Fenwick tree below supplies the number of nodes
+/// in preceding bins without walking them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NodeLocation {
+    bin: usize,
+    slot: usize,
+}
+
 /// One table's state. Nodes are named by the host's item markers and keep
 /// their key's value and the spread hash it was inserted with, as a
 /// `HashMap.Node` does.
@@ -111,6 +129,13 @@ pub struct HashTable {
     /// `contains`/`stored_hash`/`remove`/`refresh` reach a node in its bin
     /// without walking the table (#203).
     index: HashMap<String, Option<i32>>,
+    /// Each placed node's bin and slot.  This is separate from `index` because
+    /// `index` is also the authoritative record of an identity-hashed,
+    /// unplaced key.
+    locations: HashMap<String, NodeLocation>,
+    /// One-indexed Fenwick tree containing the length of every bin.  A rank is
+    /// the prefix sum before a node's bin plus its slot in that bin.
+    bin_counts: Vec<usize>,
     /// The host collection generation (`collection_store.rs`) at which the
     /// table last mirrored the host's list exactly (the same keys and, when
     /// [`Self::ordered`], in this table's order): while the generation is
@@ -141,6 +166,8 @@ impl HashTable {
             access_order: false,
             tainted: false,
             index: HashMap::new(),
+            locations: HashMap::new(),
+            bin_counts: Vec::new(),
             synced: None,
             version: 0,
             positions: None,
@@ -158,12 +185,78 @@ impl HashTable {
     /// the bins before its own, then its place in its bin. `None` for an
     /// unplaced key and a marker not in the table.
     pub(crate) fn rank_of(&self, marker: &str) -> Option<usize> {
+        #[cfg(test)]
+        RANK_OF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let rank = self
+            .locations
+            .get(marker)
+            .map(|location| self.bin_prefix(location.bin) + location.slot);
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(rank, self.rank_of_linear(marker), "rank index for {marker}");
+        rank
+    }
+
+    /// The original implementation, retained as a debug/test oracle.  It is
+    /// deliberately not used by the fast path in release builds.
+    fn rank_of_linear(&self, marker: &str) -> Option<usize> {
         let spread = (*self.index.get(marker)?)?;
         let bin = spread as u32 as usize & (self.bins.len() - 1);
-        let within = self.bins[bin]
-            .iter()
-            .position(|node| node.marker == marker)?;
-        Some(self.bins[..bin].iter().map(Vec::len).sum::<usize>() + within)
+        let mut before = 0;
+        for prior in &self.bins[..bin] {
+            before += prior.len();
+        }
+        for (slot, node) in self.bins[bin].iter().enumerate() {
+            #[cfg(test)]
+            RANK_OF_COMPARISONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if node.marker == marker {
+                return Some(before + slot);
+            }
+        }
+        None
+    }
+
+    fn bin_prefix(&self, bin: usize) -> usize {
+        let mut index = bin;
+        let mut sum = 0;
+        while index > 0 {
+            sum += self.bin_counts[index];
+            index &= index - 1;
+        }
+        sum
+    }
+
+    fn bin_add(&mut self, bin: usize, delta: isize) {
+        let mut index = bin + 1;
+        while index < self.bin_counts.len() {
+            if delta >= 0 {
+                self.bin_counts[index] += delta as usize;
+            } else {
+                self.bin_counts[index] -= (-delta) as usize;
+            }
+            index += index & (!index + 1);
+        }
+    }
+
+    fn refresh_bin_locations(&mut self, bin: usize) {
+        for (slot, node) in self.bins[bin].iter().enumerate() {
+            self.locations
+                .insert(node.marker.clone(), NodeLocation { bin, slot });
+        }
+    }
+
+    fn rebuild_rank_index(&mut self) {
+        self.locations.clear();
+        self.bin_counts = vec![0; self.bins.len() + 1];
+        for bin in 0..self.bins.len() {
+            self.bin_counts[bin + 1] = self.bins[bin].len();
+            self.refresh_bin_locations(bin);
+        }
+        for index in 1..self.bin_counts.len() {
+            let parent = index + (index & (!index + 1));
+            if parent < self.bin_counts.len() {
+                self.bin_counts[parent] += self.bin_counts[index];
+            }
+        }
     }
 
     /// Whether the table's iteration order is unknown. One entry (or none)
@@ -312,6 +405,7 @@ impl HashTable {
             }
         }
         self.bins = bins;
+        self.rebuild_rank_index();
         Ok(())
     }
 
@@ -380,6 +474,8 @@ impl HashTable {
                 key: key.clone(),
                 hash: spread,
             });
+            self.bin_add(bin, 1);
+            self.refresh_bin_locations(bin);
             if held >= TREEIFY_THRESHOLD {
                 self.treeify_bin()?;
             }
@@ -419,6 +515,8 @@ impl HashTable {
                     hash: spread,
                 },
             );
+            self.bin_add(bin, 1);
+            self.refresh_bin_locations(bin);
             if held >= TREEIFY_THRESHOLD - 1 {
                 self.treeify_bin()?;
             }
@@ -442,6 +540,9 @@ impl HashTable {
         let bin = spread as u32 as usize & (self.bins.len() - 1);
         if let Some(index) = self.bins[bin].iter().position(|n| n.marker == marker) {
             self.bins[bin].remove(index);
+            self.locations.remove(marker);
+            self.bin_add(bin, -1);
+            self.refresh_bin_locations(bin);
         }
     }
 
@@ -452,6 +553,8 @@ impl HashTable {
         }
         self.unplaced.clear();
         self.index.clear();
+        self.locations.clear();
+        self.bin_counts.fill(0);
         self.version += 1;
         self.synced = None;
     }
@@ -502,5 +605,66 @@ mod tests {
         table.insert(&Value::Int(1), Some(1)).unwrap();
         assert_eq!(table.bins.len(), 2);
         assert_eq!(table.threshold, 1);
+    }
+
+    #[test]
+    fn indexed_rank_matches_the_linear_oracle_through_mutations() {
+        let mut table = HashTable::new(None, 0.75);
+        let mut keys = Vec::new();
+        let mut state = 0x9e37_79b9_u32;
+
+        // This deterministic sequence exercises colliding bins, head and tail
+        // insertion, several resizes, removals that shift a bin, and clear.
+        for step in 0..2_000 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            match state % 10 {
+                0 if !keys.is_empty() => {
+                    let index = (state as usize) % keys.len();
+                    let marker = keys.swap_remove(index);
+                    table.remove(&marker);
+                }
+                1 if step % 97 == 0 => table.clear(),
+                _ => {
+                    let id = step as usize;
+                    let marker = format!("rkey-{id}");
+                    // The same low bits force many keys into the same bin
+                    // before each resize, while the high bits vary the split.
+                    let hash = if step % 11 < 7 {
+                        0x4000_0000_i32.wrapping_add((step % 5) as i32)
+                    } else {
+                        state as i32
+                    };
+                    table
+                        .insert(&Value::Ref(Some(marker[1..].to_owned())), Some(hash))
+                        .unwrap();
+                    keys.push(marker);
+                }
+            }
+
+            for marker in keys.iter().step_by(13) {
+                assert_eq!(table.rank_of(marker), table.rank_of_linear(marker));
+            }
+            assert_eq!(table.locations.len(), table.bins.iter().map(Vec::len).sum());
+        }
+    }
+
+    #[test]
+    fn rank_lookup_does_not_scan_prior_bins() {
+        let table = table_of(
+            &(0..512)
+                .map(|index| format!("key-{index}"))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        RANK_OF_CALLS.store(0, Ordering::Relaxed);
+        RANK_OF_COMPARISONS.store(0, Ordering::Relaxed);
+        let marker = collection_item_marker(&table.keys()[table.len() - 1]);
+        assert_eq!(table.rank_of(&marker), table.rank_of_linear(&marker));
+        assert_eq!(RANK_OF_CALLS.load(Ordering::Relaxed), 1);
+        // The explicit oracle call above is the only linear scan and compares
+        // at most one bin, independent of how many earlier bins exist.
+        assert!(RANK_OF_COMPARISONS.load(Ordering::Relaxed) < 32);
     }
 }
