@@ -13,8 +13,6 @@
 
 use super::*;
 
-const ACC_ENUM: u16 = 0x4000;
-
 impl<H: Host> Runtime<'_, H> {
     pub(super) fn invoke_reflect_enum(
         &mut self,
@@ -31,40 +29,27 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(None);
         }
         let class = reflection_class_name(receiver, r)?.replace('.', "/");
-        // A held class file is authoritative, including anonymous subclasses of
-        // enum constants: Java sets ACC_ENUM only on the enum declaration, and
-        // its direct superclass must be java.lang.Enum. The generated JDK 25
-        // table carries the same direct-superclass fact for boot classes.
-        let held_enum = self.class(&class).map(|file| {
-            crate::runtime::jdk_model::class_access_flags(file).is_some_and(|flags| flags & ACC_ENUM != 0)
-                && file.super_name == "java/lang/Enum"
-        });
-        let jdk_enum = crate::runtime::jdk_closure::class_is_enum(&class);
-        let game_constants = game_enum_constants(&class);
-        // Primitive and array Class objects are never enum classes; Java
-        // answers this without consulting class metadata.
-        let known_enum = if crate::runtime::host_class::is_primitive(&class) || class.starts_with('[') {
-            Some(false)
-        } else {
-            held_enum
-                .or(jdk_enum)
-                .or_else(|| game_constants.map(|_| true))
-        };
+        let jar_enum = self
+            .class(&class)
+            .map(|file| file.super_name == "java/lang/Enum");
+        let known = crate::runtime::enum_value_of::known_enum_values(&class);
         if is_enum_query {
-            return Ok(known_enum.map(|is_enum| Value::Int(i32::from(is_enum))));
+            return Ok(match (jar_enum, known.is_some()) {
+                (Some(is_enum), _) => Some(Value::Int(i32::from(is_enum))),
+                (None, true) => Some(Value::Int(1)),
+                // A class the runtime does not hold keeps the host's answer.
+                (None, false) => None,
+            });
         }
-        match (held_enum, game_constants) {
+        match (jar_enum, known) {
             (Some(true), _) => {
+                self.ensure_initialized(&class)?;
                 let descriptor = format!("()[L{class};");
                 self.invoke(&class, "values", &descriptor, None, &[])
                     .map(Some)
             }
             (Some(false), _) => Ok(Some(Value::Ref(None))),
-            (None, Some(constants)) => {
-                let values = constants
-                    .iter()
-                    .map(|name| Value::Ref(Some(format!("enum/{class}/{name}"))))
-                    .collect();
+            (None, Some(values)) => {
                 // A clone of `values()`: an array of the enum class.
                 Ok(Some(self.new_array_value(&format!("[L{class};"), values)))
             }
