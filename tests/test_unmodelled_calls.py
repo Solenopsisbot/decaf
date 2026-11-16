@@ -444,6 +444,73 @@ class UnmodelledCallsTests(unittest.TestCase):
         totals, _ = TOOL.aggregate({"wide": [rows[0]]})
         self.assertEqual(totals["wide"]["ran-hollow"], 1)
 
+    @staticmethod
+    def _class_with(*constants: str, wide_first: bool = False) -> bytes:
+        """A minimal class file whose constant pool holds these UTF-8 entries (after a long
+        constant when `wide_first`, which takes two pool indices)."""
+        entries = [b"\x05" + b"\x00" * 8] if wide_first else []
+        for text in constants:
+            raw = text.encode("utf-8")
+            entries.append(b"\x01" + len(raw).to_bytes(2, "big") + raw)
+        count = 1 + len(constants) + (2 if wide_first else 0)
+        return b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + count.to_bytes(2, "big") + b"".join(entries)
+
+    def _class_jar(self, root: Path, name: str, classes: dict[str, bytes]) -> Path:
+        path = root / name
+        with zipfile.ZipFile(path, "w") as archive:
+            for entry, data in classes.items():
+                archive.writestr(entry, data)
+        return path
+
+    def test_custom_key_consumer_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            custom = root / "custom.jar"
+            with zipfile.ZipFile(custom, "w") as archive:
+                archive.writestr("fabric.mod.json", json.dumps(
+                    {"id": "custom", "entrypoints": {"glitchcore": ["x.Main"]}}))
+            self.assertEqual(TOOL.custom_entrypoint_keys(custom, "mega"), ("glitchcore",))
+
+            # The key and a loader lookup in one class: a consumer.
+            consumer = self._class_jar(root, "consumer.jar", {
+                "a/B.class": self._class_with("glitchcore", "getEntrypointContainers")})
+            self.assertTrue(TOOL.consumes_entrypoint(consumer, "glitchcore"))
+            # The same after a long constant, which takes two pool indices.
+            wide = self._class_jar(root, "wide.jar", {
+                "a/B.class": self._class_with("glitchcore", "getEntrypoints", wide_first=True)})
+            self.assertTrue(TOOL.consumes_entrypoint(wide, "glitchcore"))
+            # Only the literal (an `isModLoaded("glitchcore")` check): not a consumer.
+            literal_only = self._class_jar(root, "literal.jar", {
+                "a/B.class": self._class_with("glitchcore", "isModLoaded")})
+            self.assertFalse(TOOL.consumes_entrypoint(literal_only, "glitchcore"))
+            # The literal and the lookup in different classes: not a consumer.
+            split = self._class_jar(root, "split.jar", {
+                "a/B.class": self._class_with("glitchcore"),
+                "a/C.class": self._class_with("getEntrypoints", "other")})
+            self.assertFalse(TOOL.consumes_entrypoint(split, "glitchcore"))
+            # A package prefix is a different constant.
+            package_only = self._class_jar(root, "package.jar", {
+                "x/Y.class": self._class_with("glitchcore/Foo", "getEntrypoints")})
+            self.assertFalse(TOOL.consumes_entrypoint(package_only, "glitchcore"))
+
+    def test_constant_pool_walk_stops_at_the_pool(self):
+        # Bytes after the pool that look like a UTF-8 constant are not constants.
+        data = self._class_with("x", wide_first=True) + b"\x01\x00\x0aglitchcore"
+        self.assertEqual(TOOL.class_utf8_constants(data), {"x"})
+        self.assertEqual(TOOL.class_utf8_constants(b"not a class"), set())
+
+    def test_custom_key_without_consumer_is_skipped(self):
+        self.assertFalse(TOOL.consumes_entrypoint(Path("missing.jar"), "glitchcore"))
+
+    def test_plain_library_has_no_custom_keys(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/"plain.jar"
+            with zipfile.ZipFile(p,"w") as z: z.writestr("fabric.mod.json",json.dumps({"id":"plain","entrypoints":{}}))
+            self.assertEqual(TOOL.custom_entrypoint_keys(p,"mega"),())
+
+    def test_alone_mode_does_not_select_custom_key_consumer(self):
+        self.assertEqual(TOOL.STANDARD_ENTRYPOINTS,{"main","client","server"})
+
 
 if __name__ == "__main__":
     unittest.main()
