@@ -31,6 +31,17 @@ public final class StreamCodecs {
     return CustomPacketPayload.codec(encoder, decoder);
   }
 
+  private static StreamCodec<ByteBuf, Payload> ofCodec() {
+    StreamEncoder<ByteBuf, Payload> encoder = (output, value) -> {};
+    StreamDecoder<ByteBuf, Payload> decoder = input -> new Payload();
+    return StreamCodec.of(encoder, decoder);
+  }
+
+  private static StreamCodec<ByteBuf, Payload> mappedCodec() {
+    StreamCodec<ByteBuf, Payload> base = compositeOne();
+    return base.map(value -> value, value -> value);
+  }
+
   private static StreamCodec<FriendlyByteBuf, CustomPacketPayload> fallbackCodec() {
     CustomPacketPayload.FallbackProvider<FriendlyByteBuf> fallback = input -> null;
     return CustomPacketPayload.codec(
@@ -48,7 +59,10 @@ public final class StreamCodecs {
     StreamCodec<ByteBuf, Payload> two = compositeTwo();
     StreamCodec<ByteBuf, Payload> member = memberCodec();
     StreamCodec<FriendlyByteBuf, CustomPacketPayload> fallback = fallbackCodec();
+    StreamCodec<ByteBuf, Payload> made = ofCodec();
+    StreamCodec<ByteBuf, Payload> mapped = mappedCodec();
     return facts(one) + "|" + facts(two) + "|" + facts(member) + "|" + facts(fallback)
+        + "|" + facts(made) + "|" + facts(mapped)
         + "|" + (one == one) + "|" + (one == oneAgain) + "|" + (one.equals(one))
         + "|" + one.equals(oneAgain);
   }

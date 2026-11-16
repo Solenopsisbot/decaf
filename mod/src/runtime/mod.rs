@@ -240,6 +240,7 @@ mod stream_pipeline;
 mod string_code_points;
 mod string_constructors;
 mod synchronized_views;
+mod thread_local;
 mod tim_sort;
 mod tree_map;
 mod type_switch;
@@ -23818,6 +23819,33 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// Whether `name` is `wanted` or a subclass (or implementor) of it.
+    pub(crate) fn jar_method_owner(
+        &self,
+        class: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<String> {
+        self.member_owner(class, name, descriptor)
+            .and_then(|(owner, jar)| jar.then_some(owner))
+    }
+
+    pub(crate) fn jar_extends(&self, class: &str, wanted: &str) -> bool {
+        let mut current = class.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            if current == wanted {
+                return true;
+            }
+            let Some(file) = self.class(&current) else {
+                return false;
+            };
+            if file.super_name.is_empty() || file.super_name == current {
+                return false;
+            }
+            current = file.super_name.clone();
+        }
+        false
+    }
+
     pub(crate) fn class_is_instance(&self, name: &str, wanted: &str) -> bool {
         let mut current = jar_object::marker_class_or_text(name).to_owned();
         for _ in 0..MAX_SUPERCLASS_WALK {
@@ -25698,9 +25726,25 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        if let Some(value) = thread_local::call(self, r, receiver, args) {
+            return value.map(Some);
+        }
+        if let Some(value) = dfu_codec::runtime_instance_call(self, r, receiver, args)? {
+            return Ok(Some(value));
+        }
         // A game codec factory whose result a class only stores.
         if let Some(value) = stream_codec::static_call(r, args) {
             return Ok(Some(value));
+        }
+        if let Some(value) = receiver
+            .and_then(|receiver| stream_codec::runtime_instance_call(self, r, Some(receiver), args))
+        {
+            return value.map(Some);
+        }
+        if let Some(value) =
+            receiver.and_then(|receiver| stream_codec::instance_call(r, receiver, args))
+        {
+            return value.map(Some);
         }
         if let Some(value) = self.invoke_game_codec_factory(r) {
             return Ok(Some(value));
@@ -28210,7 +28254,7 @@ impl<H: Host> Runtime<'_, H> {
     /// inside the callee's frame counted one extra frame per lazily initialized
     /// class on the chain (two of the 12 that refused
     /// `structure_layout_optimizer`).
-    fn invoke(
+    pub(crate) fn invoke(
         &mut self,
         class: &str,
         method: &str,
@@ -29813,6 +29857,12 @@ impl<H: Host> Runtime<'_, H> {
                         ))
                     } else if let Some(value) = invoke_or_catch!(
                         at,
+                        thread_local::call(self, &r, receiver.as_ref(), &args)
+                            .map_or(Ok(None), |value| value.map(Some))
+                    ) {
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
                         self.invoke_jdk_skeleton(&r, op, receiver.as_ref(), &args)
                     ) {
                         // A JDK skeleton's body or a JDK interface default the
@@ -29869,6 +29919,11 @@ impl<H: Host> Runtime<'_, H> {
                         invoke_or_catch!(at, string_constructors::count(self, &r))
                     {
                         // `new String(...)` builds no text yet: counted.
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        dfu_codec::runtime_instance_call(self, &r, receiver.as_ref(), &args)
+                    ) {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,

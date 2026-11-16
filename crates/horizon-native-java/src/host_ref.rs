@@ -462,6 +462,8 @@ pub enum HostKind {
     OpaqueCodec,
     /// A pure network StreamCodec factory result.
     StreamCodec,
+    /// A synchronous java.lang.ThreadLocal holder.
+    ThreadLocal,
     /// An explicitly seeded Minecraft RandomSource or positional factory.
     RandomSource,
     /// A codec the attachment model builds: key `compound-tag` or
@@ -2108,6 +2110,14 @@ const KINDS: &[KindInfo] = &[
         // Every factory call allocates a new implementation object.
         canonical: always_canonical,
         methods: &crate::stream_codec::STREAM_CODEC_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ThreadLocal,
+        tag: "thrl",
+        class: ClassRule::FromKey(crate::thread_local::class_of_key),
+        // A withInitial call allocates the JDK private SuppliedThreadLocal object.
+        canonical: always_canonical,
+        methods: &crate::thread_local::THREAD_LOCAL_METHODS,
     },
     KindInfo {
         kind: HostKind::RandomSource,
