@@ -198,6 +198,7 @@ impl HashTable {
 
     /// The original implementation, retained as a debug/test oracle.  It is
     /// deliberately not used by the fast path in release builds.
+    #[cfg(debug_assertions)]
     fn rank_of_linear(&self, marker: &str) -> Option<usize> {
         let spread = (*self.index.get(marker)?)?;
         let bin = spread as u32 as usize & (self.bins.len() - 1);
