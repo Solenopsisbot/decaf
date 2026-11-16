@@ -131,6 +131,11 @@ pub(crate) fn fabric_array_event(serial: usize) -> Value {
 }
 
 /// `RegistryEntryAddedCallback.event(registry)`, named by its registry's text.
+/// Fabric creative-tab events are cached by their ResourceKey.
+pub(crate) fn fabric_tab_event(key: &str) -> Value {
+    handle_of(HostKind::FabricEvent, &[text("tab"), text(key)])
+}
+
 pub(crate) fn fabric_registry_event(registry: &str) -> Value {
     handle_of(HostKind::FabricEvent, &[text("registry"), text(registry)])
 }
