@@ -28147,6 +28147,13 @@ impl<H: Host> Runtime<'_, H> {
                 self.new_array_value("[Ljava/lang/Object;", values)
             }
             ("toArray", "(Ljava/util/function/IntFunction;)[Ljava/lang/Object;") => {
+                if matches!(args.first(), Some(Value::Ref(None))) {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: None,
+                        frame: None,
+                    });
+                }
                 self.new_array_value("[Ljava/lang/Object;", values)
             }
             ("collect", "(Ljava/util/stream/Collector;)Ljava/lang/Object;") => {
