@@ -18933,6 +18933,7 @@ impl NativeJar {
         let mut runtime = Runtime {
             classes: &self.classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -19147,6 +19148,7 @@ impl NativeJar {
         let mut runtime = Runtime {
             classes: &self.classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -19317,6 +19319,7 @@ impl NativeJar {
         let mut runtime = Runtime {
             classes: &self.classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
@@ -21477,6 +21480,33 @@ fn parse_value_marker(marker: &str) -> Result<Value, NativeError> {
 /// the wild are kilobytes; a crafted one must not grow host memory.
 const MAX_GSON_JSON_BYTES: usize = 1024 * 1024;
 
+#[derive(Debug, Clone)]
+struct MethodCacheEntry {
+    class: String,
+    method: String,
+    descriptor: String,
+    target: Option<Arc<Method>>,
+}
+
+/// Decoded method metadata is immutable for one execution: the running jar
+/// and its linked-class snapshot are borrowed/owned by `Runtime` for its whole
+/// call tree. Keeping this cache per runtime both invalidates it naturally on
+/// any class-table change and bounds it to one jar invocation.
+const MAX_METHOD_CACHE_ENTRIES: usize = 8_192;
+
+fn method_cache_hash(class: &str, method: &str, descriptor: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for part in [class, method, descriptor] {
+        for byte in part.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 struct Runtime<'a, H> {
     classes: &'a BTreeMap<String, ClassFile>,
     /// Each class a jar `@Mixin` targets, with the mixin classes naming it,
@@ -21487,6 +21517,9 @@ struct Runtime<'a, H> {
     /// every class of the jar (#166's re-check measured a 10M-store loop at
     /// 1.3 s → 114 s) (`checkcast.rs`).
     mixin_index: std::cell::OnceCell<BTreeMap<String, Vec<String>>>,
+    /// FNV buckets avoid allocating three lookup strings on every frame; a
+    /// full key comparison keeps hash collisions exact.
+    method_cache: BTreeMap<u64, Vec<MethodCacheEntry>>,
     /// Sibling-jar tables this execution may link, snapshotted from the host
     /// so a frame that keeps a class reference does not borrow the host.
     linked: Arc<LinkedClassTable>,
@@ -27344,10 +27377,34 @@ impl<H: Host> Runtime<'_, H> {
                 )));
             }
         };
-        let target = file
-            .method(method, desc)
-            .cloned()
-            .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
+        let cache_hash = method_cache_hash(class, method, desc);
+        let cached = self.method_cache.get(&cache_hash).and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.class == class && entry.method == method && entry.descriptor == desc
+                })
+                .map(|entry| entry.target.clone())
+        });
+        let target = if let Some(target) = cached {
+            target
+        } else {
+            let target = file.method(method, desc).cloned().map(Arc::new);
+            let entry_count = self.method_cache.values().map(Vec::len).sum::<usize>();
+            if entry_count < MAX_METHOD_CACHE_ENTRIES {
+                self.method_cache
+                    .entry(cache_hash)
+                    .or_default()
+                    .push(MethodCacheEntry {
+                        class: class.to_owned(),
+                        method: method.to_owned(),
+                        descriptor: desc.to_owned(),
+                        target: target.clone(),
+                    });
+            }
+            target
+        }
+        .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
         // A game-hook callback's Mixin members on a game object resolve
         // through the host first (`Host::redirect_jar_call`); every other host
         // answers `None` and the body below runs as before.
@@ -33921,6 +33978,7 @@ mod tests {
         let mut runtime = Runtime {
             classes: &BTreeMap::new(),
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -33984,6 +34042,7 @@ mod tests {
         let mut runtime = Runtime {
             classes: &BTreeMap::new(),
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -41137,6 +41196,7 @@ mandatory = true
         let mut runtime = Runtime {
             classes: &classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -41302,6 +41362,7 @@ mandatory = true
         let mut runtime = Runtime {
             classes: &classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -41490,6 +41551,7 @@ mandatory = true
         let mut runtime = Runtime {
             classes: &classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -41846,6 +41908,7 @@ mandatory = true
         let mut runtime = Runtime {
             classes: &classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -42162,6 +42225,7 @@ mandatory = true
         let mut runtime = Runtime {
             classes: &classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -47420,6 +47484,7 @@ mandatory = true
         let mut runtime = Runtime {
             classes: &classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
@@ -47478,6 +47543,7 @@ mandatory = true
         let mut runtime = Runtime {
             classes: &classes,
             mixin_index: std::cell::OnceCell::new(),
+            method_cache: BTreeMap::new(),
             linked: Arc::default(),
             host: &mut host,
             calls: 0,
