@@ -14,7 +14,10 @@ fn check(owner: &str, prefix: &str, fields: &[String], host: &mut StdHost) -> (u
     let mut good=0; let mut counted=0; let mut wrong=Vec::new();
     for field in fields {
         let r=MethodRef { owner: owner.into(), name: field.clone(), descriptor: format!("L{prefix};") };
-        match host.get_static(&r) {
+        let first = host.get_static(&r);
+        let second = host.get_static(&r);
+        if let (Ok(a), Ok(b)) = (&first, &second) { assert_eq!(a, b, "identity mismatch for {owner}::{field}"); }
+        match first {
             Ok(v) if format!("{v:?}").contains(&format!("client/{prefix}/minecraft:{}", field.to_ascii_lowercase())) => good+=1,
             Ok(Value::Ref(None)) => counted+=1,
             Ok(v) => wrong.push(format!("{field}: {v:?}")),
