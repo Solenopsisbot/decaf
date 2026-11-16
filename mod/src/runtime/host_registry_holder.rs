@@ -1005,4 +1005,17 @@ mod tests {
             Value::Int(1)
         );
     }
+    #[test]
+    fn unobserved_vanilla_registry_value_is_counted_not_forged() {
+        let mut host = StdHost::new();
+        let registry = crate::runtime::host_registry::registry("minecraft:item");
+        let result = host.invoke_instance(
+            &MethodRef { owner: "net/minecraft/core/Registry".into(), name: "getValue".into(), descriptor: "(Lnet/minecraft/resources/Identifier;)Ljava/lang/Object;".into() },
+            &registry,
+            &[crate::runtime::host_ids::identifier_of_text("minecraft:stone")],
+        );
+        assert!(result.is_err());
+        assert_eq!(host.unknown_host_call_count(), 1);
+    }
+
 }
