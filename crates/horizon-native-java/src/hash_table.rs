@@ -630,7 +630,7 @@ mod tests {
                     // The same low bits force many keys into the same bin
                     // before each resize, while the high bits vary the split.
                     let hash = if step % 11 < 7 {
-                        0x4000_0000_i32.wrapping_add((step % 5) as i32)
+                        0x4000_0000_i32.wrapping_add(step % 5)
                     } else {
                         state as i32
                     };
