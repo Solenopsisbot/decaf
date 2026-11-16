@@ -1150,11 +1150,11 @@ impl StdHost {
                 Some(Ok(marker(format!("enum/{INPUT_TYPE}/{name}"))))
             }
             (INPUT_CONSTANTS, "UNKNOWN")
-                if r.r.descriptor == "Lcom/mojang/blaze3d/platform/InputConstants$Key;" =>
+                if r.descriptor == "Lcom/mojang/blaze3d/platform/InputConstants$Key;" =>
             {
                 Some(Ok(marker(input_key_marker(false, 0))))
             }
-            (KEY_CATEGORY, name) if r.r.descriptor == format!("L{KEY_CATEGORY};") => Some(Ok(
+            (KEY_CATEGORY, name) if r.descriptor == format!("L{KEY_CATEGORY};") => Some(Ok(
                 marker(format!("{CATEGORY}minecraft:{}", name.to_ascii_lowercase())),
             )),
             (MINECRAFT_CLASS, name) => Some(Ok(match name {
@@ -1454,7 +1454,7 @@ impl StdHost {
         if (text == format!("enum/{INPUT_TYPE}/KEYBOARD")
             || text == format!("enum/{INPUT_TYPE}/MOUSE"))
             && matches!(r.name.as_str(), "name" | "toString")
-            && r.r.descriptor == "()Ljava/lang/String;"
+            && r.descriptor == "()Ljava/lang/String;"
         {
             return Some(Ok(Value::Ref(Some(
                 if text.ends_with("/MOUSE") {
@@ -1468,7 +1468,7 @@ impl StdHost {
         if (text == format!("enum/{INPUT_TYPE}/KEYBOARD")
             || text == format!("enum/{INPUT_TYPE}/MOUSE"))
             && r.name == "getOrCreate"
-            && r.r.descriptor == "(I)Lcom/mojang/blaze3d/platform/InputConstants$Key;"
+            && r.descriptor == "(I)Lcom/mojang/blaze3d/platform/InputConstants$Key;"
         {
             let code = int_arg(args, 0)?;
             return Some(Ok(marker(input_key_marker(text.ends_with("/MOUSE"), code))));
