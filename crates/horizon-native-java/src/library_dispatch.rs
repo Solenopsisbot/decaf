@@ -1403,7 +1403,7 @@ impl<H: Host> Runtime<'_, H> {
                         "" | "." => {}
                         ".." => {
                             if !out.is_empty() && out.last() != Some(&"..") {
-                                out.pop()
+                                out.pop();
                             } else if !abs {
                                 out.push("..")
                             }
