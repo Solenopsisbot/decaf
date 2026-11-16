@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::runtime::host_ref::{
     ClassHierarchy, ClassSide, HostKind, HostRef, Methods, exact_class_rules_out,
 };
-use crate::runtime::{MethodRef, Value};
+use crate::runtime::{Host, MethodRef, NativeError, Runtime, Value};
 
 pub(crate) const STREAM_CODEC: &str = "net/minecraft/network/codec/StreamCodec";
 const STREAM_ENCODER: &str = "net/minecraft/network/codec/StreamEncoder";
@@ -36,6 +36,18 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Value> {
                     args,
                 ));
             }
+        }
+        if r.owner == STREAM_CODEC && r.name == "of" {
+            return Some(codec(&format!("{STREAM_CODEC_PREFIX}1"), args));
+        }
+        if r.owner == STREAM_CODEC && r.name == "ofMember" {
+            return Some(codec(&format!("{STREAM_CODEC_PREFIX}2"), args));
+        }
+        if r.owner == STREAM_CODEC
+            && r.name == "unit"
+            && r.descriptor == "(Ljava/lang/Object;)Lnet/minecraft/network/codec/StreamCodec;"
+        {
+            return Some(codec(&format!("{STREAM_CODEC_PREFIX}3"), args));
         }
         if r.owner == "net/minecraft/network/protocol/common/custom/CustomPacketPayload"
             && r.name == "codec"
@@ -68,6 +80,143 @@ fn codec(class: &str, args: &[Value]) -> Value {
     values.push(Value::Ref(Some(class.to_owned())));
     values.extend_from_slice(args);
     Value::Host(HostRef::of_values(HostKind::StreamCodec, &values))
+}
+
+/// The default `map` method allocates StreamCodec$4 and retains its receiver
+/// and both callback handles. Its encode/decode behavior remains counted.
+pub(crate) fn instance_call(
+    r: &MethodRef,
+    receiver: &Value,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    if !is_stream_codec(receiver) {
+        return None;
+    }
+    if class_of_value(receiver).as_deref() == Some("net/minecraft/network/codec/StreamCodec$3") {
+        let held = match receiver {
+            Value::Host(handle) => handle.held(),
+            _ => &[],
+        };
+        let instance = held.get(2).cloned();
+        match r.name.as_str() {
+            "decode" if r.descriptor == "(Ljava/lang/Object;)Ljava/lang/Object;" => {
+                return instance.map(Ok);
+            }
+            "encode" if r.descriptor == "(Ljava/lang/Object;Ljava/lang/Object;)V" => {
+                let expected = instance?;
+                let actual = args.get(1)?.clone();
+                if actual == expected {
+                    return Some(Ok(Value::Void));
+                }
+                let text = |value: &Value| match value {
+                    Value::Ref(Some(text)) => text.clone(),
+                    Value::Int(value) => value.to_string(),
+                    Value::Long(value) => value.to_string(),
+                    Value::Float(value) => value.to_string(),
+                    Value::Void => "null".to_owned(),
+                    other => format!("{other:?}"),
+                };
+                return Some(Err(NativeError::UncaughtException {
+                    class: "java/lang/IllegalStateException".into(),
+                    message: Some(format!(
+                        "Can't encode '{}', expected '{}'",
+                        text(&actual),
+                        text(&expected)
+                    )),
+                    frame: None,
+                }));
+            }
+            _ => {}
+        }
+    }
+    if r.owner != STREAM_CODEC
+        || r.name != "map"
+        || r.descriptor
+            != "(Ljava/util/function/Function;Ljava/util/function/Function;)Lnet/minecraft/network/codec/StreamCodec;"
+        || args.len() != 2
+    {
+        return None;
+    }
+    let mut values = Vec::with_capacity(3);
+    values.push(receiver.clone());
+    values.extend_from_slice(args);
+    Some(Ok(codec(&format!("{STREAM_CODEC_PREFIX}4"), &values)))
+}
+
+/// Runtime-dependent behavior of `StreamCodec$3` (`StreamCodec.unit`). The expected object's
+/// own virtual `equals` is invoked; comparing interpreter keys would silently change Java.
+pub(crate) fn runtime_instance_call<H: Host>(
+    runtime: &mut Runtime<'_, H>,
+    r: &MethodRef,
+    receiver: Option<&Value>,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    let receiver = receiver?;
+    if !is_stream_codec(receiver)
+        || class_of_value(receiver).as_deref() != Some("net/minecraft/network/codec/StreamCodec$3")
+    {
+        return None;
+    }
+    let expected = match receiver {
+        Value::Host(handle) => handle.held().get(2)?.clone(),
+        _ => return None,
+    };
+    match (r.name.as_str(), r.descriptor.as_str()) {
+        ("decode", "(Ljava/lang/Object;)Ljava/lang/Object;") => Some(Ok(expected)),
+        ("encode", "(Ljava/lang/Object;Ljava/lang/Object;)V") => {
+            let actual = args.get(1)?.clone();
+            if matches!(expected, Value::Ref(None)) {
+                return Some(Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: Some(
+                        "Cannot invoke \"Object.equals(Object)\" because \"value\" is null".into(),
+                    ),
+                    frame: None,
+                }));
+            }
+            let equals = runtime.call_virtual(
+                crate::runtime::jdk_call::Site::Virtual,
+                "java/lang/Object",
+                "equals",
+                "(Ljava/lang/Object;)Z",
+                &expected,
+                std::slice::from_ref(&actual),
+            );
+            let equal = match equals {
+                Ok(Value::Int(value)) => value != 0,
+                Ok(_) => return None,
+                Err(error) => return Some(Err(error)),
+            };
+            if equal {
+                return Some(Ok(Value::Void));
+            }
+            let text = |value: &Value| match value {
+                Value::Ref(Some(text)) => Some(text.clone()),
+                Value::Ref(None) => Some("null".to_owned()),
+                Value::Int(value) => Some(value.to_string()),
+                Value::Long(value) => Some(value.to_string()),
+                Value::Float(value) => Some(value.to_string()),
+                _ => None,
+            };
+            let (Some(actual), Some(expected)) = (text(&actual), text(&expected)) else {
+                return None;
+            };
+            Some(Err(NativeError::UncaughtException {
+                class: "java/lang/IllegalStateException".into(),
+                message: Some(format!("Can't encode '{actual}', expected '{expected}'")),
+                frame: None,
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// The implementation class carried by a modeled network codec handle.
+fn class_of_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Host(handle) => Some(class_of_key(handle.key()).to_owned()),
+        _ => None,
+    }
 }
 
 /// Whether a value is a modeled network codec handle.

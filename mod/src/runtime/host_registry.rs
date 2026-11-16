@@ -198,6 +198,17 @@ pub(crate) fn registry_id(value: &Value) -> Option<&str> {
     }
 }
 
+/// Record whether a registry registration contributed a stable lifecycle.
+pub(crate) fn note_registry_lifecycle(host: &mut crate::runtime::StdHost, id: &str, stable: Option<bool>) {
+    let state = host
+        .registry_lifecycles
+        .entry(id.to_owned())
+        .or_insert_with(|| crate::runtime::vanilla_registries::is_built_in(id));
+    if stable != Some(true) {
+        *state = false;
+    }
+}
+
 /// The declared types of a `Registry` with this key.
 pub(crate) fn registry_types(key: &str) -> &'static [&'static str] {
     match key.chars().next() {
@@ -285,9 +296,19 @@ fn identity_equals(
     })
 }
 
-/// A `Registry`: `toString` names its lifecycle (`Registry[ResourceKey[…]
-/// (Stable)]`), which the host does not hold, and `hashCode` is an identity
-/// hash: both counted.
+/// A built-in `MappedRegistry`'s 26.3 `toString` is exact only while every
+/// observed registration kept a stable lifecycle. Unknown or experimental
+/// registration info leaves the call counted.
+pub(crate) fn registry_text(host: &crate::runtime::StdHost, value: &Value) -> Option<Value> {
+    let id = registry_id(value)?;
+    if !crate::runtime::vanilla_registries::is_built_in(id) || !host.registry_lifecycle_stable(id) {
+        return None;
+    }
+    Some(Value::Ref(Some(format!(
+        "Registry[ResourceKey[minecraft:root / {id}] (Stable)]"
+    ))))
+}
+
 pub(crate) const REGISTRY_METHODS: Methods = Methods {
     to_string: |_, _| Ok(None),
     hash_code: |_, _| Ok(None),

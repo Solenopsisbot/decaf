@@ -1046,6 +1046,9 @@ impl<H: Host> Runtime<'_, H> {
             })?;
             return Ok(Some(crate::callback_marker::CALLBACK_TEXT.into()));
         }
+        if let Some(text) = self.host.registry_text(&Value::Host(handle.clone())) {
+            return Ok(Some(text));
+        }
         handle.to_string(&mut RuntimeNested {
             runtime: self,
             class,
@@ -1559,6 +1562,9 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
         if let Value::Host(handle) = value
             && !crate::jar_object::is_object_handle(handle)
         {
+            if let Some(text) = self.runtime.host.registry_text(value) {
+                return Ok(Some(text));
+            }
             return handle.to_string(self);
         }
         self.runtime

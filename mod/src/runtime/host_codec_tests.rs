@@ -159,6 +159,27 @@ fn pairs_and_codecs_answer_as_java_25_or_count() {
         ),
         ("codecDuplicate", Exact("duplicate element: String")),
         ("codecText", Exact("String|Int|Bool")),
+        ("mapUnitIdentity", Exact(oracle_row("mapUnitIdentity"))),
+        ("mapUnitText", Exact(oracle_row("mapUnitText"))),
+        (
+            "mapUnitCodecIdentity",
+            Exact(oracle_row("mapUnitCodecIdentity")),
+        ),
+        ("mapUnitExecution", Exact(oracle_row("mapUnitExecution"))),
+        ("mapUnitNull", Exact(oracle_row("mapUnitNull"))),
+        (
+            "streamUnitIdentity",
+            Exact(oracle_row("streamUnitIdentity")),
+        ),
+        (
+            "streamUnitRoundTrip",
+            Exact(oracle_row("streamUnitRoundTrip")),
+        ),
+        ("streamUnitNull", Exact(oracle_row("streamUnitNull"))),
+        (
+            "streamUnitCustomEquals",
+            Exact(oracle_row("streamUnitCustomEquals")),
+        ),
         (
             "dfuConstruction",
             CountedAs("true|false|true|false|true|true|false|true"),
