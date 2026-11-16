@@ -424,7 +424,7 @@ pub(crate) fn instance_call(
     if let Some(name) = crate::host_jdk::logger_name(receiver)
         && is_logger_owner(&r.owner)
     {
-        return logger_call(r, &name);
+        return logger_call(r, receiver, &name);
     }
     if let Some(value) = crate::host_log4j_level::instance_call(r, receiver, args) {
         return Some(value);
@@ -488,12 +488,11 @@ fn charset_call(
 /// Logger output methods are safe no-ops. Enablement checks require a real
 /// logging configuration; the standalone host has none, so those calls stay
 /// counted instead of inventing a disabled/enabled answer.
-fn logger_call(r: &MethodRef, name: &str) -> Option<Result<Value, NativeError>> {
+fn logger_call(r: &MethodRef, receiver: &Value, name: &str) -> Option<Result<Value, NativeError>> {
     let returns = r.descriptor.rsplit_once(')').map_or("", |(_, ret)| ret);
     Some(Ok(match (r.name.as_str(), returns) {
         ("getMessageFactory", "Lorg/apache/logging/log4j/message/MessageFactory;") => {
-            crate::host_jdk::logger_factory(&crate::host_jdk::logger_value("log4j", name))
-                .unwrap_or(Value::Ref(None))
+            crate::host_jdk::logger_factory(receiver).unwrap_or(Value::Ref(None))
         }
         ("getName", "Ljava/lang/String;") => Value::Ref(Some(name.to_owned())),
         (method, "Z") if method.starts_with("is") => return None,
