@@ -1,0 +1,4 @@
+guava_type_token_wrap_unsupported=java.lang.IllegalArgumentException
+concurrent_sync_missing_argument=java.lang.NoSuchMethodError
+ dfu_encode_missing_builder=java.lang.NoSuchMethodError
+annotation_equals_missing_argument=java.lang.NoSuchMethodError

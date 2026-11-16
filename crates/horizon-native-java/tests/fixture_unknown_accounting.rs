@@ -172,3 +172,45 @@ fn every_distinct_unknown_call_is_counted() {
     assert_eq!(host.unknown_host_calls().len(), 100);
     assert_eq!(host.unknown_host_call_count(), 200);
 }
+
+/// Java 25 oracle rows for the four audit shapes are recorded above; malformed
+/// descriptors cannot be invoked by the JVM, so the interpreter must count
+/// them rather than manufacture a neutral value.
+#[test]
+fn audit_default_shapes_are_counted() {
+    let oracle = include_str!("fixtures/audit_defaults/java25.txt");
+    assert!(oracle.contains("guava_type_token_wrap_unsupported"));
+    assert!(oracle.contains("concurrent_sync_missing_argument"));
+    assert!(oracle.contains("dfu_encode_missing_builder"));
+    assert!(oracle.contains("annotation_equals_missing_argument"));
+    let mut host = StdHost::new();
+    for (owner, name, desc) in [
+        (
+            "com/google/common/reflect/TypeToken",
+            "wrap",
+            "()Lcom/google/common/reflect/TypeToken;",
+        ),
+        ("java/util/concurrent/CountDownLatch", "<init>", "(I)V"),
+        (
+            "com/mojang/serialization/MapCodec",
+            "encode",
+            "(Ljava/lang/Object;Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/RecordBuilder;)Lcom/mojang/serialization/RecordBuilder;",
+        ),
+        (
+            "java/lang/annotation/Annotation",
+            "equals",
+            "(Ljava/lang/Object;)Z",
+        ),
+    ] {
+        host.invoke(
+            &MethodRef {
+                owner: owner.into(),
+                name: name.into(),
+                descriptor: desc.into(),
+            },
+            &[],
+        )
+        .unwrap();
+    }
+    assert_eq!(host.unknown_host_call_count(), 4);
+}
