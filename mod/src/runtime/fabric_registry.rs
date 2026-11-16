@@ -15,6 +15,9 @@
 //! builder call on anything but a handle is counted.
 
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ATTACHMENT_PREDICATE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const BUILDER: &str = "net/fabricmc/fabric/api/event/registry/FabricRegistryBuilder";
 
@@ -58,6 +61,17 @@ fn built(receiver: &Value) -> Option<(Value, bool)> {
 }
 
 pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value, NativeError>> {
+    if r.owner == "net/fabricmc/fabric/api/attachment/v1/AttachmentSyncPredicate"
+        && r.descriptor == "()Lnet/fabricmc/fabric/api/attachment/v1/AttachmentSyncPredicate;"
+        && matches!(r.name.as_str(), "all" | "targetOnly" | "allButTarget")
+        && args.is_empty()
+    {
+        let serial = NEXT_ATTACHMENT_PREDICATE.fetch_add(1, Ordering::Relaxed);
+        return Some(Ok(Value::Host(HostRef::new(
+            HostKind::JarObject,
+            format!("attachment-sync-predicate/{}/{}", r.name, serial),
+        ))));
+    }
     match (r.owner.as_str(), r.name.as_str()) {
         ("net/minecraft/resources/ResourceKey", "createRegistryKey")
             if r.descriptor

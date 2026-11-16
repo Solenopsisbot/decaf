@@ -26241,6 +26241,23 @@ impl<H: Host> Runtime<'_, H> {
                         }
                         Value::Int(0)
                     }
+                    ("isReadable", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        Value::Int(i32::from(self.io_files.contains_key(&path)))
+                    }
+                    ("isDirectory", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        Value::Int(i32::from(self.file_kind(&path) == file_attributes::FileKind::Directory))
+                    }
+                    ("isRegularFile", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        Value::Int(i32::from(self.file_kind(&path) == file_attributes::FileKind::RegularFile))
+                    }
+                    ("isSymbolicLink" | "isExecutable", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") => Value::Int(0),
                     ("readString", descriptor)
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
