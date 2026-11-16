@@ -716,6 +716,10 @@ fn execution_json(
             .iter()
             .map(|registration| registration.direction.clone())
             .collect::<Vec<_>>(),
+        "unfired": serde_json::json!({
+            "fabric_biome_modifications": host.fabric_biome_modifications(),
+            "fabric_builtin_packs": host.fabric_builtin_packs(),
+        }),
         "registrations": host
             .registrations()
             .iter()

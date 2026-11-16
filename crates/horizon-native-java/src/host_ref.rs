@@ -433,6 +433,8 @@ pub enum HostKind {
     FabricResourceLoader,
     /// Fabric biome modification phase singleton.
     FabricModificationPhase,
+    /// Fabric biome modification registration.
+    FabricBiomeModification,
     /// Fabric static Identifier initialized once by its owner.
     FabricStaticIdentifier,
     /// An object `new` (or a model) allocated: key `class#n`
@@ -2020,6 +2022,15 @@ const KINDS: &[KindInfo] = &[
         kind: HostKind::FabricModificationPhase,
         tag: "fmp",
         class: ClassRule::Fixed("net/fabricmc/fabric/api/biome/v1/ModificationPhase"),
+        canonical: always_canonical,
+        methods: &crate::host_fabric_runtime::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricBiomeModification,
+        tag: "fbm",
+        class: ClassRule::Unknown {
+            declared: |_| &["net/fabricmc/fabric/api/biome/v1/BiomeModification"],
+        },
         canonical: always_canonical,
         methods: &crate::host_fabric_runtime::OBJECT_METHODS,
     },
