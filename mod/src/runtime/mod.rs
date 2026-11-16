@@ -58,6 +58,7 @@ mod enum_value_of;
 pub mod events;
 mod executors;
 mod fabric_api_slice2;
+mod fabric_creative_tab;
 mod fabric_mods;
 mod fabric_registry;
 mod facade_saved_data;
@@ -6806,6 +6807,9 @@ impl Host for StdHost {
         }
         if let Some(value) = fabric_registry::static_call(r, args) {
             return value;
+        }
+        if let Some(value) = fabric_creative_tab::static_call(r, args) {
+            return Ok(value);
         }
         if let Some(value) = self.block_item_id_static(r, args) {
             return value;
