@@ -1150,11 +1150,11 @@ impl StdHost {
                 Some(Ok(marker(format!("enum/{INPUT_TYPE}/{name}"))))
             }
             (INPUT_CONSTANTS, "UNKNOWN")
-                if r.descriptor == "Lcom/mojang/blaze3d/platform/InputConstants$Key;" =>
+                if r.r.descriptor == "Lcom/mojang/blaze3d/platform/InputConstants$Key;" =>
             {
                 Some(Ok(marker(input_key_marker(false, 0))))
             }
-            (KEY_CATEGORY, name) if r.descriptor == format!("L{KEY_CATEGORY};") => Some(Ok(
+            (KEY_CATEGORY, name) if r.r.descriptor == format!("L{KEY_CATEGORY};") => Some(Ok(
                 marker(format!("{CATEGORY}minecraft:{}", name.to_ascii_lowercase())),
             )),
             (MINECRAFT_CLASS, name) => Some(Ok(match name {
@@ -1201,14 +1201,14 @@ impl StdHost {
             ("java/awt/Color", name) => awt_constant(name).map(Ok),
             // Item, block and effect constants answer in any static context: an
             // entrypoint reading `Items.DIAMOND` keeps the answer it always got.
-            ("net/minecraft/world/item/Items", name) if descriptor == "Lnet/minecraft/world/item/Item;" => Some(Ok(marker(format!(
+            ("net/minecraft/world/item/Items", name) if r.descriptor == "Lnet/minecraft/world/item/Item;" => Some(Ok(marker(format!(
                 "{}{}",
                 items::ITEM,
                 items::constant_id(name)
             )))),
             // The id 26.3 registers for the constant (`vanilla_blocks.rs`); a
             // constant 26.3 lacks is no block (#239's review B2).
-            ("net/minecraft/world/level/block/Blocks", name) if descriptor == "Lnet/minecraft/world/level/block/Block;" => {
+            ("net/minecraft/world/level/block/Blocks", name) if r.descriptor == "Lnet/minecraft/world/level/block/Block;" => {
                 crate::runtime::vanilla_blocks::field_id(name)
                     .map(|id| Ok(marker(format!("{}{id}", items::BLOCK))))
             }
@@ -1454,7 +1454,7 @@ impl StdHost {
         if (text == format!("enum/{INPUT_TYPE}/KEYBOARD")
             || text == format!("enum/{INPUT_TYPE}/MOUSE"))
             && matches!(r.name.as_str(), "name" | "toString")
-            && r.descriptor == "()Ljava/lang/String;"
+            && r.r.descriptor == "()Ljava/lang/String;"
         {
             return Some(Ok(Value::Ref(Some(
                 if text.ends_with("/MOUSE") {
@@ -1468,7 +1468,7 @@ impl StdHost {
         if (text == format!("enum/{INPUT_TYPE}/KEYBOARD")
             || text == format!("enum/{INPUT_TYPE}/MOUSE"))
             && r.name == "getOrCreate"
-            && r.descriptor == "(I)Lcom/mojang/blaze3d/platform/InputConstants$Key;"
+            && r.r.descriptor == "(I)Lcom/mojang/blaze3d/platform/InputConstants$Key;"
         {
             let code = int_arg(args, 0)?;
             return Some(Ok(marker(input_key_marker(text.ends_with("/MOUSE"), code))));
