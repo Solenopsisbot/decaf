@@ -6600,9 +6600,16 @@ impl Host for StdHost {
                 "registerBuiltinPack",
                 "(Lnet/minecraft/resources/Identifier;)Z",
             ) => {
-                let id = expect_string(Self::argument(r, args, 0)?).to_owned();
-                let fresh = !self.fabric_builtin_packs.contains(&id);
-                self.fabric_builtin_packs.push(id);
+                let id = expect_string(
+                    args.last()
+                        .ok_or_else(|| NativeError::UnknownHostCall(r.clone()))?,
+                )
+                .to_owned();
+                let fresh = !self.fabric_builtin_packs.contains(&id)
+                    && self.resource(&format!("resourcepacks/{id}")).is_some();
+                if fresh {
+                    self.fabric_builtin_packs.push(id);
+                }
                 return Ok(Value::Int(fresh as i32));
             }
             _ => {}
