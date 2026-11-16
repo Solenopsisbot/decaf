@@ -644,7 +644,10 @@ mod tests {
             for marker in keys.iter().step_by(13) {
                 assert_eq!(table.rank_of(marker), table.rank_of_linear(marker));
             }
-            assert_eq!(table.locations.len(), table.bins.iter().map(Vec::len).sum());
+            assert_eq!(
+                table.locations.len(),
+                table.bins.iter().map(Vec::len).sum::<usize>()
+            );
         }
     }
 
