@@ -14134,12 +14134,12 @@ fn property_unescape(text: &str) -> String {
         if escaped {
             if character == 'u' {
                 let digits: String = chars.by_ref().take(4).collect();
-                if digits.len() == 4 {
-                    if let Ok(code) = u16::from_str_radix(&digits, 16) {
-                        value.push(char::from_u32(code as u32).unwrap_or('\u{fffd}'));
-                        escaped = false;
-                        continue;
-                    }
+                if digits.len() == 4
+                    && let Ok(code) = u16::from_str_radix(&digits, 16)
+                {
+                    value.push(char::from_u32(code as u32).unwrap_or('\u{fffd}'));
+                    escaped = false;
+                    continue;
                 }
             }
             value.push(match character {
