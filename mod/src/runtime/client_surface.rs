@@ -1201,14 +1201,14 @@ impl StdHost {
             ("java/awt/Color", name) => awt_constant(name).map(Ok),
             // Item, block and effect constants answer in any static context: an
             // entrypoint reading `Items.DIAMOND` keeps the answer it always got.
-            ("net/minecraft/world/item/Items", name) => Some(Ok(marker(format!(
+            ("net/minecraft/world/item/Items", name) if descriptor == "Lnet/minecraft/world/item/Item;" => Some(Ok(marker(format!(
                 "{}{}",
                 items::ITEM,
                 items::constant_id(name)
             )))),
             // The id 26.3 registers for the constant (`vanilla_blocks.rs`); a
             // constant 26.3 lacks is no block (#239's review B2).
-            ("net/minecraft/world/level/block/Blocks", name) => {
+            ("net/minecraft/world/level/block/Blocks", name) if descriptor == "Lnet/minecraft/world/level/block/Block;" => {
                 crate::runtime::vanilla_blocks::field_id(name)
                     .map(|id| Ok(marker(format!("{}{id}", items::BLOCK))))
             }
