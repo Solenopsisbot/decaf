@@ -6672,16 +6672,20 @@ impl Host for StdHost {
             (
                 "net/fabricmc/fabric/api/biome/v1/BiomeModification",
                 "add" | "remove" | "replace",
-                _,
-            ) => {
-                if host_fabric_runtime::biome_modification_id(&Value::Host(match args.first() {
-                    Some(Value::Host(h)) => h.clone(),
-                    _ => return self.unknown_host_call(r),
-                }))
-                .is_some()
+                descriptor,
+            ) if descriptor
+                == "(Lnet/fabricmc/fabric/api/biome/v1/ModificationPhase;Ljava/util/function/Predicate;Ljava/util/function/Consumer;)Lnet/fabricmc/fabric/api/biome/v1/BiomeModification;"
+                || descriptor
+                    == "(Lnet/fabricmc/fabric/api/biome/v1/ModificationPhase;Ljava/util/function/Predicate;Ljava/util/function/BiConsumer;)Lnet/fabricmc/fabric/api/biome/v1/BiomeModification;" =>
+            {
+                let receiver = args
+                    .first()
+                    .ok_or_else(|| NativeError::UnknownHostCall(r.clone()))?;
+                if matches!(receiver, Value::Host(h) if host_fabric_runtime::biome_modification_id(receiver).is_some())
                 {
-                    return Ok(args.first().cloned().unwrap_or(Value::Ref(None)));
+                    return Ok(receiver.clone());
                 }
+                return self.unknown_host_call(r);
             }
             (
                 "net/fabricmc/fabric/api/resource/v1/ResourceLoader",
@@ -6689,12 +6693,9 @@ impl Host for StdHost {
                 descriptor,
             ) if descriptor.ends_with(")Z") => {
                 let id = expect_string(Self::argument(r, args, 0)?).to_owned();
-                let fresh = !self.fabric_builtin_packs.contains(&id)
-                    && self.resource(&format!("resourcepacks/{id}")).is_some();
-                if fresh {
-                    self.fabric_builtin_packs.push(id);
-                }
-                return Ok(Value::Int(fresh as i32));
+                let exists = self.resource(&format!("resourcepacks/{id}")).is_some();
+                self.fabric_builtin_packs.push(id);
+                return Ok(Value::Int(exists as i32));
             }
             _ => {}
         }

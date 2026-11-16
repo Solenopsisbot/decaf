@@ -2042,7 +2042,7 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: |_| &["net/fabricmc/fabric/api/biome/v1/BiomeModification"],
         },
-        canonical: always_canonical,
+        canonical: never_canonical,
         methods: &crate::host_fabric_runtime::OBJECT_METHODS,
     },
     KindInfo {
