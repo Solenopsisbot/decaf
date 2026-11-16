@@ -54,6 +54,10 @@ const MAXIMUM_CAPACITY: usize = 1 << 30;
 const TREEIFY_THRESHOLD: usize = 8;
 /// `HashMap.MIN_TREEIFY_CAPACITY`.
 const MIN_TREEIFY_CAPACITY: usize = 64;
+/// Small tables have short bins; maintaining a second index costs more than
+/// the original rank walk there. Keep the index for the collection sizes that
+/// made `rank_of` a measured hotspot.
+const MIN_RANK_INDEX_ENTRIES: usize = 128;
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
@@ -187,10 +191,13 @@ impl HashTable {
     pub(crate) fn rank_of(&self, marker: &str) -> Option<usize> {
         #[cfg(test)]
         RANK_OF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let rank = self
-            .locations
-            .get(marker)
-            .map(|location| self.bin_prefix(location.bin) + location.slot);
+        let rank = if self.len() < MIN_RANK_INDEX_ENTRIES {
+            self.rank_of_linear(marker)
+        } else {
+            self.locations
+                .get(marker)
+                .map(|location| self.bin_prefix(location.bin) + location.slot)
+        };
         #[cfg(debug_assertions)]
         debug_assert_eq!(rank, self.rank_of_linear(marker), "rank index for {marker}");
         rank
@@ -198,7 +205,6 @@ impl HashTable {
 
     /// The original implementation, retained as a debug/test oracle.  It is
     /// deliberately not used by the fast path in release builds.
-    #[cfg(any(debug_assertions, test))]
     fn rank_of_linear(&self, marker: &str) -> Option<usize> {
         let spread = (*self.index.get(marker)?)?;
         let bin = spread as u32 as usize & (self.bins.len() - 1);
@@ -406,7 +412,9 @@ impl HashTable {
             }
         }
         self.bins = bins;
-        self.rebuild_rank_index();
+        if self.len() >= MIN_RANK_INDEX_ENTRIES {
+            self.rebuild_rank_index();
+        }
         Ok(())
     }
 
@@ -475,8 +483,13 @@ impl HashTable {
                 key: key.clone(),
                 hash: spread,
             });
-            self.bin_add(bin, 1);
-            self.refresh_bin_locations(bin);
+            if self.len() >= MIN_RANK_INDEX_ENTRIES {
+                self.bin_add(bin, 1);
+                self.refresh_bin_locations(bin);
+            }
+            if self.len() == MIN_RANK_INDEX_ENTRIES {
+                self.rebuild_rank_index();
+            }
             if held >= TREEIFY_THRESHOLD {
                 self.treeify_bin()?;
             }
@@ -516,8 +529,13 @@ impl HashTable {
                     hash: spread,
                 },
             );
-            self.bin_add(bin, 1);
-            self.refresh_bin_locations(bin);
+            if self.len() >= MIN_RANK_INDEX_ENTRIES {
+                self.bin_add(bin, 1);
+                self.refresh_bin_locations(bin);
+            }
+            if self.len() == MIN_RANK_INDEX_ENTRIES {
+                self.rebuild_rank_index();
+            }
             if held >= TREEIFY_THRESHOLD - 1 {
                 self.treeify_bin()?;
             }
@@ -541,9 +559,11 @@ impl HashTable {
         let bin = spread as u32 as usize & (self.bins.len() - 1);
         if let Some(index) = self.bins[bin].iter().position(|n| n.marker == marker) {
             self.bins[bin].remove(index);
-            self.locations.remove(marker);
-            self.bin_add(bin, -1);
-            self.refresh_bin_locations(bin);
+            if self.len() >= MIN_RANK_INDEX_ENTRIES {
+                self.locations.remove(marker);
+                self.bin_add(bin, -1);
+                self.refresh_bin_locations(bin);
+            }
         }
     }
 
