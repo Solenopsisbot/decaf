@@ -3375,6 +3375,8 @@ pub struct StdHost {
     /// (`BlockBehaviour.Properties.of()`), which has no `new` site to name it.
     next_property_builder: usize,
     payload_registrations: Vec<PayloadRegistration>,
+    fabric_biome_modifications: Vec<String>,
+    fabric_builtin_packs: Vec<String>,
     /// Frames a mod asked the game to send: (channel, direction, bytes).
     outgoing_payloads: Vec<(String, String, Vec<u8>)>,
     /// Frames the game handed to a mod: (channel, bytes).
@@ -3652,6 +3654,8 @@ impl StdHost {
             block_property_builders: BTreeMap::new(),
             next_property_builder: 0,
             payload_registrations: Vec::new(),
+            fabric_biome_modifications: Vec::new(),
+            fabric_builtin_packs: Vec::new(),
             outgoing_payloads: Vec::new(),
             incoming_payloads: Vec::new(),
             payload_bytes: BTreeMap::new(),
@@ -4780,6 +4784,13 @@ impl StdHost {
 
     pub fn payload_registrations(&self) -> &[PayloadRegistration] {
         &self.payload_registrations
+    }
+
+    pub fn fabric_biome_modifications(&self) -> &[String] {
+        &self.fabric_biome_modifications
+    }
+    pub fn fabric_builtin_packs(&self) -> &[String] {
+        &self.fabric_builtin_packs
     }
 
     /// Counts every payload registration as an unknown host call, for an embedding with no
@@ -6551,6 +6562,51 @@ impl Host for StdHost {
             self.random_bit_scope = None;
         }
         self.record(r, None, args);
+        match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+            (
+                "net/fabricmc/fabric/api/biome/v1/BiomeModifications",
+                "create",
+                "(Lnet/minecraft/resources/Identifier;)Lnet/fabricmc/fabric/api/biome/v1/BiomeModification;",
+            ) => {
+                let id = Self::argument(r, args, 0)?;
+                let value = host_fabric_runtime::biome_modification(id)
+                    .ok_or_else(|| NativeError::UnknownHostCall(r.clone()))?;
+                if let Some(key) = host_fabric_runtime::biome_modification_id(&value) {
+                    if self.fabric_biome_modifications.contains(&key) {
+                        return Err(NativeError::Metadata(
+                            "duplicate biome modification identifier".into(),
+                        ));
+                    }
+                    self.fabric_biome_modifications.push(key);
+                }
+                return Ok(value);
+            }
+            (
+                "net/fabricmc/fabric/api/biome/v1/BiomeModification",
+                "add" | "remove" | "replace",
+                _,
+            ) => {
+                if host_fabric_runtime::biome_modification_id(&Value::Host(match args.first() {
+                    Some(Value::Host(h)) => h.clone(),
+                    _ => return self.unknown_host_call(r),
+                }))
+                .is_some()
+                {
+                    return Ok(args.first().cloned().unwrap_or(Value::Ref(None)));
+                }
+            }
+            (
+                "net/fabricmc/fabric/api/resource/v1/ResourceLoader",
+                "registerBuiltinPack",
+                "(Lnet/minecraft/resources/Identifier;)Z",
+            ) => {
+                let id = expect_string(Self::argument(r, args, 0)?).to_owned();
+                let fresh = !self.fabric_builtin_packs.contains(&id);
+                self.fabric_builtin_packs.push(id);
+                return Ok(Value::Int(fresh as i32));
+            }
+            _ => {}
+        }
         if let Some(result) = vanilla_values::static_call(self, r, args) {
             return result;
         }
