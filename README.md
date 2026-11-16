@@ -1,12 +1,16 @@
-# horizon-java
+# Decaf
 
-A bounded, JVM-free Java-mod runtime for Minecraft: Java Edition mod jars, extracted from
-[Horizon](https://github.com/Solenopsisbot/horizon).
+Java with the JVM taken out: a bounded, JVM-free runtime that runs Minecraft: Java Edition mod jars
+(Fabric, NeoForge, legacy Forge) inside [Sunrise](https://github.com/sunrise-org/sunrise), a Rust
+rewrite of Minecraft 26.3. It started as part of
+[Horizon](https://github.com/Solenopsisbot/horizon), which is why the crates, the native mod and its
+id still say `horizon` (see [Naming](#naming)).
 
-It is what is left when you strip Horizon's game code away: a Rust classfile interpreter, a
-Fabric/NeoForge/legacy-Forge metadata reader, a Mixin planner and classfile weaver, and an optional
-JNI reference runner that drives the real Fabric Loader / NeoForge FancyModLoader so measurements
-have an oracle.
+It is a Rust classfile interpreter, a Fabric/NeoForge/legacy-Forge metadata reader, a Mixin planner
+and classfile weaver, and an optional JNI reference runner that drives the real Fabric Loader /
+NeoForge FancyModLoader so measurements have an oracle. One rule runs through all of it: every
+answer a mod gets is exactly what Java 25, the real game or the real library gives, or the call is
+counted as unknown. Never a guess.
 
 ## What it is
 
@@ -175,3 +179,16 @@ explains where those point.
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+## Naming
+
+The project is called **Decaf** from 2026-11-17. The old name is still in identifiers that other
+code depends on, and those change in a later, separate step so open pull requests don't all
+conflict at once:
+
+| Still named | What it is |
+|---|---|
+| `crates/horizon-native-java`, `crates/horizon-jvm` | the two crates (package and directory names) |
+| `mod/` with id `horizon_java` | the native mod Sunrise loads |
+| `Solenopsisbot/horizon-java` | the repository (GitHub redirects the old URL once it is renamed) |
+
