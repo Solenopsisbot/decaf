@@ -37,3 +37,16 @@ fn every_captured_registry_field_is_answered_without_wrong_ids() {
     assert!(iw.is_empty(), "wrong registry ids: {iw:?}");
     assert_eq!((ig+bg+ic+bc), items.len()+blocks.len());
 }
+
+#[test]
+fn static_initializer_fixture_rows_preserve_counted_identity_boundary() {
+    let rows = include_str!("fixtures/cov15_clinit/java25.txt").lines().collect::<Vec<_>>();
+    assert_eq!(&rows[..2], ["minecraft:stone", "minecraft:stone"]);
+    assert_eq!(rows[2], "true");
+    // The Java identity row is true. The interpreter's Registry.getValue lookup
+    // is currently COUNTED, so its neutral result is deliberately not compared.
+    // Once that vanilla lookup is modelled, this becomes a byte-for-byte row.
+    let mut host = StdHost::new();
+    let registry = horizon_native_java::Host::get_static(&mut host, &MethodRef { owner: "net/minecraft/core/registries/BuiltInRegistries".into(), name: "ITEM".into(), descriptor: "Lnet/minecraft/core/Registry;".into() });
+    assert!(registry.is_ok());
+}
