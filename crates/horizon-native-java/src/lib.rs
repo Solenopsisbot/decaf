@@ -8261,6 +8261,17 @@ impl Host for StdHost {
             // is still an object of *some* class: the neutral `null` is a
             // guess, so it is counted, not answered silently.
             // A text `instanceof String` accepts is a `String` here too.
+            if let Value::Ref(Some(marker)) = receiver
+                && let Some(rest) = marker.strip_prefix("enum/")
+                && let Some((owner, name)) = rest.rsplit_once('/')
+            {
+                let class = if name == "A" && self.has_class(&format!("{owner}$1")) {
+                    format!("{owner}$1")
+                } else {
+                    owner.to_owned()
+                };
+                return Ok(host_class::class_value(&class));
+            }
             return match class_of_value(receiver) {
                 Some(class) => Ok(host_class::class_value(&class)),
                 None if expect_ref(receiver)
@@ -12239,7 +12250,9 @@ fn class_of_value(value: &Value) -> Option<String> {
         Value::Float(_) => Some("java/lang/Double".into()),
         Value::Boxed(boxed) => Some(boxed.class().into()),
         // `None` for a handle whose runtime class is not known: counted.
-        Value::Host(host) => host.class().map(Into::into),
+        Value::Host(host) => host.class().map(Into::into).or_else(|| {
+            (host.kind() == HostKind::JarObject).then(|| jar_object::class_of_key(host.key()).to_owned())
+        }),
         Value::Void => None,
         Value::Ref(None) => None,
         Value::Ref(Some(marker)) => class_of_text(marker),
