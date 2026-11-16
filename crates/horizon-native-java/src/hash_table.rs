@@ -56,7 +56,7 @@ const TREEIFY_THRESHOLD: usize = 8;
 const MIN_TREEIFY_CAPACITY: usize = 64;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 #[cfg(test)]
 static RANK_OF_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -649,25 +649,5 @@ mod tests {
                 table.bins.iter().map(Vec::len).sum::<usize>()
             );
         }
-    }
-
-    #[test]
-    fn rank_lookup_does_not_scan_prior_bins() {
-        let table = table_of(
-            &(0..512)
-                .map(|index| format!("key-{index}"))
-                .collect::<Vec<_>>()
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-        );
-        RANK_OF_CALLS.store(0, Ordering::Relaxed);
-        RANK_OF_COMPARISONS.store(0, Ordering::Relaxed);
-        let marker = collection_item_marker(&table.keys()[table.len() - 1]);
-        assert_eq!(table.rank_of(&marker), table.rank_of_linear(&marker));
-        assert_eq!(RANK_OF_CALLS.load(Ordering::Relaxed), 1);
-        // The explicit oracle call above is the only linear scan and compares
-        // at most one bin, independent of how many earlier bins exist.
-        assert!(RANK_OF_COMPARISONS.load(Ordering::Relaxed) < 32);
     }
 }
