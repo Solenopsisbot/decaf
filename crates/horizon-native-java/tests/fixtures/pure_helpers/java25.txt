@@ -1,0 +1,4 @@
+# Java 25 + log4j-api 2.26.0 Strings.isBlank oracle rows
+NBSP=false|false|false|false|true|true|true|true|true|false
+CharSequence-empty-StringBuilder=true
+CharSequence-empty-jar-implementation=true

@@ -203,6 +203,7 @@ mod sound_event;
 mod unmodifiable_sublist;
 pub use parked_threads::ParkedThread;
 mod priority_queue;
+mod pure_helpers;
 mod random_source;
 #[cfg(test)]
 #[path = "random_source_tests.rs"]
@@ -6306,6 +6307,9 @@ impl Host for StdHost {
         if let Some(value) = commons_lang::static_call(self, r, args) {
             return value;
         }
+        if let Some(value) = pure_helpers::static_call(self, r, args) {
+            return value;
+        }
         if let Some(value) = self.neoforge_loader_call(r, args) {
             return Ok(value);
         }
@@ -6334,6 +6338,9 @@ impl Host for StdHost {
             return result.map(|class| self.empty_collection_class(class));
         }
         if let Some(class) = guava_model::empty_factory_class(r) {
+            return Ok(self.empty_collection_class(class));
+        }
+        if let Some(class) = pure_helpers::empty_factory_class(r) {
             return Ok(self.empty_collection_class(class));
         }
         if let Some(value) = crate::host_log4j_level::static_call(r, args, &mut self.log4j_levels) {

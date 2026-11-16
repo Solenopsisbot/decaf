@@ -63,6 +63,11 @@ fn has(code_point: i32, flag: u32) -> bool {
     row(code_point).1 & flag != 0
 }
 
+/// Java 25 Character.isWhitespace(int), shared by library models.
+pub(crate) fn is_whitespace(code_point: i32) -> bool {
+    has(code_point, table::WHITESPACE)
+}
+
 /// `Character.getType(codePoint)`.
 pub(crate) fn get_type(code_point: i32) -> i32 {
     i32::from(general_type(code_point))
