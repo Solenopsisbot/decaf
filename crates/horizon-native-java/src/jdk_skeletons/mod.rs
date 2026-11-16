@@ -108,6 +108,7 @@ const ITERATOR: &str = "java/util/Iterator";
 /// Every supertype of each skeleton class: JDK 25.0.5's
 /// `getSuperclass()`/`getInterfaces()` closure, printed by reflection.
 const SUPERTYPES: &[(&str, &[&str])] = &[
+    ("java/lang/ThreadLocal", &["java/lang/Object"]),
     (
         ABSTRACT_COLLECTION,
         &["java/lang/Iterable", "java/lang/Object", COLLECTION],
@@ -317,6 +318,9 @@ impl<H: Host> Runtime<'_, H> {
         let Some(this) = receiver else {
             return Ok(None);
         };
+        if let Some(value) = crate::thread_local::call(self, r, receiver, args) {
+            return value.map(Some);
+        }
         if let Some(answer) = self.host_entry_equals(r, opcode, this, args)? {
             return Ok(Some(answer));
         }

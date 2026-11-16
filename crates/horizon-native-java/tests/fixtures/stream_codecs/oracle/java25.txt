@@ -1,2 +1,2 @@
-constructions=net.minecraft.network.codec.StreamCodec$7|true|true|net.minecraft.network.codec.StreamCodec$8|true|true|net.minecraft.network.codec.StreamCodec$2|true|true|net.minecraft.network.protocol.common.custom.CustomPacketPayload$1|true|true|true|false|true|false
+constructions=net.minecraft.network.codec.StreamCodec$7|true|true|net.minecraft.network.codec.StreamCodec$8|true|true|net.minecraft.network.codec.StreamCodec$2|true|true|net.minecraft.network.protocol.common.custom.CustomPacketPayload$1|true|true|net.minecraft.network.codec.StreamCodec$1|true|true|net.minecraft.network.codec.StreamCodec$4|true|true|true|false|true|false
 encodeDecode=java.lang.NullPointerException

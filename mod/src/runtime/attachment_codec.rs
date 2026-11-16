@@ -178,7 +178,7 @@ impl<H: Host> Runtime<'_, H> {
 
     /// A modelled `DataResult`: a heap object, so per-encode results are collected like any other
     /// object a jar allocates.
-    fn data_result(&mut self, kind: &str, value: Value) -> Value {
+    pub(crate) fn data_result(&mut self, kind: &str, value: Value) -> Value {
         let object = self.new_object(DATA_RESULT);
         if let Some(marker) = expect_ref(&object).cloned() {
             self.fields
@@ -190,7 +190,7 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `Ok(value)` for a modelled success, `Err(None)` for a modelled error, `Err(Some(why))` for
     /// anything else.
-    fn read_data_result(&self, result: &Value) -> Result<Value, Option<String>> {
+    pub(crate) fn read_data_result(&self, result: &Value) -> Result<Value, Option<String>> {
         let Some(marker) = expect_ref(result) else {
             return Err(Some("a codec lambda answered null".into()));
         };

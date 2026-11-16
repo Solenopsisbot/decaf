@@ -1752,6 +1752,7 @@ mod tests {
             "log4j_levels",
             // Registry ids the jar built (`registry_contents.rs`): names, no objects.
             "jar_registries",
+            "registry_lifecycles",
         ];
         let debug = format!("{:#?}", StdHost::new());
         let fields: BTreeSet<&str> = debug

@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, Nested};
-use crate::{Host, MethodRef, NativeError, Value};
+use crate::{Host, MethodRef, NativeError, Runtime, Value};
 
 const CODEC: &str = "com/mojang/serialization/Codec";
 const MAP_CODEC: &str = "com/mojang/serialization/MapCodec";
@@ -15,6 +15,7 @@ const PRIMITIVE: &str = "com/mojang/serialization/codecs/PrimitiveCodec";
 const RECORD_BUILDER: &str = "com/mojang/serialization/codecs/RecordCodecBuilder";
 const APP: &str = "com/mojang/datafixers/kinds/App";
 const OBJECT: &str = "java/lang/Object";
+const DATA_RESULT: &str = "com/mojang/serialization/DataResult";
 
 const MAX_FIELD_NAME_BYTES: usize = 256;
 const MAX_GRAPH_NODES: usize = 256;
@@ -28,6 +29,8 @@ const OPTIONAL: &str = "dfu-optional";
 const XMAP: &str = "dfu-xmap";
 const MAP_XMAP: &str = "dfu-map-xmap";
 const GETTER: &str = "dfu-builder-getter";
+const UNIT: &str = "dfu-unit";
+const UNIT_CODEC: &str = "dfu-unit-codec";
 
 const CODEC_TYPES: &[&str] = &[
     CODEC,
@@ -80,7 +83,7 @@ fn map_codec(value: &Value) -> bool {
     let Some(tag) = tag(value) else {
         return false;
     };
-    if matches!(tag.as_str(), FIELD | OPTIONAL | MAP_XMAP | GETTER) {
+    if matches!(tag.as_str(), FIELD | OPTIONAL | MAP_XMAP | GETTER | UNIT) {
         return tag != GETTER;
     }
     constant_info(value).is_some_and(|(declared, name)| declared == MAP_CODEC || name == "EMPTY")
@@ -90,7 +93,7 @@ fn codec_receiver(value: &Value) -> bool {
     let Some(tag) = tag(value) else {
         return false;
     };
-    matches!(tag.as_str(), CONSTANT | XMAP) && !map_codec(value)
+    matches!(tag.as_str(), CONSTANT | XMAP | UNIT_CODEC) && !map_codec(value)
 }
 
 fn map_receiver(value: &Value) -> bool {
@@ -235,6 +238,12 @@ fn text(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<String>, Nat
             }
             Ok(Some(text))
         }
+        UNIT | UNIT_CODEC => {
+            let Some(value) = values.get(2) else {
+                return Ok(None);
+            };
+            Ok(nested.text(value)?.map(|text| format!("Unit[{text}]")))
+        }
         XMAP | MAP_XMAP => {
             let Some(inner) = values.get(2) else {
                 return Ok(None);
@@ -269,7 +278,7 @@ pub(crate) fn dfu_codec_types(key: &str) -> &'static [&'static str] {
         .split(',')
         .nth(1)
         .and_then(|part| part.strip_prefix('r'));
-    if matches!(tag, FIELD | OPTIONAL | MAP_XMAP)
+    if matches!(tag, FIELD | OPTIONAL | MAP_XMAP | UNIT)
         || (tag == CONSTANT && declared == Some(MAP_CODEC))
     {
         MAP_TYPES
@@ -359,6 +368,170 @@ fn optional_parts(descriptor: &str, args: &[Value]) -> Option<(Value, Value)> {
     }
 }
 
+fn receiver_held_value(value: &Value) -> Option<Value> {
+    held_values(value)?.get(2).cloned()
+}
+
+fn unit_source(value: &Value) -> Option<Value> {
+    let tag = tag(value)?;
+    matches!(tag.as_str(), UNIT | UNIT_CODEC).then(|| receiver_held_value(value))?
+}
+
+fn unit_value<H: Host>(runtime: &mut Runtime<'_, H>, source: &Value) -> Result<Value, NativeError> {
+    if matches!(source, Value::Host(handle) if handle.kind() == HostKind::Callback) {
+        Ok(runtime
+            .invoke_callback(source, &[])?
+            .unwrap_or(Value::Ref(None)))
+    } else {
+        Ok(source.clone())
+    }
+}
+
+fn value_text<H: Host>(
+    _runtime: &mut Runtime<'_, H>,
+    value: &Value,
+) -> Result<Option<String>, NativeError> {
+    Ok(match value {
+        Value::Ref(Some(text)) => Some(text.clone()),
+        Value::Ref(None) => Some("null".to_owned()),
+        Value::Int(value) => Some(value.to_string()),
+        Value::Long(value) => Some(value.to_string()),
+        Value::Float(value) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+fn runtime_text<H: Host>(
+    runtime: &mut Runtime<'_, H>,
+    value: &Value,
+) -> Result<Option<String>, NativeError> {
+    let Some(handle) = (match value {
+        Value::Host(handle) if handle.kind() == HostKind::DfuCodec => Some(handle),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let values = handle.held();
+    let Some(Value::Ref(Some(kind))) = values.first() else {
+        return Ok(None);
+    };
+    match kind.as_str() {
+        UNIT | UNIT_CODEC => {
+            let Some(source) = values.get(2) else {
+                return Ok(None);
+            };
+            let value = unit_value(runtime, source)?;
+            Ok(value_text(runtime, &value)?.map(|text| format!("Unit[{text}]")))
+        }
+        FIELD | OPTIONAL => {
+            let (Some(inner), Some(Value::Ref(Some(name)))) = (values.get(2), values.get(3)) else {
+                return Ok(None);
+            };
+            let Some(inner) = runtime_text(runtime, inner)? else {
+                return Ok(None);
+            };
+            let mut text = if kind == FIELD {
+                format!("Field[{name}: {inner}]")
+            } else {
+                format!("OptionalFieldCodec[{name}: {inner}]")
+            };
+            if kind == OPTIONAL {
+                if !matches!(values.get(6), Some(Value::Void) | None) {
+                    text.push_str("[flatXmapped]");
+                } else if !matches!(values.get(5), Some(Value::Void) | None) {
+                    text.push_str("[xmapped]");
+                }
+            }
+            Ok(Some(text))
+        }
+        XMAP | MAP_XMAP => {
+            let Some(inner) = values.get(2) else {
+                return Ok(None);
+            };
+            Ok(runtime_text(runtime, inner)?.map(|text| format!("{text}[xmapped]")))
+        }
+        CONSTANT => {
+            let Some(Value::Ref(Some(name))) = values.get(3) else {
+                return Ok(None);
+            };
+            Ok(primitive_text(name).map(str::to_owned))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Runtime-dependent members of the unit MapCodec nodes. Construction stays in [`invoke`]
+/// because it only needs the host's per-jar budget; execution needs the callback/runtime.
+pub(crate) fn runtime_instance_call<H: Host>(
+    runtime: &mut Runtime<'_, H>,
+    r: &MethodRef,
+    receiver: Option<&Value>,
+    args: &[Value],
+) -> Result<Option<Value>, NativeError> {
+    if r.owner == DATA_RESULT && r.name == "result" && r.descriptor == "()Ljava/util/Optional;" {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        return Ok(Some(match runtime.read_data_result(receiver) {
+            Ok(Value::Ref(None)) => crate::empty_optional(),
+            Ok(value) => crate::optional_wrap(value),
+            Err(_) => crate::empty_optional(),
+        }));
+    }
+    if r.owner == DATA_RESULT && r.name == "isSuccess" && r.descriptor == "()Z" {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        return Ok(Some(Value::Int(
+            runtime.read_data_result(receiver).is_ok() as i32
+        )));
+    }
+    let Some(receiver) = receiver else {
+        return Ok(None);
+    };
+    if r.name == "toString" && r.descriptor == "()Ljava/lang/String;" {
+        return Ok(runtime_text(runtime, receiver)?.map(|text| Value::Ref(Some(text))));
+    }
+    let Some(source) = unit_source(receiver) else {
+        return Ok(None);
+    };
+    let tag = tag(receiver).unwrap_or_default();
+    match (r.name.as_str(), r.descriptor.as_str()) {
+        ("keys", "(Lcom/mojang/serialization/DynamicOps;)Ljava/util/stream/Stream;")
+            if tag == UNIT =>
+        {
+            Ok(Some(runtime.new_stream(
+                "java/util/stream/Stream",
+                "empty",
+                Vec::new(),
+            )))
+        }
+        (
+            "decode",
+            "(Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/MapLike;)Lcom/mojang/serialization/DataResult;",
+        ) if tag == UNIT => {
+            let value = unit_value(runtime, &source)?;
+            if matches!(value, Value::Ref(None)) {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: None,
+                    frame: None,
+                });
+            }
+            Ok(Some(runtime.data_result("success", value)))
+        }
+        (
+            "encode",
+            "(Ljava/lang/Object;Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/RecordBuilder;)Lcom/mojang/serialization/RecordBuilder;",
+        ) if tag == UNIT => Ok(Some(args.get(2).cloned().unwrap_or(Value::Ref(None)))),
+        ("toString", "()Ljava/lang/String;") => {
+            let value = unit_value(runtime, &source)?;
+            Ok(value_text(runtime, &value)?.map(|text| Value::Ref(Some(format!("Unit[{text}]")))))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn invoke(
     host: &mut dyn Host,
     r: &MethodRef,
@@ -366,6 +539,12 @@ pub(crate) fn invoke(
     args: &[Value],
 ) -> Option<Value> {
     match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+        (MAP_CODEC, "unit", "(Ljava/lang/Object;)Lcom/mojang/serialization/MapCodec;")
+        | (
+            MAP_CODEC,
+            "unit",
+            "(Ljava/util/function/Supplier;)Lcom/mojang/serialization/MapCodec;",
+        ) => build(host, r, UNIT, vec![args.first().cloned()?]),
         (
             CODEC | PRIMITIVE,
             "fieldOf",
@@ -420,6 +599,11 @@ pub(crate) fn invoke(
             let inner = receiver.filter(|value| map_receiver(value))?.clone();
             let getter = args.first().filter(|value| is_callback(value))?.clone();
             build(host, r, GETTER, vec![inner, getter])
+        }
+        (MAP_CODEC, "codec", "()Lcom/mojang/serialization/Codec;") => {
+            let receiver = receiver.filter(|value| map_receiver(value))?;
+            (tag(receiver).as_deref() == Some(UNIT))
+                .then(|| build(host, r, UNIT_CODEC, vec![receiver_held_value(receiver)?]))?
         }
         (
             CODEC | PRIMITIVE | MAP_CODEC,
