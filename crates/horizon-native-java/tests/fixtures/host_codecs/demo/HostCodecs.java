@@ -5,6 +5,8 @@ import com.mojang.datafixers.util.Pair;
 import com.mojang.datafixers.util.Either;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.Lifecycle;
+import com.mojang.serialization.MapCodec;
+import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.codec.ByteBufCodecs;
 import java.util.*;
 
@@ -184,9 +186,100 @@ public final class HostCodecs {
     return Integer.toString(calls);
   }
 
+  /** MapCodec.unit is fresh per call, while its structural text is deterministic. */
+  public static String mapUnitIdentity() {
+    MapCodec<String> a = MapCodec.unit("alpha");
+    MapCodec<String> b = MapCodec.unit("alpha");
+    return Boolean.toString(a == b);
+  }
+
+  public static String mapUnitText() {
+    MapCodec<String> a = MapCodec.unit("alpha");
+    return a + "|" + a.codec();
+  }
+
+  public static String mapUnitCodecIdentity() {
+    MapCodec<String> a = MapCodec.unit("alpha");
+    Object first = a.codec();
+    Object second = a.codec();
+    return Boolean.toString(first == second);
+  }
+
+  /** MapCodec.unit's empty keys, prefix-preserving encode, supplier-per-decode, and text. */
+  public static String mapUnitExecution() {
+    final int[] calls = {0};
+    java.util.function.Supplier<String> supplier = () -> "sup" + (++calls[0]);
+    MapCodec<String> map = MapCodec.unit(supplier);
+    long keys = map.keys(null).count();
+    String first = map.decode(null, null).result().orElseThrow();
+    String second = map.decode(null, null).result().orElseThrow();
+    com.mojang.serialization.RecordBuilder<Object> prefix = null;
+    boolean samePrefix = map.encode("ignored", null, prefix) == prefix;
+    String mapText = map.toString();
+    String codecText = map.codec().toString();
+    String fieldText = map.codec().fieldOf("x").toString();
+    return first + "|" + second + "|" + calls[0] + "|" + keys + "|" + samePrefix + "|"
+        + mapText + "|" + codecText + "|" + fieldText;
+  }
+
+  public static String mapUnitNull() {
+    MapCodec<String> map = MapCodec.unit((String) null);
+    com.mojang.serialization.RecordBuilder<Object> prefix = null;
+    String decoded;
+    try { decoded = Boolean.toString(map.decode(null, null).result().isPresent()); }
+    catch (Throwable x) { decoded = x.getClass().getName() + "|" + x.getMessage(); }
+    return map + "|" + decoded + "|" + (map.encode(null, null, prefix) == prefix);
+  }
+
+  /** StreamCodec.unit retains the value and enforces it on encode. */
+  public static String streamUnitIdentity() {
+    StreamCodec<Object, String> a = StreamCodec.unit("alpha");
+    StreamCodec<Object, String> b = StreamCodec.unit("alpha");
+    return Boolean.toString(a == b);
+  }
+
+  public static String streamUnitRoundTrip() {
+    StreamCodec<Object, String> a = StreamCodec.unit("alpha");
+    String decoded = a.decode(null);
+    boolean accepted;
+    try { a.encode(null, "alpha"); accepted = true; } catch (Throwable x) { accepted = false; }
+    String rejected;
+    try { a.encode(null, "beta"); rejected = "none"; }
+    catch (Throwable x) { rejected = x.getClass().getName() + "|" + x.getMessage(); }
+    return decoded + "|" + accepted + "|" + rejected;
+  }
+
+  public static String streamUnitNull() {
+    StreamCodec<Object, String> codec = StreamCodec.unit(null);
+    String decoded = String.valueOf(codec.decode(null));
+    try {
+      codec.encode(null, null);
+      return decoded + "|accepted";
+    } catch (Throwable x) {
+      return decoded + "|" + x.getClass().getName() + "|" + x.getMessage();
+    }
+  }
+
+  static final class Eq {
+    final int value;
+    Eq(int value) { this.value = value; }
+    @Override public boolean equals(Object other) { return other instanceof Eq x && x.value == value; }
+    @Override public String toString() { return "Eq" + value; }
+  }
+
+  public static String streamUnitCustomEquals() {
+    StreamCodec<Object, Eq> codec = StreamCodec.unit(new Eq(7));
+    boolean equalAccepted;
+    try { codec.encode(null, new Eq(7)); equalAccepted = true; } catch (Throwable x) { equalAccepted = false; }
+    boolean unequalRejected;
+    try { codec.encode(null, new Eq(8)); unequalRejected = false; }
+    catch (IllegalStateException x) { unequalRejected = true; }
+    return codec.decode(null).toString() + "|" + equalAccepted + "|" + unequalRejected;
+  }
+
   /** A network StreamCodec is not a DFU Codec and must be refused before dispatch. */
   public static String forgedDfuReceiver() {
-    Object forged = ByteBufCodecs.INT;
+    Object forged = StreamCodec.unit(1);
     if (!(forged instanceof Codec)) return "true";
     try {
       ((Codec<Object>) forged).xmap(x -> x, x -> x);
@@ -204,8 +297,8 @@ public final class HostCodecs {
   }
   /** A real game StreamCodec constant is rejected by every DFU receiver family. */
   public static String forgedDfuReceivers() {
-    Object stream = ByteBufCodecs.INT;
-    Object game = ByteBufCodecs.VAR_INT;
+    Object stream = StreamCodec.unit(1);
+    Object game = StreamCodec.unit(2);
     return "" + rejectedCodec(stream) + rejectedCodec(game) + rejectedOptional(stream) + rejectedOptional(game)
         + rejectedXmap(stream) + rejectedXmap(game) + rejectedGetter(stream) + rejectedGetter(game);
   }

@@ -279,6 +279,8 @@ pub enum HostKind {
     Holder,
     /// A `Holder.Reference` returned by a jar-owned `Registry.registerForHolder`: key the registry key, id and value.
     RegistryHolder,
+    /// A `Holder.Direct` returned by `Holder.direct`: key the held value and component map.
+    DirectHolder,
     /// The value a holder's registration registered: key the serial.
     Registered,
     /// A Fabric `FabricRegistryBuilder`: key the [`HostRef::of_values`] of
@@ -462,6 +464,8 @@ pub enum HostKind {
     OpaqueCodec,
     /// A pure network StreamCodec factory result.
     StreamCodec,
+    /// A synchronous java.lang.ThreadLocal holder.
+    ThreadLocal,
     /// An explicitly seeded Minecraft RandomSource or positional factory.
     RandomSource,
     /// A codec the attachment model builds: key `compound-tag` or
@@ -1381,6 +1385,13 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::runtime::host_registry_holder::METHODS,
     },
     KindInfo {
+        kind: HostKind::DirectHolder,
+        tag: "dhold",
+        class: ClassRule::Fixed("net/minecraft/core/Holder$Direct"),
+        canonical: never_canonical,
+        methods: &crate::runtime::host_registry_holder::DIRECT_METHODS,
+    },
+    KindInfo {
         kind: HostKind::Registered,
         tag: "rgd",
         class: ClassRule::Unknown {
@@ -2108,6 +2119,14 @@ const KINDS: &[KindInfo] = &[
         // Every factory call allocates a new implementation object.
         canonical: always_canonical,
         methods: &crate::runtime::stream_codec::STREAM_CODEC_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::ThreadLocal,
+        tag: "thrl",
+        class: ClassRule::FromKey(crate::runtime::thread_local::class_of_key),
+        // A withInitial call allocates the JDK private SuppliedThreadLocal object.
+        canonical: always_canonical,
+        methods: &crate::runtime::thread_local::THREAD_LOCAL_METHODS,
     },
     KindInfo {
         kind: HostKind::RandomSource,

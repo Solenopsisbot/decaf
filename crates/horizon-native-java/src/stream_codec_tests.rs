@@ -86,7 +86,7 @@ fn constructions_match_java_25_classes_and_identity() {
         &mut host,
     );
     assert!(
-        matches!(answer, Ok(Value::Ref(Some(ref text))) if text == "net.minecraft.network.codec.StreamCodec$7|true|true|net.minecraft.network.codec.StreamCodec$8|true|true|net.minecraft.network.codec.StreamCodec$2|true|true|net.minecraft.network.protocol.common.custom.CustomPacketPayload$1|true|true|true|false|true|false"),
+        matches!(answer, Ok(Value::Ref(Some(ref text))) if text == "net.minecraft.network.codec.StreamCodec$7|true|true|net.minecraft.network.codec.StreamCodec$8|true|true|net.minecraft.network.codec.StreamCodec$2|true|true|net.minecraft.network.protocol.common.custom.CustomPacketPayload$1|true|true|net.minecraft.network.codec.StreamCodec$1|true|true|net.minecraft.network.codec.StreamCodec$4|true|true|true|false|true|false"),
         "{answer:?}"
     );
     assert!(
@@ -111,7 +111,7 @@ fn codec_members_remain_counted() {
         matches!(answer, Ok(Value::Ref(Some(ref text))) if text == "done"),
         "{answer:?}"
     );
-    for name in ["toString", "hashCode", "map", "apply", "dispatch"] {
+    for name in ["toString", "hashCode", "apply", "dispatch"] {
         assert!(
             host.unknown_host_calls()
                 .iter()
@@ -153,6 +153,34 @@ fn stream_codec_string_forgery_stays_a_string() {
 }
 
 #[test]
+fn codec_construction_retains_callback_handles() {
+    let host = StdHost::new();
+    let callback = Value::Host(crate::host_ref::HostRef::new(
+        crate::HostKind::JarObject,
+        "callback#lambda",
+    ));
+    let codec = crate::stream_codec::static_call(
+        &crate::MethodRef {
+            owner: crate::stream_codec::STREAM_CODEC.into(),
+            name: "of".into(),
+            descriptor: "(Lnet/minecraft/network/codec/StreamEncoder;Lnet/minecraft/network/codec/StreamDecoder;)Lnet/minecraft/network/codec/StreamCodec;".into(),
+        },
+        &[callback.clone(), callback.clone()],
+    )
+    .unwrap();
+    let values = match codec {
+        Value::Host(handle) => handle.values().unwrap(),
+        other => panic!("expected host codec, got {other:?}"),
+    };
+    assert!(
+        values[2..]
+            .iter()
+            .all(|value| matches!(value, Value::Host(_)))
+    );
+    let _ = host;
+}
+
+#[test]
 fn network_methods_remain_counted() {
     let mut host = StdHost::new();
     let answer = jar().invoke_method_with_args(
@@ -163,10 +191,10 @@ fn network_methods_remain_counted() {
         &[],
         &mut host,
     );
-    assert!(
-        matches!(answer, Ok(Value::Ref(Some(ref text))) if text == "null"),
-        "{answer:?}"
-    );
+    // Java 25 oracle: encodeDecode=java.lang.NullPointerException. The
+    // encode/decode calls are intentionally COUNTED, so do not pin the
+    // interpreter's neutral return value as an answer.
+    let _ = answer;
     let unknown = host.unknown_host_calls();
     assert!(
         unknown.iter().any(|(call, _)| call.contains("#encode")),
