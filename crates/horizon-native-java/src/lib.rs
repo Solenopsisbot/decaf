@@ -6618,6 +6618,22 @@ impl Host for StdHost {
         if let Some(value) = jdk_character::static_call(r, args) {
             return value;
         }
+        // `Collections.reverse(List)` swaps the list in place.  The host
+        // collection table already owns the logical elements (including the
+        // supported list views), so reversing that model is the exact JDK
+        // result for every collection we can otherwise traverse.
+        if r.owner == "java/util/Collections"
+            && r.name == "reverse"
+            && r.descriptor == "(Ljava/util/List;)V"
+        {
+            let list = Self::argument(r, args, 0)?.clone();
+            let mut values = self
+                .mutable_collection_values(&list)
+                .ok_or_else(|| NativeError::UnknownHostCall(r.clone()))?;
+            values.reverse();
+            self.replace_mutable_collection(&list, values);
+            return Ok(Value::Void);
+        }
         // Gson's numeric edge cases are compared by raw IEEE bits in the
         // fixture. Keep the signed zero and NaN payload exactly as Java does.
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
