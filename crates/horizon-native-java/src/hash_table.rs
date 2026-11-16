@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn indexed_rank_matches_the_linear_oracle_through_mutations() {
         let mut table = HashTable::new(None, 0.75);
-        let mut keys = Vec::new();
+        let mut keys: Vec<String> = Vec::new();
         let mut state = 0x9e37_79b9_u32;
 
         // This deterministic sequence exercises colliding bins, head and tail
