@@ -1,0 +1,5 @@
+Java 25.0.5+8, 26.3 server game jar SHA-256 captured separately.
+CP=minecraft-26.3-server-game.jar plus all jars under ~/ava (libraries)
+javac -cp minecraft-26.3-server-game.jar -d scratch/cov15 scratch/cov15/Count.java
+java -cp "$CP:scratch/cov15" Count
+Public static Item fields: 1218. Public static Block fields: 878.
