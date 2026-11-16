@@ -1,0 +1,2 @@
+# Command: . ~/ava/env.sh; root=$HOME/ava/scratch/vanilla-values/oracle; out=$HOME/ava/scratch/host-registries-oracle; CP=$HOME/ava/scratch/codex-vanilla-registry-holders-server-game.jar:$HOME/ava/scratch/codex-vanilla-registry-holders-server.jar:$(find $root/libraries -type f -name "*.jar" -print | paste -sd: -); javac --release 21 -cp "$CP" -d "$out/classes" crates/horizon-native-java/tests/fixtures/host_registries/Probe.java; java -cp "$CP:$out/classes" demo.Probe
+registryText=Registry[ResourceKey[minecraft:root / minecraft:item] (Stable)]

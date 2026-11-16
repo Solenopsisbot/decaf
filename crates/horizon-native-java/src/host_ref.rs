@@ -279,6 +279,8 @@ pub enum HostKind {
     Holder,
     /// A `Holder.Reference` returned by a jar-owned `Registry.registerForHolder`: key the registry key, id and value.
     RegistryHolder,
+    /// A `Holder.Direct` returned by `Holder.direct`: key the held value and component map.
+    DirectHolder,
     /// The value a holder's registration registered: key the serial.
     Registered,
     /// A Fabric `FabricRegistryBuilder`: key the [`HostRef::of_values`] of
@@ -1381,6 +1383,13 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("net/minecraft/core/Holder$Reference"),
         canonical: always_canonical,
         methods: &crate::host_registry_holder::METHODS,
+    },
+    KindInfo {
+        kind: HostKind::DirectHolder,
+        tag: "dhold",
+        class: ClassRule::Fixed("net/minecraft/core/Holder$Direct"),
+        canonical: never_canonical,
+        methods: &crate::host_registry_holder::DIRECT_METHODS,
     },
     KindInfo {
         kind: HostKind::Registered,

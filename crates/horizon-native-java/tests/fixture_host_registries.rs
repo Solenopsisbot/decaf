@@ -28,10 +28,18 @@ types=defaulted:minecraft:itemtruefalsefalsefalse,key:minecraft:itemfalsefalsetr
 holderIdentity=false\n\
 holderHash=1053036435\n\
 registryHash=404222443\n\
-registryText=Registry[ResourceKey[minecraft:root / minecraft:item] (Stable)]\n\
 registryClass=class net.minecraft.core.DefaultedMappedRegistry\n\
 stringCast=CCE\n\
 ";
+
+const REGISTRY_TEXT_ORACLE: &str = include_str!("fixtures/host_registries/java25.txt");
+
+fn captured_registry_text() -> &'static str {
+    REGISTRY_TEXT_ORACLE
+        .lines()
+        .find_map(|line| line.strip_prefix("registryText="))
+        .expect("captured registryText row")
+}
 
 const IDENTIFIER_STUB: &str = r#"package net.minecraft.resources;
 
@@ -64,6 +72,7 @@ public final class Registries {
 const BUILT_IN_REGISTRIES_STUB: &str = r#"package net.minecraft.core.registries;
 
 import net.minecraft.core.DefaultedRegistry;
+import net.minecraft.core.RegistrationInfo;
 
 public final class BuiltInRegistries {
     public static final DefaultedRegistry<?> ITEM = null;
@@ -75,6 +84,20 @@ const REGISTRY_STUB: &str = r#"package net.minecraft.core;
 
 public interface Registry<T> extends Iterable<T> {
     net.minecraft.resources.ResourceKey<?> key();
+    Holder.Reference<T> register(net.minecraft.resources.ResourceKey<T> key, T value, RegistrationInfo info);
+}
+"#;
+
+const REGISTRATION_INFO_STUB: &str = r#"package net.minecraft.core;
+public final class RegistrationInfo {
+    public static RegistrationInfo experimental() { return null; }
+}
+"#;
+
+const LIFECYCLE_STUB: &str = r#"package com.mojang.serialization;
+public final class Lifecycle {
+    public static Lifecycle stable() { return null; }
+    public static Lifecycle experimental() { return null; }
 }
 "#;
 
@@ -91,6 +114,7 @@ public interface WritableRegistry<T> extends Registry<T> {}
 const HOLDER_STUB: &str = r#"package net.minecraft.core;
 
 public interface Holder<T> {
+    interface Reference<T> extends Holder<T> {}
     java.util.Optional<net.minecraft.resources.ResourceKey<T>> unwrapKey();
 }
 "#;
@@ -121,6 +145,7 @@ const PROBE: &str = r##"package demo;
 import java.util.*;
 import java.util.function.Supplier;
 import net.minecraft.core.DefaultedRegistry;
+import net.minecraft.core.RegistrationInfo;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.WritableRegistry;
@@ -265,6 +290,13 @@ public final class Probe {
         return text == null ? "null" : text;
     }
 
+    public static String registryExperimentalText() {
+        Registry item = BuiltInRegistries.ITEM;
+        item.register(ResourceKey.create(Registries.ITEM, Identifier.parse("demo:experimental")), "value", RegistrationInfo.experimental());
+        String text = item.toString();
+        return text == null ? "counted" : text;
+    }
+
     /** A registry's class is an implementation (`DefaultedMappedRegistry` here). */
     public static String registryClass() {
         Object c = BuiltInRegistries.ITEM.getClass();
@@ -296,6 +328,11 @@ fn fixture(test: &str) -> javac_fixture::Fixture {
                 BUILT_IN_REGISTRIES_STUB,
             ),
             ("net/minecraft/core/Registry.java", REGISTRY_STUB),
+            (
+                "net/minecraft/core/RegistrationInfo.java",
+                REGISTRATION_INFO_STUB,
+            ),
+            ("com/mojang/serialization/Lifecycle.java", LIFECYCLE_STUB),
             (
                 "net/minecraft/core/DefaultedRegistry.java",
                 DEFAULTED_REGISTRY_STUB,
@@ -405,10 +442,24 @@ fn a_string_spelled_like_an_old_marker_is_not_a_registry_or_holder() {
 #[test]
 fn what_only_a_jvm_knows_is_counted() {
     let fixture = fixture("host-registries-counted");
+    let (stable_text, stable_unknown) = run(&fixture, "registryText");
+    assert_eq!(stable_text, captured_registry_text());
+    assert!(
+        stable_unknown
+            .iter()
+            .all(|(call, _)| !call.ends_with("#toString()Ljava/lang/String;")),
+        "{stable_unknown:?}"
+    );
+    let (_, experimental_unknown) = run(&fixture, "registryExperimentalText");
+    assert!(
+        experimental_unknown
+            .iter()
+            .any(|(call, _)| call.ends_with("#toString()Ljava/lang/String;")),
+        "{experimental_unknown:?}"
+    );
     for (method, call) in [
         ("holderHash", "#hashCode()I"),
         ("registryHash", "#hashCode()I"),
-        ("registryText", "#toString()Ljava/lang/String;"),
         ("registryClass", "#getClass()Ljava/lang/Class;"),
         (
             "stringCast",
