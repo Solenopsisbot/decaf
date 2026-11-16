@@ -153,6 +153,21 @@ pub(crate) fn construct(
     args: &[Value],
 ) {
     let Some(k) = key(receiver) else { return };
+    if matches!(class, "org/joml/Quaternionf")
+        && (args.len() != 4 || args.iter().any(|v| f(v).is_none()))
+    {
+        return;
+    }
+    if matches!(class, "org/joml/Vector3f")
+        && (args.len() != 3 || args.iter().any(|v| f(v).is_none()))
+    {
+        return;
+    }
+    if matches!(class, "org/joml/Vector4f")
+        && (args.len() != 4 || args.iter().any(|v| f(v).is_none()))
+    {
+        return;
+    }
     let o = match class {
         "com/mojang/blaze3d/vertex/PoseStack" => {
             let pk = format!("{k}/pose/0");

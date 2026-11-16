@@ -523,7 +523,10 @@ pub(crate) fn runtime_instance_call<H: Host>(
         (
             "encode",
             "(Ljava/lang/Object;Lcom/mojang/serialization/DynamicOps;Lcom/mojang/serialization/RecordBuilder;)Lcom/mojang/serialization/RecordBuilder;",
-        ) if tag == UNIT => Ok(Some(args.get(2).cloned().unwrap_or(Value::Ref(None)))),
+        ) if tag == UNIT => match args.get(2) {
+            Some(value) => Ok(Some(value.clone())),
+            None => Ok(None),
+        },
         ("toString", "()Ljava/lang/String;") => {
             let value = unit_value(runtime, &source)?;
             Ok(value_text(runtime, &value)?.map(|text| Value::Ref(Some(format!("Unit[{text}]")))))

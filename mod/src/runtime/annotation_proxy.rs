@@ -308,7 +308,7 @@ impl<H: Host> Runtime<'_, H> {
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("equals", "(Ljava/lang/Object;)Z") => {
                 let Some(other) = args.first() else {
-                    return Ok(Some(Value::Int(0)));
+                    return self.host.unknown_operand_call(r).map(Some);
                 };
                 match other {
                     Value::Ref(None) => Ok(Some(Value::Int(0))),

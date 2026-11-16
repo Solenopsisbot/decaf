@@ -77,7 +77,13 @@ fn invoke_latch<H: Host>(
     };
     let key = state_key(&marker, LATCH_COUNT);
     if (r.name.as_str(), r.descriptor.as_str()) == ("<init>", "(I)V") {
-        let count = expect_int(r, args.first().unwrap_or(&Value::Int(0)))?;
+        let count = expect_int(
+            r,
+            match args.first() {
+                Some(v) => v,
+                None => return Ok(None),
+            },
+        )?;
         if count < 0 {
             return Err(illegal_argument("count < 0"));
         }
@@ -99,7 +105,13 @@ fn invoke_latch<H: Host>(
         }
         ("await", "()V") if count == 0 => Value::Void,
         ("await", "(JLjava/util/concurrent/TimeUnit;)Z") => {
-            let timeout = expect_long(r, args.first().unwrap_or(&Value::Long(0)))?;
+            let timeout = expect_long(
+                r,
+                match args.first() {
+                    Some(v) => v,
+                    None => return Ok(None),
+                },
+            )?;
             let Some(nanos) = to_nanos(args.get(1), timeout)? else {
                 return Ok(None);
             };
@@ -145,7 +157,13 @@ fn invoke_pool<H: Host>(
     };
     let value = match (r.name.as_str(), r.descriptor.as_str()) {
         ("allowCoreThreadTimeOut", "(Z)V") => {
-            let allow = expect_int(r, args.first().unwrap_or(&Value::Int(0)))? != 0;
+            let allow = expect_int(
+                r,
+                match args.first() {
+                    Some(v) => v,
+                    None => return Ok(None),
+                },
+            )? != 0;
             if allow && keep_alive <= 0 {
                 return Err(illegal_argument(
                     "Core threads must have nonzero keep alive times",
@@ -184,9 +202,27 @@ fn construct_pool(r: &MethodRef, args: &[Value]) -> Result<Option<i64>, NativeEr
         ) => &["threadFactory", "handler"],
         _ => return Ok(None),
     };
-    let core = expect_int(r, args.first().unwrap_or(&Value::Int(0)))?;
-    let maximum = expect_int(r, args.get(1).unwrap_or(&Value::Int(0)))?;
-    let keep_alive = expect_long(r, args.get(2).unwrap_or(&Value::Long(0)))?;
+    let core = expect_int(
+        r,
+        match args.first() {
+            Some(v) => v,
+            None => return Ok(None),
+        },
+    )?;
+    let maximum = expect_int(
+        r,
+        match args.get(1) {
+            Some(v) => v,
+            None => return Ok(None),
+        },
+    )?;
+    let keep_alive = expect_long(
+        r,
+        match args.get(2) {
+            Some(v) => v,
+            None => return Ok(None),
+        },
+    )?;
     if core < 0 {
         return Err(illegal_argument("corePoolSize must be non-negative"));
     } else if maximum <= 0 {

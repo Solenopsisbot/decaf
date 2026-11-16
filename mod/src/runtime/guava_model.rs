@@ -1900,7 +1900,7 @@ impl<H: Host> Runtime<'_, H> {
             ("wrap", "()Lcom/google/common/reflect/TypeToken;") => {
                 match class.and_then(boxed_class) {
                     Some(boxed) => Self::token_value(&crate::runtime::host_class::class_value(boxed)),
-                    None => receiver.cloned().unwrap_or(Value::Ref(None)),
+                    None => return self.host.unknown_operand_call(r).map(Some),
                 }
             }
             ("unwrap", "()Lcom/google/common/reflect/TypeToken;") => {
@@ -1913,7 +1913,7 @@ impl<H: Host> Runtime<'_, H> {
                     Some(primitive) => {
                         Self::token_value(&crate::runtime::host_class::class_value(primitive))
                     }
-                    None => receiver.cloned().unwrap_or(Value::Ref(None)),
+                    None => return self.host.unknown_operand_call(r).map(Some),
                 }
             }
             ("isPrimitive", "()Z") => Value::Int(i32::from(class.and_then(boxed_class).is_some())),
