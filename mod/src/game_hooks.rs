@@ -473,7 +473,7 @@ fn note_late_player_tick_post(row: &mut crate::JarRow) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mod_api::{
         Backend, EntityRef, Hooks, Host, HostSide, PlayerRef, PlayerTickPostEvent,
@@ -481,8 +481,8 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    struct PlayerTickHost {
-        spectator: BTreeMap<u128, Option<bool>>,
+    pub(crate) struct PlayerTickHost {
+        pub(crate) spectator: BTreeMap<u128, Option<bool>>,
     }
 
     impl Host for PlayerTickHost {
@@ -512,7 +512,7 @@ mod tests {
             "org/spongepowered/asm/mixin/Mixin.java",
             "package org.spongepowered.asm.mixin; import java.lang.annotation.*; \
              @Retention(RetentionPolicy.RUNTIME) @Target(ElementType.TYPE) \
-             public @interface Mixin { Class<?>[] value() default {}; }",
+             public @interface Mixin { Class<?>[] value() default {}; int priority() default 1000; }",
         ),
         (
             "org/spongepowered/asm/mixin/injection/At.java",
@@ -530,6 +530,10 @@ mod tests {
             "org/spongepowered/asm/mixin/injection/callback/CallbackInfo.java",
             "package org.spongepowered.asm.mixin.injection.callback; public class CallbackInfo { \
              public void cancel() {} }",
+        ),
+        (
+            "org/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable.java",
+            "package org.spongepowered.asm.mixin.injection.callback; public class CallbackInfoReturnable<T> extends CallbackInfo { public T getReturnValue() { return null; } public void setReturnValue(T value) {} }",
         ),
         (
             "net/minecraft/world/damagesource/DamageSource.java",
@@ -727,16 +731,38 @@ mod tests {
             "package net.minecraft.world.entity; public class LivingEntity extends Entity {}",
         ),
         (
+            "net/minecraft/world/level/block/state/BlockState.java",
+            "package net.minecraft.world.level.block.state; public class BlockState {}",
+        ),
+        (
+            "net/minecraft/world/item/ItemStack.java",
+            "package net.minecraft.world.item; public class ItemStack {}",
+        ),
+        (
+            "net/minecraft/world/level/Level.java",
+            "package net.minecraft.world.level; public class Level {}",
+        ),
+        (
+            "net/minecraft/core/BlockPos.java",
+            "package net.minecraft.core; public class BlockPos {}",
+        ),
+        (
+            "net/minecraft/world/item/BoneMealItem.java",
+            "package net.minecraft.world.item; public class BoneMealItem { public boolean growCrop(ItemStack s, net.minecraft.world.level.Level l, net.minecraft.core.BlockPos p) { return true; } }",
+        ),
+        (
             "net/minecraft/world/entity/player/Player.java",
             "package net.minecraft.world.entity.player; \
              public class Player extends net.minecraft.world.entity.LivingEntity { \
              public void attack(net.minecraft.world.entity.Entity target) {} \
+             public float getDestroySpeed(net.minecraft.world.level.block.state.BlockState state) { return 1.0f; } \
              public void tick() {} public java.util.UUID getUUID() { return null; } }",
         ),
         (
             "net/minecraft/server/MinecraftServer.java",
             "package net.minecraft.server; public class MinecraftServer { \
-             public void tickServer(java.util.function.BooleanSupplier hasTime) {} }",
+             public void tickServer(java.util.function.BooleanSupplier hasTime) {} \
+             public void stopServer() {} }",
         ),
     ];
 
@@ -744,11 +770,17 @@ mod tests {
         import net.minecraft.world.entity.*; \
         import net.minecraft.world.entity.player.Player; \
         import net.minecraft.server.MinecraftServer; \
+        import net.minecraft.world.level.block.state.BlockState; \
+        import net.minecraft.world.item.BoneMealItem; \
+        import net.minecraft.world.item.ItemStack; \
+        import net.minecraft.world.level.Level; \
+        import net.minecraft.core.BlockPos; \
         import org.spongepowered.asm.mixin.Mixin; \
         import org.spongepowered.asm.mixin.injection.*; \
-        import org.spongepowered.asm.mixin.injection.callback.CallbackInfo; ";
+        import org.spongepowered.asm.mixin.injection.callback.CallbackInfo; \
+        import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable; ";
 
-    fn load(id: &str, mixin: &str, body: &str) -> LoadedJar {
+    pub(crate) fn load(id: &str, mixin: &str, body: &str) -> LoadedJar {
         let path = format!("demo/{mixin}.java");
         let source = format!("{MIXIN_IMPORTS}{body}");
         let extra: Vec<(&str, &str)> = GAME
@@ -764,13 +796,56 @@ mod tests {
         loaded
     }
 
-    fn stdout(state: &mut State, jar: usize) -> Vec<String> {
+    pub(crate) fn stdout(state: &mut State, jar: usize) -> Vec<String> {
         state.jars[jar]
             .host
             .take_stdout()
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    #[test]
+    fn public_dispatcher_runs_existing_callback_chain() {
+        let java = crate::HorizonJava::default();
+        let uuid = 0xa1_u128;
+        java.lock().jars.push(load(
+            "dispatchtick",
+            "DispatchTickMixin",
+            "@Mixin(Player.class) public class DispatchTickMixin { \
+               @Inject(method = \"tick\", at = @At(\"HEAD\")) \
+               private void pre(CallbackInfo ci) { System.out.println(\"dispatch/\" + ((Player)(Object)this).getUUID()); } }",
+        ));
+        java.lock().players = vec![FacadePlayer {
+            uuid,
+            name: "Alex".into(),
+            level: None,
+            entity_id: Some(7),
+            session: 1,
+            life: 0,
+        }];
+        java.refresh_game_hook_plan_bits();
+        let player = player(&java.lock(), uuid, 0).expect("listed player");
+        let mut args = [];
+        let mut host = PlayerTickHost {
+            spectator: BTreeMap::new(),
+        };
+        let answer = java
+            .dispatch_game_hook(crate::game_dispatch::GameDispatch::new(
+                crate::game_dispatch::MethodId("java_base_player_tick_head"),
+                crate::game_dispatch::Phase::Head,
+                Some(player),
+                &mut args,
+                None,
+                &mut host,
+            ))
+            .expect("dispatch succeeds");
+        assert_eq!(answer.callbacks, 1);
+        assert!(!answer.cancelled);
+        assert_eq!(
+            stdout(&mut java.lock(), 0),
+            ["dispatch/00000000-0000-0000-0000-0000000000a1"]
+        );
     }
 
     #[test]

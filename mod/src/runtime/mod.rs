@@ -7,6 +7,8 @@
 //! Fabric metadata, and executes a small no-argument bytecode subset. Calls
 //! outside the loaded jar cross [`Host`], so unsupported behavior is explicit.
 
+#[cfg(test)]
+use std::sync::Mutex;
 use std::{
     borrow::Cow,
     cell::RefCell,
@@ -15,6 +17,14 @@ use std::{
     path::Path,
     sync::Arc,
 };
+
+#[cfg(test)]
+static TEST_STDOUT_TRACE: Mutex<String> = Mutex::new(String::new());
+
+#[cfg(test)]
+pub(crate) fn take_test_stdout() -> String {
+    std::mem::take(&mut *TEST_STDOUT_TRACE.lock().unwrap())
+}
 
 mod annotation_proxy;
 mod annotation_values;
@@ -1278,6 +1288,10 @@ pub struct RegisteredGameHook {
     pub cancellable: bool,
     /// How the callback is called and what its answer does.
     pub shape: GameHookShape,
+    /// Mixin's callback priority (lower values run first).
+    pub priority: i32,
+    /// Declaration order after Mixin apply ordering, used for global ties.
+    pub order: usize,
 }
 
 /// The callbacks one jar registered at host hook points, grouped by hook and
@@ -1297,6 +1311,23 @@ impl GameHookRegistrations {
     /// answers an empty slice, so a host can ask unconditionally.
     pub fn entries(&self, hook: &str) -> &[RegisteredGameHook] {
         self.by_hook.get(hook).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// A registration view containing only callbacks at one exact Mixin anchor. The returned
+    /// view preserves the original apply/declaration order.
+    pub fn for_anchor(&self, hook: &str, anchor: &str) -> Self {
+        let mut filtered = Self::default();
+        for entry in self.entries(hook) {
+            let normalized = if entry.anchor.is_empty() {
+                "HEAD"
+            } else {
+                entry.anchor.as_str()
+            };
+            if normalized == anchor {
+                filtered.insert(entry.clone());
+            }
+        }
+        filtered
     }
 
     /// The number of callbacks over every hook.
@@ -3796,6 +3827,14 @@ impl StdHost {
         self.unknown_host_calls.values().sum()
     }
 
+    /// Count a bridge-level refusal that has no Java MethodRef to pass through the normal host path.
+    pub fn note_unknown_game_hook(&mut self, method: &str) {
+        *self
+            .unknown_host_calls
+            .entry(format!("game-hook re-entry: {method}"))
+            .or_default() += 1;
+    }
+
     pub(crate) fn mark_nondeterministic(&mut self, marker: &str) {
         self.nondeterministic.insert(marker.to_owned());
     }
@@ -5657,6 +5696,8 @@ impl Host for StdHost {
     }
     fn write_console(&mut self, text: &str) {
         self.console_out.push_str(text);
+        #[cfg(test)]
+        TEST_STDOUT_TRACE.lock().unwrap().push_str(text);
     }
 
     fn reserve_dfu_codec(
@@ -20286,12 +20327,32 @@ impl NativeJar {
     /// edited, or a plan built by hand, cannot register a callback the host
     /// would fail to run. The registrations keep the plans' apply order inside
     /// each hook.
+    fn game_hook_priority(&self, callback_owner: &str) -> i32 {
+        self.classes
+            .get(callback_owner)
+            .and_then(|class| {
+                class.annotations.iter().find_map(|annotation| {
+                    (annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR).then(|| {
+                        annotation
+                            .values
+                            .get("priority")
+                            .and_then(|value| match value {
+                                AnnotationValue::Int(priority) => Some(*priority),
+                                _ => None,
+                            })
+                            .unwrap_or(1000)
+                    })
+                })
+            })
+            .unwrap_or(1000)
+    }
+
     pub fn register_game_hooks(
         &self,
         weave: &LoadTimeMixinWeave,
     ) -> Result<GameHookRegistrations, NativeError> {
         let mut registrations = GameHookRegistrations::default();
-        for hook in &weave.game_hooks {
+        for (order, hook) in weave.game_hooks.iter().enumerate() {
             let named = game_hook_site_named(hook.hook, hook.version).ok_or_else(|| {
                 NativeError::Metadata(format!(
                     "game hook plan names {} version {}, which this runtime does not know",
@@ -20342,6 +20403,8 @@ impl NativeJar {
                 anchor: hook.anchor.clone(),
                 cancellable: hook.plan.cancellable,
                 shape: hook.shape,
+                priority: self.game_hook_priority(&hook.plan.callback.owner),
+                order,
             });
         }
         Ok(registrations)
@@ -34498,6 +34561,7 @@ mod tests {
     /// decoder; the call stays counted instead of selecting a wrong template.
     #[test]
     fn subclass_constructors_stay_counted() {
+        let _ = take_test_stdout();
         let mut host = StdHost::new();
         host.set_strict_unknown_host_calls(true);
         let call = MethodRef {

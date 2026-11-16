@@ -110,6 +110,7 @@ use serde_json::json;
 mod attachments;
 mod client;
 mod content;
+pub mod game_dispatch;
 mod game_hooks;
 mod runtime;
 mod server_facts;
@@ -132,6 +133,10 @@ const LOG: &str = "Horizon Java";
 pub struct HorizonJava {
     state: Mutex<State>,
     client: Mutex<client::State>,
+    /// Serializes state access with top-level Java dispatches while allowing same-thread access
+    /// through the thread-local frame owned by `game_dispatch`.
+    pub(crate) dispatch_gate: Mutex<()>,
+    pub(crate) plan_bits: game_dispatch::PlanBits,
 }
 
 #[derive(Default)]
@@ -431,12 +436,16 @@ impl Hooks for HorizonJava {
     fn blocks(&self, context: &RegistrationContext, event: &mut BlocksEvent<'_>) {
         let mut state = self.lock();
         content::declare_blocks(&mut state, context, event);
+        drop(state);
+        self.refresh_game_hook_plan_bits();
     }
 
     /// The item counterpart of [`Self::blocks`](Hooks::blocks) (`DeferredRegister.Items`).
     fn items(&self, context: &RegistrationContext, event: &mut ItemsEvent<'_>) {
         let mut state = self.lock();
         content::declare_items(&mut state, context, event);
+        drop(state);
+        self.refresh_game_hook_plan_bits();
     }
 
     /// The server is about to open its worlds (NeoForge's `ServerAboutToStartEvent`). Nothing of
@@ -1572,10 +1581,8 @@ impl Hooks for HorizonJava {
 }
 
 impl HorizonJava {
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn lock(&self) -> game_dispatch::StateGuard<'_> {
+        game_dispatch::lock_state(self)
     }
 
     fn lock_client(&self) -> std::sync::MutexGuard<'_, client::State> {
@@ -1591,6 +1598,7 @@ impl HorizonJava {
         use mod_api::__private::game::RegistrationContextNew;
         self.lock()
             .ensure_loaded(&mod_api::RegistrationContext::new(), Some(game_version));
+        self.refresh_game_hook_plan_bits();
     }
 
     /// Fires one runtime event with its context to every jar's listeners and returns what they
