@@ -43,6 +43,48 @@ impl<H: Host> Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+            ("java/lang/String", "getBytes", "()[B")
+            | ("java/lang/String", "getBytes", "(Ljava/lang/String;)[B")
+            | ("java/lang/String", "getBytes", "(Ljava/nio/charset/Charset;)[B") => {
+                let name = match r.descriptor.as_str() {
+                    "()[B" => "UTF-8".to_owned(),
+                    _ => expect_ref(StdHost::argument(r, args, 0)?)
+                        .map(|s| s.strip_prefix("charset/").unwrap_or(s).to_owned())
+                        .ok_or_else(|| NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: None,
+                            frame: None,
+                        })?,
+                };
+                let canonical = name.to_ascii_uppercase().replace('_', "-");
+                let text = receiver.and_then(expect_ref).ok_or_else(|| {
+                    NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: None,
+                        frame: None,
+                    }
+                })?;
+                let bytes: Vec<u8> = match canonical.as_str() {
+                    "UTF-8" | "UTF8" => text.as_bytes().to_vec(),
+                    "ISO-8859-1" | "ISO88591" | "LATIN1" => {
+                        text.chars().map(|c| c as u32 as u8).collect()
+                    }
+                    "US-ASCII" | "USASCII" | "ASCII" => text
+                        .chars()
+                        .map(|c| if (c as u32) < 128 { c as u8 } else { b'?' })
+                        .collect(),
+                    _ => return Ok(None),
+                };
+                Ok(Some(
+                    self.new_array_value(
+                        "[B",
+                        bytes
+                            .into_iter()
+                            .map(|b| Value::Int((b as i8) as i32))
+                            .collect(),
+                    ),
+                ))
+            }
             ("java/lang/String", "codePoints", "()Ljava/util/stream/IntStream;") => {
                 let Some(Value::Ref(Some(text))) = receiver else {
                     return Ok(None);
