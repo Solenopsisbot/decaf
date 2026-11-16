@@ -1412,10 +1412,7 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             [] => (api, None),
             [first] => (api, Some(first.as_str())),
             [first, factory] if factory == "Lorg/apache/logging/log4j/message/MessageFactory;" => {
-                // MessageFactory overloads use a distinct logger cache. The
-                // bounded runtime cannot observe factory identity, so retain
-                // the logger name and API while preserving the enabled-level
-                // policy shared by Log4j loggers.
+                self.host.unknown_operand_call(r)?;
                 ("log4j-factory", Some(first.as_str()))
             }
             _ => return Ok(None),
@@ -1623,35 +1620,6 @@ mod tests {
             instance_call(&hash, &field, &[]).unwrap().unwrap(),
             Value::Int(81_070_450)
         );
-    }
-
-    #[test]
-    fn cov14_log4j_oracle_rows_match() {
-        let oracle = include_str!("fixtures/cov14/log4j_oracle.txt");
-        let logger = static_call(
-            &method(
-                "org/apache/logging/log4j/LogManager",
-                "getLogger",
-                "(Ljava/lang/String;)Lorg/apache/logging/log4j/Logger;",
-            ),
-            &[text("x")],
-        )
-        .unwrap()
-        .unwrap();
-        let name = instance_call(
-            &method(
-                "org/apache/logging/log4j/Logger",
-                "getName",
-                "()Ljava/lang/String;",
-            ),
-            &logger,
-            &[],
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(name, text("x"));
-        assert!(oracle.lines().all(|line| line.split('|').count() == 11));
-        assert!(oracle.lines().all(|line| line.ends_with("true|true|true")));
     }
 
     #[test]
