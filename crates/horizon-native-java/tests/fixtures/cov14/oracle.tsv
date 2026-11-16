@@ -1,0 +1,3 @@
+f1	name=x	same12=true	sameRoot=false	factory1=true	factory2=false	ALL=false	TRACE=false	DEBUG=false	INFO=false	WARN=false	ERROR=true	FATAL=true	OFF=true
+f2	name=x	same12=true	sameRoot=false	factory1=false	factory2=true	ALL=false	TRACE=false	DEBUG=false	INFO=false	WARN=false	ERROR=true	FATAL=true	OFF=true
+f3	name=x	same12=true	sameRoot=false	factory1=false	factory2=true	ALL=false	TRACE=false	DEBUG=false	INFO=false	WARN=false	ERROR=true	FATAL=true	OFF=true
