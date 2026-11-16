@@ -95,6 +95,9 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_reflect_generic(r, receiver)? {
             return Ok(Some(value));
         }
+        if let Some(value) = self.invoke_path_methods(r, receiver, args)? {
+            return Ok(Some(value));
+        }
         if let Some(value) = self.invoke_varargs_path(r, args)? {
             return Ok(Some(value));
         }
@@ -1367,6 +1370,128 @@ impl<H: Host> Runtime<'_, H> {
             joined.push_str(part);
         }
         Ok(Some(path_value(&joined)))
+    }
+
+    fn invoke_path_methods(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        let Some(path) = crate::host_path::path_key(receiver).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let arg_path = |v: &Value| match v {
+            Value::Ref(Some(s)) => Some(crate::host_path::unix_normal(s)),
+            Value::Host(_) => crate::host_path::path_key(v).map(str::to_owned),
+            _ => None,
+        };
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("getNameCount", "()I") => Ok(Some(Value::Int(if path == "/" || path.is_empty() {
+                0
+            } else {
+                path.trim_start_matches('/').split('/').count() as i32
+            }))),
+            ("normalize", "()Ljava/nio/file/Path;") => {
+                let abs = path.starts_with('/');
+                let mut out = Vec::new();
+                for x in path.split('/') {
+                    match x {
+                        "" | "." => {}
+                        ".." => {
+                            if !out.is_empty() && out.last() != Some(&"..") {
+                                out.pop()
+                            } else if !abs {
+                                out.push("..")
+                            }
+                        }
+                        _ => out.push(x),
+                    }
+                }
+                let text = if abs {
+                    format!("/{}", out.join("/"))
+                } else {
+                    out.join("/")
+                };
+                Ok(Some(crate::host_path::path_value(&text)))
+            }
+            ("getName", "(I)Ljava/nio/file/Path;") => {
+                let n = match args.first() {
+                    Some(Value::Int(i)) => *i,
+                    _ => -1,
+                };
+                let parts: Vec<_> = path
+                    .trim_matches('/')
+                    .split('/')
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                if n < 0 || n as usize >= parts.len() {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/IllegalArgumentException".into(),
+                        message: None,
+                        frame: None,
+                    });
+                }
+                Ok(Some(crate::host_path::path_value(parts[n as usize])))
+            }
+            ("subpath", "(II)Ljava/nio/file/Path;") => {
+                let a = match args.first() {
+                    Some(Value::Int(i)) => *i as isize,
+                    _ => -1,
+                };
+                let b = match args.get(1) {
+                    Some(Value::Int(i)) => *i as isize,
+                    _ => -1,
+                };
+                let parts: Vec<_> = path
+                    .trim_matches('/')
+                    .split('/')
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                if a < 0 || b <= a || b as usize > parts.len() {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/IllegalArgumentException".into(),
+                        message: None,
+                        frame: None,
+                    });
+                }
+                Ok(Some(crate::host_path::path_value(
+                    &parts[a as usize..b as usize].join("/"),
+                )))
+            }
+            ("startsWith" | "endsWith", "(Ljava/lang/String;)Z")
+            | ("startsWith" | "endsWith", "(Ljava/nio/file/Path;)Z") => {
+                let Some(other) = args.first().and_then(arg_path) else {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: None,
+                        frame: None,
+                    });
+                };
+                let a: Vec<_> = path
+                    .trim_matches('/')
+                    .split('/')
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                let b: Vec<_> = other
+                    .trim_matches('/')
+                    .split('/')
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                let v = if r.name == "startsWith" {
+                    (path.starts_with('/') == other.starts_with('/'))
+                        && b.len() <= a.len()
+                        && a[..b.len()] == b[..]
+                } else {
+                    b.len() <= a.len() && a[a.len() - b.len()..] == b[..]
+                };
+                Ok(Some(Value::Int(v as i32)))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Whether `owner` (a jar class or interface) inherits an abstract
