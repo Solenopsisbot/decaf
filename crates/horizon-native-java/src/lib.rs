@@ -7283,18 +7283,6 @@ impl Host for StdHost {
                 "singletonMap",
                 "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/util/Map;",
             ) => Ok(self.unmodifiable_from(&r.owner, &r.name, "map", args.to_vec())),
-            ("java/util/EnumSet", "of", descriptor)
-                if descriptor.ends_with("Ljava/util/EnumSet;") =>
-            {
-                if args.iter().any(|v| matches!(v, Value::Ref(None))) {
-                    return Err(NativeError::UncaughtException {
-                        class: "java/lang/NullPointerException".into(),
-                        message: None,
-                        frame: None,
-                    });
-                }
-                Ok(self.new_collection("java/util/EnumSet", args.to_vec()))
-            }
             ("java/util/Collections", name, _) if name.starts_with("synchronized") => self
                 .synchronized_view(r, args)
                 .unwrap_or_else(|| self.unknown_host_call(r)),
