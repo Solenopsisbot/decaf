@@ -240,7 +240,7 @@ pub(crate) fn resource_loader(pack_type: &Value) -> Option<Value> {
 pub(crate) fn biome_modification(id: &Value) -> Option<Value> {
     Some(Value::Host(HostRef::of_values(
         HostKind::FabricBiomeModification,
-        &[id.clone()],
+        std::slice::from_ref(id),
     )))
 }
 
