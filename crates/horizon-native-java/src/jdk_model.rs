@@ -491,6 +491,10 @@ fn charset_call(
 fn logger_call(r: &MethodRef, name: &str) -> Option<Result<Value, NativeError>> {
     let returns = r.descriptor.rsplit_once(')').map_or("", |(_, ret)| ret);
     Some(Ok(match (r.name.as_str(), returns) {
+        ("getMessageFactory", "Lorg/apache/logging/log4j/message/MessageFactory;") => {
+            crate::host_jdk::logger_factory(&crate::host_jdk::logger_value("log4j", name))
+                .unwrap_or(Value::Ref(None))
+        }
         ("getName", "Ljava/lang/String;") => Value::Ref(Some(name.to_owned())),
         (method, "Z") if method.starts_with("is") => return None,
         (_, "V") => Value::Void,
