@@ -6627,6 +6627,23 @@ impl Host for StdHost {
             && r.descriptor == "(Ljava/util/List;)V"
         {
             let list = Self::argument(r, args, 0)?.clone();
+            if matches!(list, Value::Ref(None)) {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: None,
+                    frame: None,
+                });
+            }
+            if let Some(marker) = jar_object::object_key(&list)
+                && self.unmodifiable_collections.contains_key(marker)
+                && self.collection_len(&list).unwrap_or_default() > 1
+            {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/UnsupportedOperationException".into(),
+                    message: None,
+                    frame: None,
+                });
+            }
             let mut values = self
                 .mutable_collection_values(&list)
                 .ok_or_else(|| NativeError::UnknownHostCall(r.clone()))?;
