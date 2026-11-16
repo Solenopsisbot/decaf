@@ -297,6 +297,86 @@ def entrypoint_kind(path: Path, corpus: str, role: str = "server") -> str | None
     return None
 
 
+STANDARD_ENTRYPOINTS = set(SERVER_STAGES) | set(CLIENT_STAGES)
+
+
+def custom_entrypoint_keys(path: Path, corpus: str) -> tuple[str, ...]:
+    """Return non-lifecycle Fabric keys declared by a jar."""
+    if corpus == "neoforge":
+        return ()
+    entrypoints = ledger.read_jar_entrypoints(path)
+    if entrypoints is None:
+        return ()
+    return tuple(sorted(set(entrypoints.kinds) - STANDARD_ENTRYPOINTS))
+
+
+#: The Fabric Loader calls a mod uses to ask for other mods' entrypoints under a key
+#: (`FabricLoader.getEntrypoints`, `getEntrypointContainers`, `invokeEntrypoints`).
+ENTRYPOINT_LOOKUPS = frozenset({"getEntrypoints", "getEntrypointContainers", "invokeEntrypoints"})
+
+
+def class_utf8_constants(data: bytes) -> set[str]:
+    """The UTF-8 entries of a class file's constant pool: every string literal, name and
+    descriptor the class refers to. Empty for anything that is not a well-formed class."""
+    found: set[str] = set()
+    if len(data) < 10 or data[:4] != b"\xca\xfe\xba\xbe":
+        return found
+    count = int.from_bytes(data[8:10], "big")
+    offset = 10
+    # Entries are numbered 1..count-1; a long or double takes two numbers (JVMS 4.4.5), so the
+    # index advances by two for those. Without that the walk would read past the pool.
+    index = 1
+    while index < count:
+        if offset >= len(data):
+            return set()
+        tag = data[offset]
+        offset += 1
+        index += 1
+        if tag == 1:
+            size = int.from_bytes(data[offset:offset + 2], "big")
+            offset += 2
+            try:
+                found.add(data[offset:offset + size].decode("utf-8"))
+            except UnicodeDecodeError:
+                pass
+            offset += size
+        elif tag in (3, 4):
+            offset += 4
+        elif tag in (5, 6):
+            offset += 8
+            index += 1
+        elif tag in (7, 8, 16, 19, 20):
+            offset += 2
+        elif tag in (9, 10, 11, 12, 17, 18):
+            offset += 4
+        elif tag == 15:
+            offset += 3
+        else:
+            return set()
+    return found
+
+
+def consumes_entrypoint(path: Path, key: str) -> bool:
+    """Whether a jar asks Fabric Loader for the entrypoints declared under `key`.
+
+    True when one class holds both the exact string `key` and the name of a loader lookup
+    method (`ENTRYPOINT_LOOKUPS`). The string alone is not enough: a mod that only checks
+    `isModLoaded("modmenu")`, or declares its own `modmenu` entrypoint, also carries that
+    literal, and running another mod "via" it would report a run that never touches that mod.
+    A package prefix such as `glitchcore/Foo` is a different constant and does not count."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if not name.endswith(".class"):
+                    continue
+                constants = class_utf8_constants(archive.read(name))
+                if key in constants and constants & ENTRYPOINT_LOOKUPS:
+                    return True
+    except (OSError, zipfile.BadZipFile):
+        return False
+    return False
+
+
 def classify_client(path: Path, corpus: str) -> tuple[str, str | None, str]:
     entrypoints = ledger.read_jar_entrypoints(path, force_neoforge=corpus == "neoforge")
     if entrypoints is None:
@@ -577,12 +657,6 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 jar_role, reason = None, classify_server_skip(jar, name)
                 kind = entrypoint_kind(jar, name, args.role)
-            if kind is None:
-                for mode in (("alone", "closure") if args.dependency_mode == "both"
-                             else (args.dependency_mode,)):
-                    rows.append({"jar": jar.name, "mode": mode, "verdict": "skipped",
-                                 "reason": reason, **({"role": jar_role} if jar_role else {})})
-                continue
             closure_error = ""
             if name != "neoforge" and fabric_oracle_error:
                 closure = ledger.Closure()
@@ -594,14 +668,33 @@ def main(argv: list[str] | None = None) -> int:
             missing = list(closure.missing)
             requirements = closure.missing_requirements
             modes = ("alone", "closure") if args.dependency_mode == "both" else (args.dependency_mode,)
+            via = None
+            via_candidates: list[str] = []
+            if kind is None and "closure" in modes:
+                for key in custom_entrypoint_keys(jar, name):
+                    for consumer in closure.jars:
+                        if consumes_entrypoint(consumer, key) and entrypoint_kind(consumer, name, args.role):
+                            via_candidates.append(consumer.name)
+                if via_candidates:
+                    via = via_candidates[0]
+                    kind = entrypoint_kind(next(dep for dep in closure.jars if dep.name == via), name, args.role)
+            if kind is None:
+                for mode in modes:
+                    rows.append({"jar": jar.name, "mode": mode, "verdict": "skipped", "reason": reason, **({"role": jar_role} if jar_role else {})})
+                continue
             for mode in modes:
-                if mode == "alone":
-                    todo.append((jar, kind, jar_role, [], [], (), mode, ""))
-                else:
-                    todo.append((jar, kind, jar_role, list(closure.jars), missing, requirements, mode, closure_error))
+                if mode == "alone" and via is not None:
+                    rows.append({"jar": jar.name, "mode": "alone", "verdict": "skipped", "reason": reason})
+                    continue
+                exec_jar = next((d for d in closure.jars if d.name == via), jar) if via else jar
+                exec_deps = list(closure.jars) if mode == "closure" else []
+                if via and jar not in exec_deps:
+                    exec_deps.append(jar)
+                baseline_deps = [d for d in exec_deps if d != jar]
+                todo.append((jar, kind, jar_role, exec_deps, missing if mode == "closure" else [], requirements if mode == "closure" else (), mode, closure_error if mode == "closure" else "", via, exec_jar, baseline_deps, via_candidates))
 
         def run(item):
-            jar, kind, jar_role, deps, missing, requirements, mode, closure_error = item
+            jar, kind, jar_role, deps, missing, requirements, mode, closure_error, via, exec_jar, baseline_deps, via_candidates = item
             if closure_error:
                 result = {"status": "refused", "stage": "dependency", "error": closure_error}
             elif missing:
@@ -609,10 +702,23 @@ def main(argv: list[str] | None = None) -> int:
                           "error": missing_reason(missing, requirements)}
             else:
                 result = probe_one(
-                    probe, jar, kind, deps, args.game_version,
+                    probe, exec_jar, kind, deps, args.game_version,
                     game_block_classes,
                 )
-            return result_row(jar, kind, result, deps, missing, requirements, mode, jar_role)
+            row = result_row(jar, kind, result, deps, missing, requirements, mode, jar_role)
+            if via:
+                # The row is the consumer's whole run with this jar linked in; `via` says so, and
+                # the baseline (the consumer without this jar) shows what this jar added.
+                row["via"] = via
+                if len(via_candidates) > 1:
+                    row["via_candidates"] = via_candidates
+                if result.get("status") == "ok":
+                    baseline = probe_one(probe, exec_jar, kind, baseline_deps, args.game_version,
+                                         game_block_classes)
+                    row["baseline_unknown"] = baseline.get("unknown_host_call_count")
+                    row["unknown_delta"] = (result.get("unknown_host_call_count", 0)
+                                            - baseline.get("unknown_host_call_count", 0))
+            return row
 
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             rows.extend(pool.map(run, todo))
