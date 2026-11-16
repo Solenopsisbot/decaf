@@ -1,0 +1,5 @@
+# Captured by running this fixture Probe.java with javac --release 21 and Java 25.0.5+8:
+# javac --release 21 -cp fabric-data-attachment-api-v1-2.2.35+af2d4d095d.jar -d classes $(find src -name "*.java")
+# java -cp classes:fabric-data-attachment-api-v1-2.2.35+af2d4d095d.jar Main
+# fabric-data jar sha256 915db07c0c471858e7347b76ecc8c6bbbf914d89efcdbcf837721df0cf55d9e7
+true|true|true|true,true,false,true,false

@@ -44,6 +44,7 @@ pub enum ContentBuilderEvent {
         builder: String,
         flag: &'static str,
         codec: Option<String>,
+        predicate: Option<String>,
     },
     /// A data-component builder built the type `built`.
     Built { builder: String, built: String },
@@ -63,6 +64,7 @@ pub enum ContentBuilderEvent {
 pub(crate) struct BuilderFlags {
     flags: BTreeSet<&'static str>,
     codec: Option<String>,
+    predicate: Option<String>,
 }
 
 impl BuilderFlags {
@@ -104,6 +106,7 @@ impl ContentBuilders {
                 builder,
                 flag,
                 codec,
+                predicate,
                 ..
             } => {
                 if self.builders.len() >= MAX_CONTENT_BUILDERS
@@ -115,6 +118,10 @@ impl ContentBuilders {
                 flags.flags.insert(flag);
                 if codec.is_some() {
                     flags.codec = codec;
+                }
+                if predicate.is_some() {
+                    flags.flags.insert("sync_predicate");
+                    flags.predicate = predicate;
                 }
                 None
             }
@@ -239,6 +246,13 @@ impl<H: Host> Runtime<'_, H> {
                         builder: builder.clone(),
                         flag,
                         codec,
+                        predicate: (flag == "synced")
+                            .then(|| {
+                                args.get(1)
+                                    .and_then(crate::runtime::jar_object::instance_key)
+                                    .map(str::to_owned)
+                            })
+                            .flatten(),
                     });
                 }
                 Ok(Some(crate::runtime::jar_object::stored_value(&builder)))
@@ -278,6 +292,7 @@ impl<H: Host> Runtime<'_, H> {
                         builder: builder.clone(),
                         flag,
                         codec,
+                        predicate: None,
                     });
                 }
                 Ok(Some(crate::runtime::jar_object::stored_value(&builder)))
@@ -455,6 +470,7 @@ mod tests {
             builder: "b#1".into(),
             flag: "copy_on_death",
             codec: None,
+            predicate: None,
         });
         let row = builders
             .note(ContentBuilderEvent::RegisterAttachment {

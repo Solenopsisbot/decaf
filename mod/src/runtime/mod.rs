@@ -8294,7 +8294,7 @@ impl Host for StdHost {
         if let Some(value) = self.holder_call(r, receiver) {
             return value;
         }
-        if let Some(value) = fabric_registry::instance_call(self, r, receiver) {
+        if let Some(value) = fabric_registry::instance_call(self, r, receiver, args) {
             return value;
         }
         if let Some(value) = self.block_item_id_instance(r, receiver) {
