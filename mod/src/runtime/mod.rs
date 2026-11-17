@@ -28312,6 +28312,10 @@ impl<H: Host> Runtime<'_, H> {
                 // ...): every write and read is a counted unknown instead of
                 // text that ignores it.
                 if style.is_counted()
+                    && receiver
+                        .and_then(expect_ref)
+                        .and_then(|marker| self.gson_type_adapters.get(marker))
+                        .is_none_or(|adapters| adapters.is_empty())
                     && matches!(r.name.as_str(), "toJson" | "toJsonTree" | "fromJson")
                 {
                     return self
