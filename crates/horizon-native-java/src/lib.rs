@@ -8089,6 +8089,11 @@ impl Host for StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Value, NativeError> {
+        if matches!(receiver, Value::Host(handle) if handle.kind() == HostKind::LiveGameObject)
+            && r.name == "isRemoved" && r.descriptor == "()Z"
+        {
+            return Ok(Value::Int(0));
+        }
         if let Some(value) =
             tool_material::instance_call(&mut self.tool_material, r, receiver, args)
         {
