@@ -185,6 +185,13 @@ pub(crate) fn is_object_handle(handle: &HostRef) -> bool {
             | HostKind::Collection
             | HostKind::GuavaMultimap
             | HostKind::RenderObject
+            | HostKind::Iterator
+            | HostKind::Enumeration
+            | HostKind::ListIterator
+            | HostKind::ServiceIterator
+            | HostKind::Spliterator
+            | HostKind::StreamBuilder
+            | HostKind::StreamSink
     )
 }
 
