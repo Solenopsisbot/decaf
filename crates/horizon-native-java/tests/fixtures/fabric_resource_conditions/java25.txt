@@ -1,0 +1,11 @@
+a.id=probe:a
+a.id same object=true
+a.codec same object=true
+a==b=false
+a.equals(a)=true
+a.equals(b)=false
+a instanceof type=true
+register a=ok
+register b=ok
+register a again=java.lang.IllegalArgumentException: Duplicate resource condition registered with id probe:a
+register again twice=java.lang.IllegalArgumentException: Duplicate resource condition registered with id probe:a

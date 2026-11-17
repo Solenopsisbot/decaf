@@ -618,6 +618,8 @@ pub enum HostKind {
     /// Fabric's `BlockApiLookup`, one per (id, API class, context class) (`fabric_block_api.rs`).
     FabricBlockApiLookup,
     Url,
+    /// A Fabric `ResourceConditionType` that `create` made (`fabric_resource_conditions.rs`).
+    FabricResourceConditionType,
 }
 
 /// How a kind's Java class follows from its key.
@@ -2671,6 +2673,19 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("java/net/URL"),
         canonical: never_canonical,
         methods: &crate::runtime::host_url::URL_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricResourceConditionType,
+        tag: "frct",
+        // The anonymous `ResourceConditionType$1`: surely a `ResourceConditionType`; its exact
+        // class (`getClass`) is counted.
+        class: ClassRule::Unknown {
+            declared: crate::runtime::fabric_resource_conditions::declared_types,
+        },
+        canonical: never_canonical,
+        // It overrides only `id()` and `codec()`: identity `equals`, `hashCode`/`toString`
+        // counted (they print the identity hash).
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
     },
 ];
 

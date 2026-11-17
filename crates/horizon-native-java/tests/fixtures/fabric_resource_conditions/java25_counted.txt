@@ -1,0 +1,4 @@
+nullId=java.lang.NullPointerException: id cannot be null
+nullCodec=java.lang.NullPointerException: codec cannot be null
+registerNull=java.lang.NullPointerException: Condition may not be null.
+fabricDefault=ok

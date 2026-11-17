@@ -73,6 +73,7 @@ mod fabric_block_api;
 mod fabric_creative_tab;
 mod fabric_mods;
 mod fabric_registry;
+mod fabric_resource_conditions;
 mod facade_saved_data;
 mod facade_server;
 mod facade_text;
@@ -3640,6 +3641,8 @@ pub struct StdHost {
     tool_material: tool_material::State,
     /// one table per host; a conflict between two jars' registrations is not detected
     fabric_block_api: fabric_block_api::State,
+    /// Fabric resource condition types and their registry (`fabric_resource_conditions.rs`).
+    fabric_resource_conditions: fabric_resource_conditions::State,
     vec2: vec2::State,
 }
 
@@ -3806,6 +3809,7 @@ impl StdHost {
             entity_registration: entity_registration::State::default(),
             tool_material: tool_material::State::default(),
             fabric_block_api: fabric_block_api::State::default(),
+            fabric_resource_conditions: fabric_resource_conditions::State::default(),
             vec2: vec2::State::default(),
         }
     }
@@ -6727,6 +6731,11 @@ impl Host for StdHost {
             return value;
         }
         if let Some(value) =
+            fabric_resource_conditions::static_call(&mut self.fabric_resource_conditions, r, args)
+        {
+            return value;
+        }
+        if let Some(value) =
             entity_registration::static_call(&mut self.entity_registration, r, args)
         {
             return value;
@@ -8213,6 +8222,11 @@ impl Host for StdHost {
         }
         if let Some(value) =
             fabric_block_api::instance_call(&mut self.fabric_block_api, r, receiver, args)
+        {
+            return value;
+        }
+        if let Some(value) =
+            fabric_resource_conditions::instance_call(&self.fabric_resource_conditions, r, receiver)
         {
             return value;
         }

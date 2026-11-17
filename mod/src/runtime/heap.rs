@@ -316,6 +316,10 @@ impl StdHost {
         self.brigadier_root_texts(out);
         // A server's saved data (`facade_saved_data.rs`).
         self.saved_data.root_texts(out);
+        // Fabric resource condition types' ids and codecs (`fabric_resource_conditions.rs`).
+        for held in self.fabric_resource_conditions.values() {
+            value(held, out);
+        }
         // NeoForge attachment types and live values (`neoforge_attachments.rs`).
         self.neoforge_attachments.root_texts(out);
         // The objects the loader built and keeps (an entrypoint instance,
@@ -1707,6 +1711,7 @@ mod tests {
             "entity_registration",
             "tool_material",
             "fabric_block_api",
+            "fabric_resource_conditions",
             "vec2",
         ];
         const HOLDS_NO_OBJECT: &[&str] = &[
