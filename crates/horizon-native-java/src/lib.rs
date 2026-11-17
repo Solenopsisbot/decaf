@@ -13151,6 +13151,14 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
         "net/minecraft/core/Direction$Axis" => &["X", "Y", "Z"],
         "net/minecraft/core/Direction$AxisDirection" => &["POSITIVE", "NEGATIVE"],
         "net/minecraft/world/InteractionHand" => &["MAIN_HAND", "OFF_HAND"],
+        "net/minecraft/sounds/SoundSource" => &[
+            "MASTER", "MUSIC", "RECORDS", "WEATHER", "BLOCKS", "HOSTILE", "NEUTRAL", "PLAYERS",
+            "AMBIENT", "VOICE", "UI",
+        ],
+        "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation" => {
+            &["ADD_VALUE", "ADD_MULTIPLIED_BASE", "ADD_MULTIPLIED_TOTAL"]
+        }
+        "net/minecraft/world/entity/HumanoidArm" => &["LEFT", "RIGHT"],
         "net/minecraft/world/entity/EquipmentSlot" => {
             &["MAINHAND", "OFFHAND", "FEET", "LEGS", "CHEST", "HEAD"]
         }
@@ -25961,6 +25969,55 @@ impl<H: Host> Runtime<'_, H> {
         Some(self.new_array_value(&format!("[L{};", r.owner), values))
     }
 
+    /// `E.valueOf(String)` on a game enum whose constants the host lists
+    /// (`game_enum_constants`): the same value `E.values()` holds at that
+    /// constant's position, so it is the constant itself. `Enum.valueOf`'s
+    /// failures are Java's: a null name is `NullPointerException("Name is
+    /// null")`, an unknown one `IllegalArgumentException("No enum constant
+    /// <canonical class name>.<name>")`.
+    fn invoke_game_enum_value_of(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.name != "valueOf" || r.descriptor != format!("(Ljava/lang/String;)L{};", r.owner) {
+            return Ok(None);
+        }
+        let Some(constants) = game_enum_constants(&r.owner) else {
+            return Ok(None);
+        };
+        let name = match args.first() {
+            Some(Value::Ref(Some(name))) => name,
+            Some(Value::Ref(None)) => {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: Some("Name is null".into()),
+                    frame: None,
+                });
+            }
+            _ => return Ok(None),
+        };
+        let Some(index) = constants.iter().position(|constant| constant == name) else {
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/IllegalArgumentException".into(),
+                message: Some(format!(
+                    "No enum constant {}.{name}",
+                    r.owner.replace(['/', '$'], ".")
+                )),
+                frame: None,
+            });
+        };
+        let values = MethodRef {
+            owner: r.owner.clone(),
+            name: "values".into(),
+            descriptor: format!("()[L{};", r.owner),
+        };
+        let Some(array) = self.invoke_game_enum_values(&values) else {
+            return Ok(None);
+        };
+        Ok(self.array(&array)?.get(index).cloned())
+    }
+
     /// Answer the vanilla static helpers mod bootstraps call.
     ///
     /// `Util.make(Supplier)` and `Util.make(value, Consumer)` are shorthands
@@ -27866,6 +27923,24 @@ impl<H: Host> Runtime<'_, H> {
                 .is_some_and(|marker| marker.starts_with(&format!("enum/{}/", r.owner)));
         if r.owner != "java/lang/Enum" && !game_constant {
             return Ok(None);
+        }
+        if game_constant
+            && r.owner == "net/minecraft/sounds/SoundSource"
+            && r.name == "getName"
+            && r.descriptor == "()Ljava/lang/String;"
+        {
+            let name = receiver
+                .and_then(expect_ref)
+                .and_then(|m| m.rsplit("/").next())
+                .map(|n| match n {
+                    "MASTER" => "master".to_owned(),
+                    "MUSIC" => "music".to_owned(),
+                    "RECORDS" => "record".to_owned(),
+                    "BLOCKS" => "block".to_owned(),
+                    "PLAYERS" => "player".to_owned(),
+                    _ => n.to_ascii_lowercase(),
+                });
+            return Ok(name.map(|name| Value::Ref(Some(name))));
         }
         if game_constant && matches!(r.name.as_str(), "name" | "toString") {
             let name = receiver
@@ -30541,6 +30616,10 @@ impl<H: Host> Runtime<'_, H> {
                     ) {
                         value
                     } else if let Some(value) = self.invoke_game_enum_values(&r) {
+                        value
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_game_enum_value_of(&r, &args))
+                    {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
