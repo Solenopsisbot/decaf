@@ -1,0 +1,8 @@
+read=65,255,-1
+readPart=2:0,20,30,0,0,:0
+zero=0:1
+bad=java.lang.IndexOutOfBoundsException:Range [2, 2 + 1) out of bounds for length 2
+negative=0
+past=2:0
+all=2,3,
+ctor=2:8:7:-1
