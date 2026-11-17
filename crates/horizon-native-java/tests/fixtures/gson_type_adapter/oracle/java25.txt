@@ -1,6 +1,0 @@
-{"value":"hi"}
-{
-  "text": "hi"
-}
-{}
-COUNTED
