@@ -13862,12 +13862,12 @@ fn format_java_string_call<H: Host>(
 ) -> Result<Value, NativeError> {
     let text = match (r.descriptor.as_str(), args) {
         ("(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;", [format, values]) => {
-            runtime.java_format(None, format, values)
+            runtime.java_format(None, format, values)?
         }
         (
             "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
             [locale, format, values],
-        ) => runtime.java_format(Some(locale), format, values),
+        ) => runtime.java_format(Some(locale), format, values)?,
         _ => None,
     };
     match text {
@@ -27404,9 +27404,9 @@ impl<H: Host> Runtime<'_, H> {
                         // A call the formatter cannot answer exactly stays
                         // with the host, as an unknown call.
                         let text = match args {
-                            [format, values] => self.java_format(None, format, values),
+                            [format, values] => self.java_format(None, format, values)?,
                             [locale, format, values] => {
-                                self.java_format(Some(locale), format, values)
+                                self.java_format(Some(locale), format, values)?
                             }
                             _ => None,
                         };
@@ -30607,6 +30607,14 @@ impl<H: Host> Runtime<'_, H> {
                         // anything is dispatched. An `@Redirect` or a cancelling
                         // hook above replaced the call, so it never ran.
                         invoke_or_catch!(at, Err(null_checks::invoke_on_null(&r)))
+                    } else if r.owner == "java/lang/String"
+                        && r.name == "format"
+                        && (r.descriptor
+                            == "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"
+                            || r.descriptor
+                                == "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;")
+                    {
+                        invoke_or_catch!(at, format_java_string_call(self, &r, &args))
                     } else if let Some(value) = invoke_or_catch!(
                         at,
                         self.invoke_unmodifiable_sublist(&r, op, receiver.as_ref(), &args)
@@ -30906,14 +30914,6 @@ impl<H: Host> Runtime<'_, H> {
                         // NeoForge's `IEventBus#addListener` (`neoforge_bus.rs`).
                         value
                     } else if r.owner == "java/lang/String"
-                        && r.name == "format"
-                        && (r.descriptor
-                            == "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"
-                            || r.descriptor
-                                == "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;")
-                    {
-                        invoke_or_catch!(at, format_java_string_call(self, &r, &args))
-                    } else if r.owner == "java/lang/String"
                         && r.name == "formatted"
                         && r.descriptor == "([Ljava/lang/Object;)Ljava/lang/String;"
                         && let Some(format) = receiver.clone()
@@ -30922,7 +30922,8 @@ impl<H: Host> Runtime<'_, H> {
                         // `text.formatted(args)` is `String.format(text, args)`.
                         // A call the formatter refuses goes to the host as
                         // the `formatted` call it is, so the count names it.
-                        match self.java_format(None, &format, values) {
+                        // A jar `toString()` that throws makes `formatted` throw it.
+                        match invoke_or_catch!(at, self.java_format(None, &format, values)) {
                             Some(text) => Value::Ref(Some(text)),
                             None => {
                                 invoke_or_catch!(at, self.host.invoke_instance(&r, &format, &args))
