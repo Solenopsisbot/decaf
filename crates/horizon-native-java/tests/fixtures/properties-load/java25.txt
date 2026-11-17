@@ -1,0 +1,36 @@
+x00=a b=c;
+x01=a b=c;
+x02=a b=c;
+x03=a b=c;
+x10=a=one#two;
+x11=a=one#two;
+x12=a=one#two;
+x13=a=one#two;
+x20=a\fb=;
+x21=a\fb=;
+x22=a\fb=;
+x23=a\fb=;
+x30=aÂ b=c;
+x31=a b=c;
+x32=a b=c;
+x33=a b=c;
+x40=a=b;
+x41=a=b;
+x42=a=b;
+x43=a=b;
+x50=x50=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+x51=x51=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+x52=x52=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+x53=x53=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+x60=x60=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+x61=x61=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+x62=x62=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+x63=x63=java.lang.IllegalArgumentException:Malformed \uxxxx encoding.
+x70=e=Ã©;
+x71=e=é;
+x72=e=é;
+x73=e=é;
+empty=null
+names=zeta,shared,alpha,d1
+add=java.lang.UnsupportedOperationException
+snapshot=false|4

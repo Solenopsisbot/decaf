@@ -87,7 +87,9 @@ fn server_kind(rest: &str) -> HostKind {
         "level" => HostKind::GameLevel,
         "server" | "player-list" | "commands" | "rules" | "registries" | "saved-data"
         | "world-border" => HostKind::GameSingleton,
-        "item" | "block" | "block-state" | "registry" => HostKind::GameRegistryObject,
+        "item" | "block" | "block-state" | "registry" | "entity_type" => {
+            HostKind::GameRegistryObject
+        }
         // `damage`, `stack`, `block-hit`, `connection`, `packet-sender`,
         // `unknown`, `<what>/0` placeholders, and any family a model adds
         // before it gets a row: their own objects (never one shared object).
@@ -590,6 +592,7 @@ pub(crate) fn value_canonical(key: &str) -> bool {
     crate::client_values::canonical(key)
         || crate::server_values::canonical(key)
         || key.starts_with("client/input-key/")
+        || key.starts_with("game/entity_type/")
         || key == "client/stack/empty"
 }
 

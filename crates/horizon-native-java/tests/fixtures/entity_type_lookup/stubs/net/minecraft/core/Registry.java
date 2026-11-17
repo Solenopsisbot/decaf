@@ -1,0 +1,1 @@
+package net.minecraft.core; import net.minecraft.resources.Identifier; import java.util.Optional; public interface Registry<T>{ Optional<T> getOptional(Identifier i); Optional<T> get(Identifier i); T getValue(Identifier i); boolean containsKey(Identifier i); }

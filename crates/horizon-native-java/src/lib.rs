@@ -13,6 +13,7 @@ use std::{
     fs::File,
     path::Path,
     sync::Arc,
+    time::Instant,
 };
 
 #[cfg(test)]
@@ -221,6 +222,7 @@ mod open_options;
 mod optionull;
 mod owned_class;
 mod parked_threads;
+mod scanner_model;
 mod server_values;
 mod tool_material;
 mod vanilla_entity_data_pool;
@@ -267,6 +269,7 @@ mod type_switch;
 mod value_class;
 mod vanilla_block_items;
 mod vanilla_blocks;
+mod vanilla_entity_types;
 mod vanilla_holders;
 mod vanilla_holders_table;
 mod vanilla_items;
@@ -2376,6 +2379,9 @@ pub struct EventDispatch {
 /// keeps no such state", which the caller turns into a counted path of its own (#246's review:
 /// a silent `null` from `unknown_operand_call` printed a hook-tier player as `null`).
 pub trait Host {
+    fn properties_put_all(&mut self, _marker: &str, _entries: Vec<(String, String)>) -> bool {
+        false
+    }
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         Err(NativeError::UnknownHostCall(r.clone()))
     }
@@ -3373,6 +3379,8 @@ pub struct StdHost {
     /// integer value, so this is intentionally an `i32` rather than a host
     /// clock read.  Keeping the value seeded makes bootstrap replayable.
     current_time_millis: i32,
+    /// Monotonic origin for `System.nanoTime`; each host gets its own clock.
+    nano_time_origin: Instant,
     mods: BTreeMap<String, String>,
     /// Each mod of a linked NeoForge jar: its own version, its file's first
     /// mod and that mod's version (`ModList`, `LoadingModList.getModFileById`,
@@ -3501,6 +3509,8 @@ pub struct StdHost {
     shared_empties: BTreeMap<&'static str, String>,
     /// Explicitly seeded Minecraft RandomSource state, keyed by its host handle.
     random_sources: BTreeMap<String, random_source::State>,
+    random_seed_uniquifier: u64,
+    random_time_origin: std::time::Instant,
     /// The collections Java hands out as the same object on every call (a
     /// map's views, `System.getProperties()`), by what they are of: their
     /// keys (`StdHost::cached_collection`).
@@ -3702,6 +3712,7 @@ impl StdHost {
             block_items: BTreeMap::new(),
             service_providers: BTreeMap::new(),
             current_time_millis: 0,
+            nano_time_origin: Instant::now(),
             mods: BTreeMap::new(),
             neoforge_mod_files: BTreeMap::new(),
             run_loader: class_precedence::RunLoader::default(),
@@ -3752,6 +3763,8 @@ impl StdHost {
             component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             random_sources: BTreeMap::new(),
+            random_seed_uniquifier: 8_682_522_807_148_012,
+            random_time_origin: std::time::Instant::now(),
             empty_collections: std::collections::BTreeSet::new(),
             shared_empties: BTreeMap::new(),
             cached_collections: BTreeMap::new(),
@@ -4685,6 +4698,26 @@ impl StdHost {
     /// parse happens here; `getProperty` answers from the same table `get`
     /// uses. The format's escapes and continuations are read as plain
     /// assignments, which is what a metadata file declares.
+    pub(crate) fn properties_put_all(&mut self, marker: &str, additions: Vec<(String, String)>) {
+        let values = self
+            .mutable_collections
+            .entry(marker.to_owned())
+            .or_default();
+        for (key, value) in additions {
+            let key = Value::Ref(Some(key));
+            let value = Value::Ref(Some(value));
+            match values
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .find(|pair| pair[0] == key)
+            {
+                Some(pair) => pair[1] = value,
+                None => values.extend([key, value]),
+            }
+        }
+    }
+
     fn properties_member(
         &mut self,
         r: &MethodRef,
@@ -4692,36 +4725,32 @@ impl StdHost {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         match (r.name.as_str(), r.descriptor.as_str()) {
-            ("load", "(Ljava/io/InputStream;)V") | ("load", "(Ljava/io/Reader;)V") => {
-                // Only a host resource stream has bytes the host can parse.
-                // Any other stream (a file the jar opened, a null) would load
-                // entries the host never sees, so the call is counted rather
-                // than answered as an empty load.
-                let Some((bytes, index)) = expect_ref(Self::argument(r, args, 0)?)
-                    .and_then(|stream| self.resource_streams.get_mut(stream))
-                else {
+            ("load", "(Ljava/io/Reader;)V") => self.unknown_host_call(r).map(Some),
+            ("load", "(Ljava/io/InputStream;)V") => {
+                let source_value = Self::argument(r, args, 0)?;
+                let source = jar_object::object_key(source_value)
+                    .or_else(|| expect_ref(source_value).map(String::as_str))
+                    .and_then(|stream| {
+                        if let Some((bytes, index)) = self.resource_streams.get_mut(stream) {
+                            let text: String = bytes[*index..].iter().map(|b| *b as char).collect();
+                            *index = bytes.len();
+                            return Some(text);
+                        }
+                        let path = self.io_paths.get(stream)?;
+                        let bytes = self.io_file_bytes.get(path)?;
+                        Some(bytes.iter().map(|b| *b as char).collect())
+                    });
+                let Some(text) = source else {
                     return self.unknown_host_call(r).map(Some);
                 };
-                let text = String::from_utf8_lossy(&bytes[*index..]).into_owned();
-                *index = bytes.len();
-                let additions = properties_entries(&text);
-                let values = self
-                    .mutable_collections
-                    .entry(marker.to_owned())
-                    .or_default();
-                for (key, value) in additions {
-                    let key = Value::Ref(Some(key));
-                    let value = Value::Ref(Some(value));
-                    match values
-                        .as_chunks_mut::<2>()
-                        .0
-                        .iter_mut()
-                        .find(|pair| pair[0] == key)
-                    {
-                        Some(pair) => pair[1] = value,
-                        None => values.extend([key, value]),
+                let additions = properties_entries(&text).map_err(|message| {
+                    NativeError::UncaughtException {
+                        class: "java/lang/IllegalArgumentException".into(),
+                        message: Some(message),
+                        frame: None,
                     }
-                }
+                })?;
+                self.properties_put_all(marker, additions);
                 Ok(Some(Value::Void))
             }
             ("getProperty", "(Ljava/lang/String;)Ljava/lang/String;") => {
@@ -4776,8 +4805,58 @@ impl StdHost {
                 values.extend([key, value]);
                 Ok(Some(Value::Ref(None)))
             }
-            ("stringPropertyNames", "()Ljava/util/Set;")
-            | ("keys", "()Ljava/util/Enumeration;")
+            ("stringPropertyNames", "()Ljava/util/Set;") => {
+                // JDK 25: `enumerateStringProperties(h)` fills a new `HashMap<String, String>`
+                // with the defaults chain's entries first, then this table's (a later put
+                // overwrites an earlier key), keeping only entries whose key and value are both
+                // `String`s; the answer is `Collections.unmodifiableSet(h.keySet())`, a snapshot
+                // in `HashMap` order that throws on `add`.
+                let mut chain = Vec::new();
+                let mut current = Some(marker.to_owned());
+                let mut seen = BTreeSet::new();
+                while let Some(owner) = current
+                    && seen.insert(owner.clone())
+                {
+                    current = self.properties_defaults(&owner);
+                    chain.push(owner);
+                }
+                let mut keys: Vec<Value> = Vec::new();
+                for owner in chain.iter().rev() {
+                    let Some(pairs) = self.mutable_collections.get(owner) else {
+                        continue;
+                    };
+                    for pair in pairs.as_chunks::<2>().0 {
+                        if let (Value::Ref(Some(_)), Value::Ref(Some(_))) = (&pair[0], &pair[1])
+                            && !keys.contains(&pair[0])
+                        {
+                            keys.push(pair[0].clone());
+                        }
+                    }
+                }
+                // `h.keySet()` iterates the `HashMap`'s bins, not insertion order
+                // (`hash_map_order.rs`); a bin Java would turn into a tree has no known order,
+                // so the call is counted rather than guessed.
+                let texts: Vec<&str> = keys
+                    .iter()
+                    .filter_map(|key| match key {
+                        Value::Ref(Some(text)) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let Some(order) = crate::hash_map_order::key_set_order(&texts, |text| {
+                    crate::hash_map_order::java_string_hash(text)
+                }) else {
+                    return self.unknown_host_call(r).map(Some);
+                };
+                let keys: Vec<Value> = order.into_iter().map(|i| keys[i].clone()).collect();
+                let snapshot = self.new_collection("java/util/HashSet", keys);
+                match self.unmodifiable_view_as("java/util/Collections$UnmodifiableSet", &snapshot)
+                {
+                    Some(view) => Ok(Some(view)),
+                    None => self.unknown_host_call(r).map(Some),
+                }
+            }
+            ("keys", "()Ljava/util/Enumeration;")
             | ("propertyNames", "()Ljava/util/Enumeration;")
             | ("keySet", "()Ljava/util/Set;")
             | ("values", "()Ljava/util/Collection;") => self.unknown_host_call(r).map(Some),
@@ -5655,6 +5734,10 @@ pub(crate) fn check_jdk_capacity(r: &MethodRef, args: &[Value]) -> Result<(), Na
 }
 
 impl Host for StdHost {
+    fn properties_put_all(&mut self, marker: &str, entries: Vec<(String, String)>) -> bool {
+        self.properties_put_all(marker, entries);
+        true
+    }
     fn register_render_handle(&mut self, key: &str) {
         self.register_render_handle(key);
     }
@@ -8017,8 +8100,13 @@ impl Host for StdHost {
                 }))
             }
             ("java/lang/System", "currentTimeMillis", "()J") => {
-                Ok(Value::Int(self.current_time_millis))
+                Ok(Value::Long(i64::from(self.current_time_millis)))
             }
+            // Unlike the host-seeded currentTimeMillis, nanoTime has Java’s arbitrary origin.
+            // It is intentionally a real monotonic clock and therefore is not replay-deterministic.
+            ("java/lang/System", "nanoTime", "()J") => Ok(Value::Long(
+                self.nano_time_origin.elapsed().as_nanos() as i64,
+            )),
             ("java/lang/System", "lineSeparator", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some("\n".into())))
             }
@@ -10123,6 +10211,7 @@ impl Host for StdHost {
                 && self.iterator_sources.get(marker).is_some_and(|source| {
                     source.starts_with("java/util/Collections$Unmodifiable")
                         || source == "java/util/Collections$SingletonList"
+                        || source.starts_with("fabric/custom-value/")
                 })
             {
                 return Err(NativeError::UncaughtException {
@@ -13862,12 +13951,12 @@ fn format_java_string_call<H: Host>(
 ) -> Result<Value, NativeError> {
     let text = match (r.descriptor.as_str(), args) {
         ("(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;", [format, values]) => {
-            runtime.java_format(None, format, values)
+            runtime.java_format(None, format, values)?
         }
         (
             "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
             [locale, format, values],
-        ) => runtime.java_format(Some(locale), format, values),
+        ) => runtime.java_format(Some(locale), format, values)?,
         _ => None,
     };
     match text {
@@ -14515,52 +14604,138 @@ fn string_from_char_code(code: i32) -> String {
     char::from_u32(code as u32).map_or_else(String::new, String::from)
 }
 
-fn properties_entries(text: &str) -> Vec<(String, String)> {
-    let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
-            continue;
-        }
-        let (key, value) = match line.split_once('=') {
-            Some((key, value)) => (key, value),
-            None => match line.split_once(':') {
-                Some((key, value)) => (key, value),
-                None => match line.split_once(char::is_whitespace) {
-                    Some((key, value)) => (key, value),
-                    None => (line, ""),
-                },
-            },
-        };
-        entries.push((
-            property_unescape(key.trim()),
-            property_unescape(value.trim()),
-        ));
-    }
-    entries
+/// The physical lines of a `.properties` text, without their terminators: like JDK 25's
+/// `Properties.LineReader`, `\r\n` is ONE terminator, and a lone `\r` or `\n` ends a line too.
+/// (Splitting on `\r` and `\n` separately would turn every `\r\n` into an extra empty line,
+/// which ends a `\`-continued entry early.)
+/// [`properties_entries`] for the integration tests.
+#[doc(hidden)]
+pub fn properties_entries_for_tests(text: &str) -> Result<Vec<(String, String)>, String> {
+    properties_entries(text)
 }
 
-/// Undo the escapes a `.properties` value may carry.
-fn property_unescape(text: &str) -> String {
-    let mut value = String::with_capacity(text.len());
-    let mut escaped = false;
-    for character in text.chars() {
-        if escaped {
-            value.push(match character {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'f' => '\u{0c}',
-                other => other,
-            });
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else {
-            value.push(character);
+fn properties_physical_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                lines.push(&text[start..i]);
+                i += if bytes.get(i + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = i;
+            }
+            b'\n' => {
+                lines.push(&text[start..i]);
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
         }
     }
-    value
+    if start < bytes.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+fn properties_entries(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut logical = Vec::new();
+    let mut current = String::new();
+    for line in properties_physical_lines(text) {
+        let continued = line.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1;
+        let mut part = line.to_owned();
+        if continued {
+            part.pop();
+        }
+        if !current.is_empty() {
+            part = part.trim_start_matches([' ', '\t', '\u{000c}']).to_owned();
+        }
+        current.push_str(&part);
+        if !continued {
+            logical.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        logical.push(current);
+    }
+    let mut out = Vec::new();
+    for line in logical {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() && matches!(chars[i], ' ' | '\t' | '\u{000c}') {
+            i += 1;
+        }
+        if i == chars.len() || chars[i] == '#' || chars[i] == '!' {
+            continue;
+        }
+        let start = i;
+        let mut escaped = false;
+        while i < chars.len() {
+            let c = chars[i];
+            if !escaped && matches!(c, '=' | ':' | ' ' | '\t' | '\u{000c}') {
+                break;
+            }
+            if c == '\\' {
+                escaped = !escaped;
+            } else {
+                escaped = false;
+            }
+            i += 1;
+        }
+        let end = i;
+        while i < chars.len() && matches!(chars[i], ' ' | '\t' | '\u{000c}') {
+            i += 1;
+        }
+        if i < chars.len() && matches!(chars[i], '=' | ':') {
+            i += 1;
+            while i < chars.len() && matches!(chars[i], ' ' | '\t' | '\u{000c}') {
+                i += 1;
+            }
+        }
+        out.push((
+            property_unescape(&chars[start..end].iter().collect::<String>())?,
+            property_unescape(&chars[i..].iter().collect::<String>())?,
+        ));
+    }
+    Ok(out)
+}
+fn property_unescape(text: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut it = text.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('f') => out.push('\u{c}'),
+            Some('u') => {
+                let mut n = 0u32;
+                for _ in 0..4 {
+                    let Some(c) = it.next() else {
+                        return Err("Malformed \\uxxxx encoding.".into());
+                    };
+                    let Some(d) = c.to_digit(16) else {
+                        return Err("Malformed \\uxxxx encoding.".into());
+                    };
+                    n = n * 16 + d;
+                }
+                out.push(char::from_u32(n).unwrap());
+            }
+            Some(x) => out.push(x),
+            None => out.push('\\'),
+        }
+    }
+    Ok(out)
 }
 
 /// The JDK's range check for a list read, write or removal.
@@ -19885,6 +20060,8 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
@@ -20100,6 +20277,8 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
@@ -20271,6 +20450,8 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
@@ -22482,6 +22663,8 @@ struct Runtime<'a, H> {
     /// reader) this invocation built exposes to `Reader#read` and to
     /// `Gson.fromJson(Reader, Class)`, keyed by the reader's marker.
     string_readers: BTreeMap<String, String>,
+    scanners: BTreeMap<String, scanner_model::ScannerState>,
+    io_stream_paths: BTreeMap<String, String>,
     /// Text each `java.io` writer this invocation built holds, keyed by its
     /// sink: `file:<path>` for a writer over a virtual file, `mem:<marker>` for
     /// one that only exists in memory. A wrapper (`BufferedWriter`,
@@ -26267,7 +26450,8 @@ impl<H: Host> Runtime<'_, H> {
             return None;
         }
         // A loader enum whose constants are host handles (`ModConfig.Type`).
-        if let Some(values) = crate::host_neoforge_loader::enum_values(&r.owner)
+        if let Some(values) = crate::fabric_mods::enum_values(&r.owner)
+            .or_else(|| crate::host_neoforge_loader::enum_values(&r.owner))
             .or_else(|| crate::host_fabric_runtime::enum_values(&r.owner))
             && r.descriptor == format!("()[L{};", r.owner)
         {
@@ -26304,7 +26488,9 @@ impl<H: Host> Runtime<'_, H> {
         if r.name != "valueOf" || r.descriptor != format!("(Ljava/lang/String;)L{};", r.owner) {
             return Ok(None);
         }
-        let Some(constants) = game_enum_constants(&r.owner) else {
+        let Some(constants) =
+            game_enum_constants(&r.owner).or_else(|| crate::fabric_mods::enum_constants(&r.owner))
+        else {
             return Ok(None);
         };
         let name = match args.first() {
@@ -26694,6 +26880,8 @@ impl<H: Host> Runtime<'_, H> {
             });
         };
         self.string_readers.insert(marker.to_owned(), text);
+        self.io_stream_paths
+            .insert(marker.to_owned(), path.to_owned());
         Ok(())
     }
 
@@ -26722,6 +26910,102 @@ impl<H: Host> Runtime<'_, H> {
             })
             .cloned();
         match r.owner.as_str() {
+            "java/util/Scanner" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("<init>", "(Ljava/io/File;)V") => {
+                        let Some(path) = args.first().and_then(|v| self.io_path_of(v)) else {
+                            return Ok(None);
+                        };
+                        let key = host_path::sandbox_canonical(&path);
+                        let Some(bytes) = self.io_file_bytes.get(&key) else {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/io/FileNotFoundException".into(),
+                                message: Some(format!("{} (No such file or directory)", path)),
+                                frame: None,
+                            });
+                        };
+                        // Java's strict decoder stops at malformed input and the scanner
+                        // ends there (`lastException`); how much of the valid prefix it
+                        // yields depends on StreamDecoder's buffering, so reads are counted.
+                        let Ok(text) = String::from_utf8(bytes.clone()) else {
+                            self.scanners.insert(
+                                marker,
+                                scanner_model::ScannerState {
+                                    text: String::new(),
+                                    pos: 0,
+                                    closed: false,
+                                    unknown: true,
+                                },
+                            );
+                            return Ok(Some(Value::Void));
+                        };
+                        self.scanners.insert(
+                            marker,
+                            scanner_model::ScannerState {
+                                text,
+                                pos: 0,
+                                closed: false,
+                                unknown: false,
+                            },
+                        );
+                        Ok(Some(Value::Void))
+                    }
+                    ("hasNextLine", "()Z") => {
+                        let Some(st) = self.scanners.get(&marker) else {
+                            return Ok(None);
+                        };
+                        // Java's `Scanner.ensureOpen()` runs first: a closed scanner throws
+                        // rather than answering `false`.
+                        if st.closed {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/lang/IllegalStateException".into(),
+                                message: Some("Scanner closed".into()),
+                                frame: None,
+                            });
+                        }
+                        if st.unknown {
+                            return Ok(None);
+                        }
+                        Ok(Some(Value::Int(i32::from(
+                            scanner_model::next_line(&st.text, st.pos).is_some(),
+                        ))))
+                    }
+                    ("nextLine", "()Ljava/lang/String;") => {
+                        let Some(st) = self.scanners.get_mut(&marker) else {
+                            return Ok(None);
+                        };
+                        if st.closed {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/lang/IllegalStateException".into(),
+                                message: Some("Scanner closed".into()),
+                                frame: None,
+                            });
+                        }
+                        if st.unknown {
+                            return Ok(None);
+                        }
+                        let Some((line, pos)) = scanner_model::next_line(&st.text, st.pos) else {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("No line found".into()),
+                                frame: None,
+                            });
+                        };
+                        st.pos = pos;
+                        Ok(Some(Value::Ref(Some(line))))
+                    }
+                    ("close", "()V") => {
+                        if let Some(st) = self.scanners.get_mut(&marker) {
+                            st.closed = true;
+                        }
+                        Ok(Some(Value::Void))
+                    }
+                    _ => Ok(None),
+                }
+            }
             "java/io/File" => {
                 let Some(marker) = receiver_marker else {
                     return Ok(None);
@@ -27007,30 +27291,32 @@ impl<H: Host> Runtime<'_, H> {
                         args.first().cloned().unwrap_or(Value::Ref(None))
                     }
                     ("write", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
-                        let text = args
-                            .get(1)
-                            .and_then(|value| self.owned_array(value))
-                            .map(|bytes| {
-                                let bytes = bytes
-                                    .iter()
-                                    .map(|value| match value {
-                                        Value::Int(byte) => *byte as u8,
-                                        _ => 0,
-                                    })
-                                    .collect::<Vec<_>>();
-                                String::from_utf8_lossy(&bytes).into_owned()
-                            })
-                            .unwrap_or_default();
-                        // Lines (`write(Path, Iterable)`) never reach the model's text.
-                        let bytes = args
-                            .get(1)
-                            .is_some_and(|value| self.owned_array(value).is_some());
-                        if bytes {
-                            self.watch_whole_write(&path, text.is_empty());
-                        } else {
-                            self.watch_change(&path, watch_service::Change::Unmodelled);
+                        let bytes =
+                            args.get(1)
+                                .and_then(|value| self.owned_array(value))
+                                .map(|bytes| {
+                                    bytes
+                                        .iter()
+                                        .map(|value| match value {
+                                            Value::Int(byte) => *byte as u8,
+                                            _ => 0,
+                                        })
+                                        .collect::<Vec<_>>()
+                                });
+                        match bytes {
+                            // `write(Path, byte[])` writes the bytes as they are: keep them raw,
+                            // so a later reader (a strict `Scanner` decoder, `readAllBytes`) sees
+                            // malformed UTF-8 rather than its lossy re-encoding.
+                            Some(bytes) => {
+                                self.watch_whole_write(&path, bytes.is_empty());
+                                self.io_store_bytes(path, bytes)?;
+                            }
+                            // Lines (`write(Path, Iterable)`) never reach the model's text.
+                            None => {
+                                self.watch_change(&path, watch_service::Change::Unmodelled);
+                                self.io_store_file(path, String::new())?;
+                            }
                         }
-                        self.io_store_file(path, text)?;
                         args.first().cloned().unwrap_or(Value::Ref(None))
                     }
                     ("createFile", descriptor)
@@ -27105,7 +27391,7 @@ impl<H: Host> Runtime<'_, H> {
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         let value = self.new_object("java/io/BufferedReader");
-                        if let Some(reader) = expect_ref(&value) {
+                        if let Some(reader) = jar_object::object_key(&value) {
                             self.io_open_reader(r, reader, &path, false)?;
                         }
                         value
@@ -27114,7 +27400,7 @@ impl<H: Host> Runtime<'_, H> {
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         let value = self.new_object("java/io/BufferedWriter");
-                        if let Some(writer) = expect_ref(&value) {
+                        if let Some(writer) = jar_object::object_key(&value) {
                             self.io_open_writer(writer, Some(path), true)?;
                             self.io_set_writer_charset(writer, args);
                         }
@@ -27124,7 +27410,7 @@ impl<H: Host> Runtime<'_, H> {
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         let value = self.new_object("java/io/FileInputStream");
-                        if let Some(stream) = expect_ref(&value) {
+                        if let Some(stream) = jar_object::object_key(&value) {
                             self.io_open_reader(r, stream, &path, false)?;
                         }
                         value
@@ -27133,7 +27419,7 @@ impl<H: Host> Runtime<'_, H> {
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         let value = self.new_object("java/io/FileOutputStream");
-                        if let Some(stream) = expect_ref(&value) {
+                        if let Some(stream) = jar_object::object_key(&value) {
                             self.io_open_writer(stream, Some(path), true)?;
                         }
                         value
@@ -27404,9 +27690,9 @@ impl<H: Host> Runtime<'_, H> {
                         // A call the formatter cannot answer exactly stays
                         // with the host, as an unknown call.
                         let text = match args {
-                            [format, values] => self.java_format(None, format, values),
+                            [format, values] => self.java_format(None, format, values)?,
                             [locale, format, values] => {
-                                self.java_format(Some(locale), format, values)
+                                self.java_format(Some(locale), format, values)?
                             }
                             _ => None,
                         };
@@ -28030,6 +28316,64 @@ impl<H: Host> Runtime<'_, H> {
     /// string. Objects of a jar's own class are not instantiated (that needs
     /// field injection the native path does not model), so their JSON shape is
     /// returned as a modelled map, never as a masked empty value.
+    fn invoke_properties_reader(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "java/util/Properties"
+            || r.name != "load"
+            || !matches!(
+                r.descriptor.as_str(),
+                "(Ljava/io/Reader;)V" | "(Ljava/io/InputStream;)V"
+            )
+        {
+            return Ok(None);
+        }
+        let (Some(marker), Some(reader)) = (
+            receiver
+                .and_then(expect_ref)
+                .map(String::as_str)
+                .or_else(|| receiver.and_then(jar_object::object_key)),
+            args.first()
+                .and_then(jar_object::object_key)
+                .or_else(|| args.first().and_then(expect_ref).map(String::as_str)),
+        ) else {
+            return Ok(None);
+        };
+        let text = if r.descriptor == "(Ljava/io/InputStream;)V" {
+            // A stream `Files.newInputStream`/`FileInputStream` opened over a file the
+            // invocation wrote: `io_open_reader` recorded its path. `load(InputStream)`
+            // reads the file's bytes as ISO-8859-1, one char per byte, to the end.
+            let Some(path) = self.io_stream_paths.get(reader).cloned() else {
+                return Ok(None);
+            };
+            let Some(bytes) = self.io_file_bytes.get(&path) else {
+                return Ok(None);
+            };
+            let text = bytes.iter().map(|b| char::from(*b)).collect::<String>();
+            // Consumed: a later read sees the end of the stream.
+            self.string_readers.insert(reader.to_owned(), String::new());
+            text
+        } else {
+            let Some(text) = self.string_readers.remove(reader) else {
+                return Ok(None);
+            };
+            self.string_readers.insert(reader.to_owned(), String::new());
+            text
+        };
+        let entries = properties_entries(&text).map_err(|m| NativeError::UncaughtException {
+            class: "java/lang/IllegalArgumentException".into(),
+            message: Some(m),
+            frame: None,
+        })?;
+        if !self.host.properties_put_all(marker, entries) {
+            return self.host.unknown_operand_call(r).map(Some);
+        }
+        Ok(Some(Value::Void))
+    }
+
     fn invoke_gson(
         &mut self,
         r: &MethodRef,
@@ -30607,6 +30951,19 @@ impl<H: Host> Runtime<'_, H> {
                         // anything is dispatched. An `@Redirect` or a cancelling
                         // hook above replaced the call, so it never ran.
                         invoke_or_catch!(at, Err(null_checks::invoke_on_null(&r)))
+                    } else if r.owner == "java/lang/String"
+                        && r.name == "format"
+                        && (r.descriptor
+                            == "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"
+                            || r.descriptor
+                                == "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;")
+                    {
+                        invoke_or_catch!(at, format_java_string_call(self, &r, &args))
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_properties_reader(&r, receiver.as_ref(), &args)
+                    ) {
+                        value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
                         self.invoke_unmodifiable_sublist(&r, op, receiver.as_ref(), &args)
@@ -30906,14 +31263,6 @@ impl<H: Host> Runtime<'_, H> {
                         // NeoForge's `IEventBus#addListener` (`neoforge_bus.rs`).
                         value
                     } else if r.owner == "java/lang/String"
-                        && r.name == "format"
-                        && (r.descriptor
-                            == "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"
-                            || r.descriptor
-                                == "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;")
-                    {
-                        invoke_or_catch!(at, format_java_string_call(self, &r, &args))
-                    } else if r.owner == "java/lang/String"
                         && r.name == "formatted"
                         && r.descriptor == "([Ljava/lang/Object;)Ljava/lang/String;"
                         && let Some(format) = receiver.clone()
@@ -30922,7 +31271,8 @@ impl<H: Host> Runtime<'_, H> {
                         // `text.formatted(args)` is `String.format(text, args)`.
                         // A call the formatter refuses goes to the host as
                         // the `formatted` call it is, so the count names it.
-                        match self.java_format(None, &format, values) {
+                        // A jar `toString()` that throws makes `formatted` throw it.
+                        match invoke_or_catch!(at, self.java_format(None, &format, values)) {
                             Some(text) => Value::Ref(Some(text)),
                             None => {
                                 invoke_or_catch!(at, self.host.invoke_instance(&r, &format, &args))
@@ -36004,6 +36354,8 @@ mod tests {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -36076,6 +36428,8 @@ mod tests {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -41721,14 +42075,14 @@ mandatory = true
         };
         assert_eq!(
             host.invoke(&current_time_millis, &[]).unwrap(),
-            Value::Int(1_700_000_000)
+            Value::Long(1_700_000_000)
         );
 
         // The default is deterministic too; no host clock is consulted.
         let mut default_host = StdHost::new();
         assert_eq!(
             default_host.invoke(&current_time_millis, &[]).unwrap(),
-            Value::Int(0)
+            Value::Long(0)
         );
         let identity_hash = MethodRef {
             owner: "java/lang/System".into(),
@@ -43228,6 +43582,8 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -43442,6 +43798,8 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -43631,6 +43989,8 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -43996,6 +44356,8 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -44305,6 +44667,8 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -49572,6 +49936,8 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -49631,6 +49997,8 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),

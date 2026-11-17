@@ -20,11 +20,11 @@ impl<H: Host> Runtime<'_, H> {
         locale: Option<&Value>,
         format: &Value,
         args: &Value,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, NativeError> {
         if let Some(locale) = locale
             && !formats_like_us(locale)
         {
-            return None;
+            return Ok(None);
         }
         // The player's default FORMAT locale is outside the bounded host.
         // Keep only conversions whose output cannot observe it; grouping,
@@ -33,29 +33,40 @@ impl<H: Host> Runtime<'_, H> {
         // The parameter is a `String`, so any reference is its text; a null
         // format throws.
         let Value::Ref(Some(format)) = format else {
-            return None;
+            return Ok(None);
         };
         let args = match args {
             // `String.format(f, (Object[]) null)` formats every argument as
             // null.
             Value::Ref(None) => None,
-            array => Some(self.array(array).ok()?.into_owned()),
+            array => match self.array(array) {
+                Ok(values) => Some(values.into_owned()),
+                // An argument array the runtime doesn't hold: counted.
+                Err(_) => return Ok(None),
+            },
         };
         if locale.is_none() && default_locale_sensitive(format, args.as_deref()) {
-            return None;
+            return Ok(None);
         }
-        let args = args.map(|values| {
-            values
-                .iter()
-                .map(|value| self.format_arg(value))
-                .collect::<Vec<_>>()
-        });
-        java_format::format(format, args.as_deref())
+        let values = args;
+        let mut resolve = |index: usize, conversion: char| {
+            let Some(values) = values.as_deref() else {
+                return Ok(Some(Arg::Null));
+            };
+            let Some(value) = values.get(index) else {
+                return Ok(None);
+            };
+            if conversion != 's' && crate::jar_object::packaged_object_class(value).is_some() {
+                return Ok(None);
+            }
+            self.format_arg(value).map(Some)
+        };
+        java_format::format_with(format, values.is_some(), &mut resolve)
     }
 
     /// One element of the `Object[]`, classed as `Object.getClass` would
     /// class it (`class_of_value`).
-    fn format_arg(&mut self, value: &Value) -> Arg {
+    fn format_arg(&mut self, value: &Value) -> Result<Arg, NativeError> {
         // Java dispatches %s on Formattable through the jar object's
         // formatTo(Formatter, flags, width, precision), not toString(). The
         // bounded runtime does not yet execute that callback, so refuse the
@@ -70,45 +81,47 @@ impl<H: Host> Runtime<'_, H> {
                 None => handle.kind() == crate::host_ref::HostKind::JarObject,
             }
         {
-            return Arg::Opaque;
+            return Ok(Arg::Opaque);
         }
         let marker = match value {
-            Value::Ref(None) => return Arg::Null,
-            Value::Int(value) => return Arg::Int(*value),
-            Value::Long(value) => return Arg::Long(*value),
+            Value::Ref(None) => return Ok(Arg::Null),
+            Value::Int(value) => return Ok(Arg::Int(*value)),
+            Value::Long(value) => return Ok(Arg::Long(*value)),
             // A bare floating-point value is a `Double`; a `Float` is boxed.
-            Value::Float(value) => return Arg::Double(*value),
-            Value::Boxed(boxed) => return boxed_arg(*boxed),
+            Value::Float(value) => return Ok(Arg::Double(*value)),
+            Value::Boxed(boxed) => return Ok(boxed_arg(*boxed)),
             Value::Host(handle) => {
                 return match self.host_ref_text(handle, "", "") {
-                    Ok(Some(text)) => Arg::Str(text),
-                    _ => Arg::Opaque,
+                    Ok(Some(text)) => Ok(Arg::Str(text)),
+                    _ => Ok(Arg::Opaque),
                 };
             }
-            Value::Void => return Arg::Opaque,
+            Value::Void => return Ok(Arg::Opaque),
             Value::Ref(Some(marker)) => marker,
         };
         if let Some(text) = self.builder_text(value) {
-            return Arg::Str(text.clone());
+            return Ok(Arg::Str(text.clone()));
         }
         if value_class::is_plain_string(marker) {
-            return Arg::Str(marker.clone());
+            return Ok(Arg::Str(marker.clone()));
         }
         // A jar object prints its own `toString` (`jar_text.rs`); one that
         // throws, or that only the JVM can print (an identity hash), is
         // refused here and counted by the host.
         if crate::jar_object::packaged_object_class(value).is_some() {
-            return match self.runtime_value_of(value, "java/util/Formatter", "format") {
-                Ok(Some(Value::Ref(Some(text)))) => Arg::Str(text),
-                Ok(Some(Value::Ref(None))) => Arg::Null,
-                _ => Arg::Opaque,
+            return match self.jar_to_string(value, "java/util/Formatter", "format") {
+                Ok(Some(Value::Ref(Some(text)))) => Ok(Arg::Str(text)),
+                Ok(Some(Value::Ref(None))) => Ok(Arg::Null),
+                Ok(Some(_)) => Ok(Arg::Opaque),
+                Ok(None) => Ok(Arg::Opaque),
+                Err(error) => return Err(error),
             };
         }
         // A model object whose `toString` the host answers; anything else
         // (a marker no model prints) cannot be printed or hashed exactly.
         match self.host.modelled_to_string(value) {
-            Some(text) => Arg::Str(text),
-            None => Arg::Opaque,
+            Some(text) => Ok(Arg::Str(text)),
+            None => Ok(Arg::Opaque),
         }
     }
 }

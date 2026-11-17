@@ -217,7 +217,10 @@ pub(crate) fn locale(language: &str, country: &str) -> Value {
 /// The language and country of a `Locale` handle. The key is the runtime's: a language and a
 /// country never hold `_`.
 pub(crate) fn locale_parts(value: &Value) -> Option<(&str, &str)> {
-    key_of(value, HostKind::Locale)?.split_once('_')
+    {
+        let key = key_of(value, HostKind::Locale)?;
+        Some(key.split_once('_').unwrap_or(("", key)))
+    }
 }
 
 static NEXT_PATTERN: AtomicU64 = AtomicU64::new(0);

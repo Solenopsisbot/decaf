@@ -1,0 +1,1 @@
+zeta=NUMBER:9.007199254740992E15|alpha=STRING:again|nested=OBJECT:{y=true,x=null}|list=ARRAY:[1.0,two,false]|num=NUMBER:2.5|remove=java.lang.UnsupportedOperationException|numberClass=java.lang.Double,int=2147483647|size=5

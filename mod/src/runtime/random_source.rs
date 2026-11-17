@@ -4,11 +4,10 @@
 //! factories stay on the counted host path because their seeds come from game
 //! or thread state.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use crate::runtime::host_ref::{
     ClassHierarchy, ClassSide, HostKind, HostRef, Methods, exact_class_rules_out,
 };
+
 use crate::runtime::{MethodRef, NativeError, StdHost, Value};
 
 pub(crate) fn is_bit_conversion(r: &MethodRef) -> bool {
@@ -109,8 +108,6 @@ pub(crate) enum State {
     XoroshiroPositional { lo: u64, hi: u64 },
 }
 
-static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1 << 48);
-
 impl State {
     fn class(&self) -> &'static str {
         match self {
@@ -124,6 +121,13 @@ impl State {
 }
 
 impl StdHost {
+    pub(crate) fn generate_unique_seed(&mut self) -> i64 {
+        self.random_seed_uniquifier = self
+            .random_seed_uniquifier
+            .wrapping_mul(1_181_783_497_276_652_981);
+        (self.random_seed_uniquifier as i64) ^ self.random_time_origin.elapsed().as_nanos() as i64
+    }
+
     pub(crate) fn random_new(&mut self, class: &str) -> Option<Value> {
         let state = match class {
             LEGACY => State::Legacy {
@@ -142,11 +146,7 @@ impl StdHost {
     }
 
     fn random_handle(&mut self, state: State) -> Value {
-        let key = format!(
-            "{}#{}",
-            state.class(),
-            NEXT_SOURCE.fetch_add(1, Ordering::Relaxed)
-        );
+        let key = format!("{}#{}", state.class(), self.random_sources.len());
         self.random_sources.insert(key.clone(), state);
         Value::Host(HostRef::new(HostKind::RandomSource, key))
     }
@@ -181,6 +181,10 @@ impl StdHost {
         match (r.name.as_str(), r.descriptor.as_str(), args) {
             ("create", "(J)Lnet/minecraft/util/RandomSource;", [seed]) => {
                 Some(self.random_seeded(LEGACY, as_long(seed)?))
+            }
+            ("create", "()Lnet/minecraft/util/RandomSource;", []) => {
+                let seed = self.generate_unique_seed();
+                Some(self.random_seeded(LEGACY, seed))
             }
             ("createThreadLocalInstance", "(J)Lnet/minecraft/util/RandomSource;", [seed]) => {
                 Some(self.random_seeded(SINGLE, as_long(seed)?))
