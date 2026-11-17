@@ -35,7 +35,7 @@ impl<H: Host> Runtime<'_, H> {
                 message: Some(
                     "Cannot invoke \"Object.toString()\" because \"this.value\" is null".into(),
                 ),
-                trace: Vec::new(),
+                frame: None,
             });
         }
         match self.host_ref_text(handle, class, method)? {
