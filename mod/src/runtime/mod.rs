@@ -217,6 +217,7 @@ mod optionull;
 mod owned_class;
 mod parked_threads;
 mod server_values;
+mod tool_material;
 mod vanilla_entity_data_pool;
 /// A live callback token for tests that hand a host a listener without a jar
 /// (`callback_marker.rs`).
@@ -3630,6 +3631,7 @@ pub struct StdHost {
     /// FML's `InterModComms` queues, shared with the other jars of a game (`neoforge_imc.rs`).
     imc: neoforge_imc::ImcHandle,
     entity_registration: entity_registration::State,
+    tool_material: tool_material::State,
 }
 
 impl Default for StdHost {
@@ -3793,6 +3795,7 @@ impl StdHost {
             brigadier: Default::default(),
             imc: neoforge_imc::ImcHandle::default(),
             entity_registration: entity_registration::State::default(),
+            tool_material: tool_material::State::default(),
         }
     }
 
@@ -6414,6 +6417,9 @@ impl Host for StdHost {
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
+        if let Some(value) = tool_material::static_field(&mut self.tool_material, r) {
+            return value;
+        }
         if let Some(value) = entity_registration::static_field(&mut self.entity_registration, r) {
             return value;
         }
@@ -8082,6 +8088,11 @@ impl Host for StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Value, NativeError> {
+        if let Some(value) =
+            tool_material::instance_call(&mut self.tool_material, r, receiver, args)
+        {
+            return value;
+        }
         if let Some(value) =
             entity_registration::instance_call(&mut self.entity_registration, r, receiver, args)
         {
