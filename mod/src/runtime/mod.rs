@@ -8264,6 +8264,22 @@ impl Host for StdHost {
             // is still an object of *some* class: the neutral `null` is a
             // guess, so it is counted, not answered silently.
             // A text `instanceof String` accepts is a `String` here too.
+            if let Value::Ref(Some(marker)) = receiver
+                && let Some(class) = self.enum_body_classes.get(marker)
+            {
+                return Ok(host_class::class_value(class));
+            }
+            if let Value::Ref(Some(marker)) = receiver
+                && let Some(rest) = marker.strip_prefix("enum/")
+                && let Some((owner, name)) = rest.rsplit_once('/')
+            {
+                let class = if name == "A" && self.has_class(&format!("{owner}$1")) {
+                    format!("{owner}$1")
+                } else {
+                    owner.to_owned()
+                };
+                return Ok(host_class::class_value(&class));
+            }
             return match class_of_value(receiver) {
                 Some(class) => Ok(host_class::class_value(&class)),
                 None if expect_ref(receiver)
@@ -12242,7 +12258,9 @@ fn class_of_value(value: &Value) -> Option<String> {
         Value::Float(_) => Some("java/lang/Double".into()),
         Value::Boxed(boxed) => Some(boxed.class().into()),
         // `None` for a handle whose runtime class is not known: counted.
-        Value::Host(host) => host.class().map(Into::into),
+        Value::Host(host) => host.class().map(Into::into).or_else(|| {
+            (host.kind() == HostKind::JarObject).then(|| jar_object::class_of_key(host.key()).to_owned())
+        }),
         Value::Void => None,
         Value::Ref(None) => None,
         Value::Ref(Some(marker)) => class_of_text(marker),
@@ -19625,6 +19643,7 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -19840,6 +19859,7 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -20011,6 +20031,7 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -22189,6 +22210,7 @@ struct Runtime<'a, H> {
     /// marker: the declared name and ordinal its `java.lang.Enum` constructor
     /// received.
     enum_constants: BTreeMap<String, (String, i32)>,
+    enum_body_classes: std::collections::HashMap<String, String>,
     /// Text of each `StringBuilder`/`StringBuffer` this invocation built,
     /// keyed by the object's marker. `append` mutates the receiver in place,
     /// so a later `toString` sees every earlier append — the JDK's contract,
@@ -27804,6 +27826,13 @@ impl<H: Host> Runtime<'_, H> {
             let ordinal = expect_int(r, StdHost::argument(r, args, 1)?)?;
             self.enum_constants
                 .insert(marker.to_owned(), (name.to_owned(), ordinal));
+            let allocated_class = crate::runtime::jar_object::class_of_key(marker);
+            if allocated_class != r.owner {
+                self.enum_body_classes.insert(
+                    format!("enum/{}/{}", r.owner, name),
+                    allocated_class.to_owned(),
+                );
+            }
             return Ok(Some(Value::Void));
         }
         let marker =
@@ -35301,6 +35330,7 @@ mod tests {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -35373,6 +35403,7 @@ mod tests {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -42525,6 +42556,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -42739,6 +42771,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -42928,6 +42961,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -43293,6 +43327,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -43602,6 +43637,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -48869,6 +48905,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -48928,6 +48965,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
