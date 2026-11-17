@@ -1,6 +1,7 @@
 package demo;
 import java.nio.charset.StandardCharsets;
 public final class Probe {
+  public static void main(String[] args) throws Exception { System.out.print(rows()); }
   public static String rows() throws Exception {
     String x="hello"; String c=new String(x);
     return c.length()+"|"+x.equals(c)+"|"+c.equals(x)+"|"+(x.hashCode()==c.hashCode())+"|"+(c!=x)+"|"+(c.intern()==x)
