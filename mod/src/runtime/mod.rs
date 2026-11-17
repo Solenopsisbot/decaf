@@ -27597,9 +27597,7 @@ impl<H: Host> Runtime<'_, H> {
         let Value::Host(handle) = value else {
             return None;
         };
-        if handle.kind() != HostKind::Writer
-            || !modelled_writer_class(crate::runtime::jar_object::packaged_object_class(value)?)
-        {
+        if !modelled_writer_class(crate::runtime::jar_object::packaged_object_class(value)?) {
             return None;
         }
         let marker = handle.key_text();
@@ -28119,10 +28117,9 @@ impl<H: Host> Runtime<'_, H> {
                             && descriptor.ends_with(")V")
                             && descriptor.contains("Appendable") =>
                     {
-                        let Some(text) = self.gson_to_json(
+                        let Some(text) = self.gson_to_json_string(
                             args.first().unwrap_or(&Value::Ref(None)),
                             &style,
-                            0,
                         )?
                         else {
                             return self
@@ -28130,10 +28127,6 @@ impl<H: Host> Runtime<'_, H> {
                                 .invoke_instance(r, receiver.unwrap_or(&Value::Ref(None)), args)
                                 .map(Some);
                         };
-                        let text = format!(
-                            "{}{text}",
-                            gson_model::non_executable_prefix(&style).unwrap_or("")
-                        );
                         // The writer is the last argument in every overload:
                         // `toJson(src, writer)` and `toJson(src, typeOfSrc, writer)`.
                         let Some(target) = args
