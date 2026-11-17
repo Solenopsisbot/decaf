@@ -3,4 +3,5 @@
   "text": "hi"
 }
 {}
+{"value":"hi"}
 COUNTED
