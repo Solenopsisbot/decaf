@@ -1,0 +1,15 @@
+stringBuilder=prefix:{"name":"probe","count":3,"enabled":true,"list":["a",2]}
+bufferedWriter={"name":"probe","count":3,"enabled":true,"list":["a",2]}
+pretty={
+  "name": "probe",
+  "count": 3,
+  "enabled": true,
+  "list": [
+    "a",
+    2
+  ]
+}
+serializeNulls={"name":"probe","count":3,"enabled":true,"list":["a",2],"missing":null}
+allNull={}
+allNullPretty={}
+nullSource=null
