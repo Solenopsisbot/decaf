@@ -189,6 +189,7 @@ impl<H: Host> Runtime<'_, H> {
             Value::Ref(None) => None,
             Value::Ref(Some(text)) if !reader => Some(text.clone()),
             value if reader => crate::runtime::jar_object::object_key(value)
+                .or_else(|| crate::runtime::expect_ref(value).map(String::as_str))
                 .and_then(|marker| self.string_readers.get(marker))
                 .cloned(),
             _ => None,
@@ -692,9 +693,23 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(text) = self.gson_source(args.first(), reader) else {
                     return self.count_gson_fromjson(r, receiver, args);
                 };
+                let marker = reader
+                    .then(|| args.first().and_then(crate::runtime::jar_object::object_key))
+                    .flatten()
+                    .map(str::to_owned);
                 return match self.gson_read_text(&text, &target, &style)? {
-                    Some(value) => Ok(Some(value)),
-                    None => self.count_gson_fromjson(r, receiver, args),
+                    Some(value) => {
+                        if let Some(marker) = marker {
+                            self.string_readers.insert(marker, String::new());
+                        }
+                        Ok(Some(value))
+                    }
+                    None => {
+                        if let Some(marker) = marker {
+                            self.reader_positions_unknown.insert(marker);
+                        }
+                        self.count_gson_fromjson(r, receiver, args)
+                    }
                 };
             }
         }

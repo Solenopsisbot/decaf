@@ -1,0 +1,6 @@
+string=3|ok|[1, 2]|v
+file=4|file|[3]|f
+resource=5|resource|[9, 10]|r
+missing=1|null|null|null
+empty=null
+twice=8|null|null|null|null
