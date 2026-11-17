@@ -211,7 +211,6 @@ fn every_string_constructor_is_counted_until_it_is_modelled() {
     // (method, the constructor descriptor it must be counted under)
     let cases = [
         ("hibyte", "([BI)V"),
-
         ("supplier", "()V"),
         ("hibyteRange", "([BIII)V"),
         // A `MethodHandle` constructor is counted for every overload

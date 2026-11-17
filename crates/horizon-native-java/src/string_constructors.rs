@@ -399,10 +399,18 @@ pub(crate) fn build<H: Host>(
         "(Ljava/lang/String;)V" => match args.first() {
             Some(Value::Ref(text)) => text.clone(),
             Some(Value::Host(_)) => None,
-            _ => return Err(thrown("java/lang/NullPointerException", "Cannot invoke \"java.lang.String.length()\" because \"original\" is null".into())),
+            _ => {
+                return Err(thrown(
+                    "java/lang/NullPointerException",
+                    "Cannot invoke \"java.lang.String.length()\" because \"original\" is null"
+                        .into(),
+                ));
+            }
         },
         "(Ljava/lang/StringBuilder;)V" | "(Ljava/lang/StringBuffer;)V" => {
-            let Some(Value::Ref(Some(marker))) = args.first() else { return Ok(None) };
+            let Some(Value::Ref(Some(marker))) = args.first() else {
+                return Ok(None);
+            };
             runtime.string_builders.get(marker).cloned()
         }
         "([B)V" | "([BII)V" => {
