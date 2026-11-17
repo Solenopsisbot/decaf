@@ -540,6 +540,9 @@ impl<H: Host> Runtime<'_, H> {
                 let object = self.new_object("com/google/gson/Gson");
                 let created = expect_ref(&object).cloned().unwrap_or_default();
                 self.set_gson_style(&created, style);
+                if let Some(adapters) = self.gson_type_adapters.get(&marker).cloned() {
+                    self.gson_type_adapters.insert(created.clone(), adapters);
+                }
                 Ok(Some(object))
             }
             // Gson's own null checks, so a bootstrap that passes null fails
@@ -589,10 +592,20 @@ impl<H: Host> Runtime<'_, H> {
                     _ => {
                         if r.name == "registerTypeAdapter" {
                             self.check_gson_type_adapter(args)?;
-                        }
+                            let type_name = args.first().and_then(crate::jar_object::object_class).map(str::to_owned);
+                            let adapter = args.get(1).cloned();
+                            if let (Some(type_name), Some(adapter)) = (type_name, adapter) {
+                                if let Some(adapter_class) = crate::jar_object::object_class(&adapter) {
+                                    if self.class_is_instance(adapter_class, "com/google/gson/TypeAdapter") {
+                                        self.gson_type_adapters.entry(marker.clone()).or_default().push((type_name, adapter));
+                                    }
+                        // Keep every registration counted until callback dispatch can prove an exact write.
                         let mut style = self.gson_style(&marker);
                         style.counted = true;
                         self.set_gson_style(&marker, style);
+                                }
+                            }
+                        } else { let mut style = self.gson_style(&marker); style.counted = true; self.set_gson_style(&marker, style); }
                     }
                 }
                 answer()
@@ -832,6 +845,24 @@ impl<H: Host> Runtime<'_, H> {
         // One level of a nested value (#250): Gson recurses through a cycle until a
         // `StackOverflowError`, and so does this writer.
         let _level = crate::host_recursion::enter()?;
+        // Exact registered TypeAdapter dispatch precedes reflective serialization.
+        if let Some(class) = crate::jar_object::object_class(value) {
+            if let Some((_, adapter)) = self.gson_type_adapters.values().flat_map(|v| v.iter()).rev().find(|(ty, _)| ty == class) {
+                let sink = format!("mem:gson-adapter-{depth}");
+                self.io_writers.insert(sink.clone(), String::new());
+                let writer = self.new_object("com/google/gson/stream/JsonWriter");
+                if let Some(wm) = expect_ref(&writer) {
+                    let mut state = gson_writer::State::new(sink.clone());
+                    state.apply_tree_style(&style.tree_style());
+                    self.gson_writers.insert(wm.clone(), state);
+                    let Some(ac) = crate::jar_object::object_class(adapter) else { return Ok(None); };
+                    let result = self.invoke(ac, "write", "(Lcom/google/gson/stream/JsonWriter;Ljava/lang/Object;)V", Some(adapter.clone()), &[writer, value.clone()]);
+                    if result.is_err() { return Ok(None); }
+                    return Ok(self.io_writers.get(&sink).cloned());
+                }
+                return Ok(None);
+            }
+        }
         // A `JsonElement` is written by its own adapter (`gson_tree.rs`).
         if let Some(text) = self.gson_tree_json(value, &style.tree_style(), depth)? {
             return Ok(text);
@@ -928,6 +959,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             out.push_str(&style.line(depth + 1));
             let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode)? else {
+                eprintln!("GSON_DEBUG recursive value={:?}", value);
                 return Ok(None);
             };
             out.push_str(&text);
@@ -1051,6 +1083,7 @@ impl<H: Host> Runtime<'_, H> {
             out.push('"');
             out.push_str(style.colon());
             let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode)? else {
+                eprintln!("GSON_DEBUG recursive value={:?}", value);
                 return Ok(None);
             };
             out.push_str(&text);
