@@ -748,7 +748,7 @@ impl<H: Host> Runtime<'_, H> {
         if crate::callback_marker::callback_text(adapter).is_some() {
             return Ok(());
         }
-        let Some(class) = crate::jar_object::object_class(adapter) else {
+        let Some(class) = crate::jar_object::object_class(&adapter) else {
             return Err(not_a_supported_adapter("java/lang/String"));
         };
         if self.class(class).is_none() {
@@ -855,7 +855,7 @@ impl<H: Host> Runtime<'_, H> {
                     let mut state = gson_writer::State::new(sink.clone());
                     state.apply_tree_style(&style.tree_style());
                     self.gson_writers.insert(wm.clone(), state);
-                    let Some(ac) = crate::jar_object::object_class(adapter) else { return Ok(None); };
+                    let Some(ac) = crate::jar_object::object_class(&adapter) else { return Ok(None); };
                     let result = self.invoke(ac, "write", "(Lcom/google/gson/stream/JsonWriter;Ljava/lang/Object;)V", Some(adapter.clone()), &[writer, value.clone()]);
                     if result.is_err() { return Ok(None); }
                     return Ok(self.io_writers.get(&sink).cloned());
