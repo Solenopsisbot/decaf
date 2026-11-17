@@ -14428,6 +14428,15 @@ fn iterated_kind(marker: &str) -> Option<String> {
     None
 }
 
+fn host_enum_ordinal(host: &StdHost, value: &Value) -> Option<i32> {
+    let marker = expect_ref(value)?;
+    if let Some((_, ordinal)) = host.enum_constants.get(marker) {
+        return Some(*ordinal);
+    }
+    let (class, name) = marker.strip_prefix("enum/")?.rsplit_once('/')?;
+    game_enum_constants(class)?.iter().position(|constant| *constant == name).map(|ordinal| ordinal as i32)
+}
+
 fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<Value>, NativeError> {
     let mut values = host.mutable_values(value).map_or_else(
         || not_a_collection(value).map_err(|error| host_call_context(host, error)),
@@ -14441,8 +14450,8 @@ fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<Value>, N
         == Some("java/util/EnumMap")
     {
         let mut pairs = values.as_chunks::<2>().0.to_vec();
-        if pairs.iter().all(|pair| host.enum_ordinal_of(&pair[0]).is_some()) {
-            pairs.sort_by_key(|pair| host.enum_ordinal_of(&pair[0]).unwrap_or_default());
+        if pairs.iter().all(|pair| host_enum_ordinal(host, &pair[0]).is_some()) {
+            pairs.sort_by_key(|pair| host_enum_ordinal(host, &pair[0]).unwrap_or_default());
             values = pairs.into_iter().flatten().collect();
         }
     }
