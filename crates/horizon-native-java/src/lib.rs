@@ -8262,6 +8262,11 @@ impl Host for StdHost {
             // guess, so it is counted, not answered silently.
             // A text `instanceof String` accepts is a `String` here too.
             if let Value::Ref(Some(marker)) = receiver
+                && let Some(class) = self.enum_body_classes.get(marker)
+            {
+                return Ok(host_class::class_value(class));
+            }
+            if let Value::Ref(Some(marker)) = receiver
                 && let Some(rest) = marker.strip_prefix("enum/")
                 && let Some((owner, name)) = rest.rsplit_once('/')
             {
@@ -19635,6 +19640,7 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -19850,6 +19856,7 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -20021,6 +20028,7 @@ impl NativeJar {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -22199,6 +22207,7 @@ struct Runtime<'a, H> {
     /// marker: the declared name and ordinal its `java.lang.Enum` constructor
     /// received.
     enum_constants: BTreeMap<String, (String, i32)>,
+    enum_body_classes: std::collections::HashMap<String, String>,
     /// Text of each `StringBuilder`/`StringBuffer` this invocation built,
     /// keyed by the object's marker. `append` mutates the receiver in place,
     /// so a later `toString` sees every earlier append — the JDK's contract,
@@ -27814,6 +27823,13 @@ impl<H: Host> Runtime<'_, H> {
             let ordinal = expect_int(r, StdHost::argument(r, args, 1)?)?;
             self.enum_constants
                 .insert(marker.to_owned(), (name.to_owned(), ordinal));
+            let allocated_class = crate::jar_object::class_of_key(marker);
+            if allocated_class != r.owner {
+                self.enum_body_classes.insert(
+                    format!("enum/{}/{}", r.owner, name),
+                    allocated_class.to_owned(),
+                );
+            }
             return Ok(Some(Value::Void));
         }
         let marker =
@@ -35311,6 +35327,7 @@ mod tests {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -35383,6 +35400,7 @@ mod tests {
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -42535,6 +42553,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -42749,6 +42768,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -42938,6 +42958,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -43303,6 +43324,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -43612,6 +43634,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -48879,6 +48902,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
@@ -48938,6 +48962,7 @@ mandatory = true
             next_stream: 0,
             pipelines: Default::default(),
             enum_constants: BTreeMap::new(),
+            enum_body_classes: std::collections::HashMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
