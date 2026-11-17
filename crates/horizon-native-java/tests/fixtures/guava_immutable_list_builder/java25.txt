@@ -1,0 +1,7 @@
+empty=0
+emptyIdentity=true
+null=java.lang.NullPointerException:null
+order=[a, b]
+reuse=[a, b]/[a, b, c]
+varargsIterable=[x, y, z]
+iterator=[i, j]

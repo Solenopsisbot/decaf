@@ -1,0 +1,3 @@
+Captured on arcweld with Temurin Java 25.0.5+8:
+
+javac -d classes probe/Probe.java && java -cp classes demo.Probe
