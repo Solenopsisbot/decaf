@@ -31,7 +31,7 @@ impl<H: Host> Runtime<'_, H> {
         if !crate::host_map_entry::is_entry(value) {
             return Ok(None);
         }
-        if hashtable_null_entry(self, handle) {
+        if crate::host_map_entry::entry_class(handle.key()) == "java/util/Hashtable$Entry" {
             return Err(NativeError::UncaughtException {
                 class: "java/lang/NullPointerException".into(),
                 message: Some(
