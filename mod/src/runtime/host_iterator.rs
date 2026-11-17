@@ -200,6 +200,13 @@ impl<H: Host> Runtime<'_, H> {
         let Some(over) = self.host.enumeration_over(&key) else {
             return Ok(None);
         };
+        if r.name == "remove" && r.descriptor == "()V" {
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/UnsupportedOperationException".into(),
+                message: None,
+                frame: None,
+            });
+        }
         Ok(Some(
             match ((r.name.as_str(), r.descriptor.as_str()), over) {
                 (("hasMoreElements", "()Z"), EnumerationOver::Iterator(iterator)) => self
