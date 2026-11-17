@@ -847,7 +847,7 @@ impl<H: Host> Runtime<'_, H> {
         let _level = crate::runtime::host_recursion::enter()?;
         // Exact registered TypeAdapter dispatch precedes reflective serialization.
         if let Some(class) = crate::runtime::jar_object::object_class(value) {
-            if let Some((_, adapter)) = self.gson_type_adapters.values().flat_map(|v| v.iter()).rev().find(|(ty, _)| ty == class) {
+            if let Some(adapter) = self.gson_type_adapters.values().flat_map(|v| v.iter()).rev().find(|(ty, _)| ty == class).map(|(_, adapter)| adapter.clone()) {
                 let sink = format!("mem:gson-adapter-{depth}");
                 self.io_writers.insert(sink.clone(), String::new());
                 let writer = self.new_object("com/google/gson/stream/JsonWriter");

@@ -2017,7 +2017,7 @@ impl NativeJar {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
-            string_builder_capacities: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),            string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
