@@ -1008,8 +1008,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
             }
             out.push_str(&style.line(depth + 1));
-            let Some(text) =
-                self.gson_to_json_mode(value, style, depth + 1, tree_mode, gson_marker)?
+            let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode, None)?
             else {
                 eprintln!("GSON_DEBUG recursive value={:?}", value);
                 return Ok(None);
@@ -1060,8 +1059,7 @@ impl<H: Host> Runtime<'_, H> {
             out.push_str(&style.escape(&key_text));
             out.push('"');
             out.push_str(style.colon());
-            let Some(text) =
-                self.gson_to_json_mode(&value, style, depth + 1, tree_mode, gson_marker)?
+            let Some(text) = self.gson_to_json_mode(&value, style, depth + 1, tree_mode, None)?
             else {
                 return Ok(None);
             };
@@ -1136,8 +1134,7 @@ impl<H: Host> Runtime<'_, H> {
             out.push_str(&style.escape(name));
             out.push('"');
             out.push_str(style.colon());
-            let Some(text) =
-                self.gson_to_json_mode(value, style, depth + 1, tree_mode, gson_marker)?
+            let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode, None)?
             else {
                 eprintln!("GSON_DEBUG recursive value={:?}", value);
                 return Ok(None);
