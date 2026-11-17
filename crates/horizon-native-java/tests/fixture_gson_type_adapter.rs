@@ -398,3 +398,11 @@ fn object_to_json_matches_captured_java25_gson_oracle_byte_for_byte() {
         include_bytes!("fixtures/gson_tojson_object/oracle/java25.txt")
     );
 }
+
+#[test]
+fn reads_java25_capture() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gson_type_adapter/java25.txt");
+    let text = fs::read_to_string(path).expect("java25 capture");
+    assert!(text.contains("COUNTED"));
+}
