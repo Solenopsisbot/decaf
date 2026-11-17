@@ -847,8 +847,9 @@ impl<H: Host> Runtime<'_, H> {
         value: &Value,
         style: &GsonStyle,
         depth: usize,
+        gson_marker: Option<&str>,
     ) -> Result<Option<String>, NativeError> {
-        self.gson_to_json_mode(value, style, depth, false)
+        self.gson_to_json_mode(value, style, depth, false, gson_marker)
     }
 
     /// The tree adapter uses the same bounded reflection model as the writer,
@@ -860,8 +861,9 @@ impl<H: Host> Runtime<'_, H> {
         value: &Value,
         style: &GsonStyle,
         depth: usize,
+        gson_marker: Option<&str>,
     ) -> Result<Option<String>, NativeError> {
-        self.gson_to_json_mode(value, style, depth, true)
+        self.gson_to_json_mode(value, style, depth, true, gson_marker)
     }
 
     fn gson_to_json_mode(
@@ -870,6 +872,7 @@ impl<H: Host> Runtime<'_, H> {
         style: &GsonStyle,
         depth: usize,
         tree_mode: bool,
+        gson_marker: Option<&str>,
     ) -> Result<Option<String>, NativeError> {
         // One level of a nested value (#250): Gson recurses through a cycle until a
         // `StackOverflowError`, and so does this writer.
@@ -1004,7 +1007,9 @@ impl<H: Host> Runtime<'_, H> {
                 }
             }
             out.push_str(&style.line(depth + 1));
-            let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode)? else {
+            let Some(text) =
+                self.gson_to_json_mode(value, style, depth + 1, tree_mode, gson_marker)?
+            else {
                 eprintln!("GSON_DEBUG recursive value={:?}", value);
                 return Ok(None);
             };
@@ -1054,7 +1059,9 @@ impl<H: Host> Runtime<'_, H> {
             out.push_str(&style.escape(&key_text));
             out.push('"');
             out.push_str(style.colon());
-            let Some(text) = self.gson_to_json_mode(&value, style, depth + 1, tree_mode)? else {
+            let Some(text) =
+                self.gson_to_json_mode(&value, style, depth + 1, tree_mode, gson_marker)?
+            else {
                 return Ok(None);
             };
             out.push_str(&text);
@@ -1128,7 +1135,9 @@ impl<H: Host> Runtime<'_, H> {
             out.push_str(&style.escape(name));
             out.push('"');
             out.push_str(style.colon());
-            let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode)? else {
+            let Some(text) =
+                self.gson_to_json_mode(value, style, depth + 1, tree_mode, gson_marker)?
+            else {
                 eprintln!("GSON_DEBUG recursive value={:?}", value);
                 return Ok(None);
             };
