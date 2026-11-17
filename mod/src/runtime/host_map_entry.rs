@@ -865,7 +865,14 @@ impl StdHost {
         };
         let state = self.entry_state(handle)?;
         match &state.life {
-            Life::Fixed | Life::Detached => Some((state.key.clone(), state.value.clone())),
+            Life::Fixed => Some((state.key.clone(), state.value.clone())),
+            Life::Detached => {
+                if entry_class(handle.key()) == "java/util/Hashtable$Entry" {
+                    Some((state.key.clone(), Value::Ref(None)))
+                } else {
+                    Some((state.key.clone(), state.value.clone()))
+                }
+            }
             Life::Live {
                 map, node, slot, ..
             } => {

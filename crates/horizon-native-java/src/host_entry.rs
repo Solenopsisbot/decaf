@@ -29,6 +29,15 @@ impl<H: Host> Runtime<'_, H> {
         if !crate::host_map_entry::is_entry(value) {
             return Ok(None);
         }
+        if hashtable_null_entry(handle, value) {
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/NullPointerException".into(),
+                message: Some(
+                    "Cannot invoke \"Object.toString()\" because \"this.value\" is null".into(),
+                ),
+                trace: Vec::new(),
+            });
+        }
         match self.host_ref_text(handle, class, method)? {
             Some(text) => Ok(Some(Value::Ref(Some(text)))),
             None => self
