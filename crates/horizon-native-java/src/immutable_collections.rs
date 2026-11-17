@@ -554,11 +554,15 @@ impl<H: Host> Runtime<'_, H> {
         let Some(value) = args.first() else {
             return Ok(None);
         };
+        let opaque_string =
+            |v: &Value| matches!(v, Value::Ref(Some(text)) if value_class::is_plain_string(text));
         let mut values = self.collection_elements(receiver)?;
-        let position = values.iter().position(|stored| stored == value);
+        let position = values
+            .iter()
+            .position(|stored| stored == value && !(opaque_string(stored) && opaque_string(value)));
         let ambiguous = values
             .iter()
-            .any(|stored| self.identity_unknown(value, stored));
+            .any(|stored| !opaque_string(stored) && self.identity_unknown(value, stored));
         if ambiguous {
             return self.count_identity_call(r, receiver).map(Some);
         }
@@ -990,6 +994,29 @@ impl<H: Host> Runtime<'_, H> {
             Some(entries) => entries,
             None => self.collection_elements(receiver)?,
         };
+        if let Some(key) = args
+            .first()
+            .filter(|v| matches!(v, Value::Ref(Some(text)) if value_class::is_plain_string(text)))
+        {
+            match r.name.as_str() {
+                "put" => {
+                    let value = args.get(1).cloned().unwrap_or(Value::Ref(None));
+                    let mut updated = entries;
+                    updated.push(key.clone());
+                    updated.push(value);
+                    self.host.replace_mutable_collection(receiver, updated);
+                    return Ok(Some(Value::Ref(None)));
+                }
+                "get" | "containsKey" => {
+                    return Ok(Some(if r.name == "get" {
+                        Value::Ref(None)
+                    } else {
+                        Value::Int(0)
+                    }));
+                }
+                _ => {}
+            }
+        }
         let keyed = matches!(
             r.name.as_str(),
             "get"
