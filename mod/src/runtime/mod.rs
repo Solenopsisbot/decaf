@@ -8093,7 +8093,8 @@ impl Host for StdHost {
         args: &[Value],
     ) -> Result<Value, NativeError> {
         if matches!(receiver, Value::Host(handle) if handle.kind() == HostKind::LiveGameObject)
-            && r.name == "isRemoved" && r.descriptor == "()Z"
+            && r.name == "isRemoved"
+            && r.descriptor == "()Z"
         {
             return Ok(Value::Int(0));
         }
@@ -28798,10 +28799,15 @@ impl<H: Host> Runtime<'_, H> {
             .cloned()
             .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
         if matches!(receiver.as_ref(), Some(Value::Host(handle)) if handle.kind() == HostKind::LiveGameObject)
-            && method == "isRemoved" && desc == "()Z"
+            && method == "isRemoved"
+            && desc == "()Z"
         {
             return self.host.invoke_instance(
-                &MethodRef { owner: class.to_owned(), name: method.to_owned(), descriptor: desc.to_owned() },
+                &MethodRef {
+                    owner: class.to_owned(),
+                    name: method.to_owned(),
+                    descriptor: desc.to_owned(),
+                },
                 receiver.as_ref().expect("live receiver"),
                 args,
             );
