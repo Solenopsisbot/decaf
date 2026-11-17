@@ -31,3 +31,8 @@ fn dependency_prelude_order_is_dependency_first_and_accounting_is_separate() {
     assert_eq!(h.call_log_mark().calls - mark.calls, 0);
     // Fabric Loader guarantees dependency entrypoints precede dependents; this is the contract measured by the probe flag.
 }
+
+#[test]
+fn java25_capture_covers_unset_then_set_observations() {
+    assert_eq!(format!("{}\n{}", "false", "true"), JAVA25.trim_end());
+}
