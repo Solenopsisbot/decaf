@@ -225,6 +225,7 @@ mod open_options;
 mod optionull;
 mod owned_class;
 mod parked_threads;
+mod scanner_model;
 mod server_values;
 mod tool_material;
 mod vanilla_entity_data_pool;
@@ -20061,6 +20062,7 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -20277,6 +20279,7 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -20449,6 +20452,7 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -22661,6 +22665,7 @@ struct Runtime<'a, H> {
     /// reader) this invocation built exposes to `Reader#read` and to
     /// `Gson.fromJson(Reader, Class)`, keyed by the reader's marker.
     string_readers: BTreeMap<String, String>,
+    scanners: BTreeMap<String, scanner_model::ScannerState>,
     io_stream_paths: BTreeMap<String, String>,
     /// Text each `java.io` writer this invocation built holds, keyed by its
     /// sink: `file:<path>` for a writer over a virtual file, `mem:<marker>` for
@@ -26907,6 +26912,102 @@ impl<H: Host> Runtime<'_, H> {
             })
             .cloned();
         match r.owner.as_str() {
+            "java/util/Scanner" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("<init>", "(Ljava/io/File;)V") => {
+                        let Some(path) = args.first().and_then(|v| self.io_path_of(v)) else {
+                            return Ok(None);
+                        };
+                        let key = host_path::sandbox_canonical(&path);
+                        let Some(bytes) = self.io_file_bytes.get(&key) else {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/io/FileNotFoundException".into(),
+                                message: Some(format!("{} (No such file or directory)", path)),
+                                frame: None,
+                            });
+                        };
+                        // Java's strict decoder stops at malformed input and the scanner
+                        // ends there (`lastException`); how much of the valid prefix it
+                        // yields depends on StreamDecoder's buffering, so reads are counted.
+                        let Ok(text) = String::from_utf8(bytes.clone()) else {
+                            self.scanners.insert(
+                                marker,
+                                scanner_model::ScannerState {
+                                    text: String::new(),
+                                    pos: 0,
+                                    closed: false,
+                                    unknown: true,
+                                },
+                            );
+                            return Ok(Some(Value::Void));
+                        };
+                        self.scanners.insert(
+                            marker,
+                            scanner_model::ScannerState {
+                                text,
+                                pos: 0,
+                                closed: false,
+                                unknown: false,
+                            },
+                        );
+                        Ok(Some(Value::Void))
+                    }
+                    ("hasNextLine", "()Z") => {
+                        let Some(st) = self.scanners.get(&marker) else {
+                            return Ok(None);
+                        };
+                        // Java's `Scanner.ensureOpen()` runs first: a closed scanner throws
+                        // rather than answering `false`.
+                        if st.closed {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/lang/IllegalStateException".into(),
+                                message: Some("Scanner closed".into()),
+                                frame: None,
+                            });
+                        }
+                        if st.unknown {
+                            return Ok(None);
+                        }
+                        Ok(Some(Value::Int(i32::from(
+                            scanner_model::next_line(&st.text, st.pos).is_some(),
+                        ))))
+                    }
+                    ("nextLine", "()Ljava/lang/String;") => {
+                        let Some(st) = self.scanners.get_mut(&marker) else {
+                            return Ok(None);
+                        };
+                        if st.closed {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/lang/IllegalStateException".into(),
+                                message: Some("Scanner closed".into()),
+                                frame: None,
+                            });
+                        }
+                        if st.unknown {
+                            return Ok(None);
+                        }
+                        let Some((line, pos)) = scanner_model::next_line(&st.text, st.pos) else {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("No line found".into()),
+                                frame: None,
+                            });
+                        };
+                        st.pos = pos;
+                        Ok(Some(Value::Ref(Some(line))))
+                    }
+                    ("close", "()V") => {
+                        if let Some(st) = self.scanners.get_mut(&marker) {
+                            st.closed = true;
+                        }
+                        Ok(Some(Value::Void))
+                    }
+                    _ => Ok(None),
+                }
+            }
             "java/io/File" => {
                 let Some(marker) = receiver_marker else {
                     return Ok(None);
@@ -27192,30 +27293,32 @@ impl<H: Host> Runtime<'_, H> {
                         args.first().cloned().unwrap_or(Value::Ref(None))
                     }
                     ("write", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
-                        let text = args
-                            .get(1)
-                            .and_then(|value| self.owned_array(value))
-                            .map(|bytes| {
-                                let bytes = bytes
-                                    .iter()
-                                    .map(|value| match value {
-                                        Value::Int(byte) => *byte as u8,
-                                        _ => 0,
-                                    })
-                                    .collect::<Vec<_>>();
-                                String::from_utf8_lossy(&bytes).into_owned()
-                            })
-                            .unwrap_or_default();
-                        // Lines (`write(Path, Iterable)`) never reach the model's text.
-                        let bytes = args
-                            .get(1)
-                            .is_some_and(|value| self.owned_array(value).is_some());
-                        if bytes {
-                            self.watch_whole_write(&path, text.is_empty());
-                        } else {
-                            self.watch_change(&path, watch_service::Change::Unmodelled);
+                        let bytes =
+                            args.get(1)
+                                .and_then(|value| self.owned_array(value))
+                                .map(|bytes| {
+                                    bytes
+                                        .iter()
+                                        .map(|value| match value {
+                                            Value::Int(byte) => *byte as u8,
+                                            _ => 0,
+                                        })
+                                        .collect::<Vec<_>>()
+                                });
+                        match bytes {
+                            // `write(Path, byte[])` writes the bytes as they are: keep them raw,
+                            // so a later reader (a strict `Scanner` decoder, `readAllBytes`) sees
+                            // malformed UTF-8 rather than its lossy re-encoding.
+                            Some(bytes) => {
+                                self.watch_whole_write(&path, bytes.is_empty());
+                                self.io_store_bytes(path, bytes)?;
+                            }
+                            // Lines (`write(Path, Iterable)`) never reach the model's text.
+                            None => {
+                                self.watch_change(&path, watch_service::Change::Unmodelled);
+                                self.io_store_file(path, String::new())?;
+                            }
                         }
-                        self.io_store_file(path, text)?;
                         args.first().cloned().unwrap_or(Value::Ref(None))
                     }
                     ("createFile", descriptor)
@@ -36253,6 +36356,7 @@ mod tests {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -36326,6 +36430,7 @@ mod tests {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -43479,6 +43584,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -43694,6 +43800,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -43884,6 +43991,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -44250,6 +44358,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -44560,6 +44669,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -49828,6 +49938,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
@@ -49888,6 +49999,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),

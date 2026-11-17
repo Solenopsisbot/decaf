@@ -1,0 +1,12 @@
+package demo;
+import java.util.*; import java.math.*; import java.io.*; import java.nio.file.*;
+public final class Probe { public static String rows(){StringBuilder s=new StringBuilder();
+try{Path p=Path.of("sc470.txt"); Files.writeString(p,"a\r\nb\r\nc",java.nio.charset.StandardCharsets.UTF_8); Scanner z=new Scanner(p.toFile()); s.append(z.hasNextLine()).append(':').append(z.nextLine()).append('|').append(z.nextLine()).append('|').append(z.nextLine()).append('|').append(z.hasNextLine()); try{z.nextLine();}catch(Exception e){s.append('|').append(e.getClass().getSimpleName()).append(':').append(e.getMessage());} z.close(); try{z.hasNextLine();}catch(Exception e){s.append('|').append(e.getClass().getSimpleName()).append(':').append(e.getMessage());} Files.delete(p);}catch(Exception e){s.append(e);}
+try{new Scanner(new File("/definitely/missing/scanner470"));}catch(Exception e){s.append('|').append(e.getClass().getSimpleName()).append(':').append(e.getMessage());}
+try{Path p=Path.of("sc470e.txt"); Files.write(p,new byte[0]); s.append('|').append(new Scanner(p.toFile()).hasNextLine()); Files.delete(p);}catch(Exception e){s.append('|').append(e);}
+try{Path p=Path.of("sc470-cr.txt"); Files.writeString(p,"a\rB"); Scanner z=new Scanner(p.toFile()); s.append("|cr:").append(z.nextLine()).append(":").append(z.nextLine()); Files.delete(p);}catch(Exception e){s.append("|cr:").append(e);}
+try{Path p=Path.of("sc470-u.txt"); Files.writeString(p,"a\u2028B"); Scanner z=new Scanner(p.toFile()); s.append("|u:").append(z.nextLine()).append(":").append(z.nextLine()); Files.delete(p);}catch(Exception e){s.append("|u:").append(e);}
+try{Path p=Path.of("sc470-t.txt"); Files.writeString(p,"a\n\n"); Scanner z=new Scanner(p.toFile()); java.util.List<String> l=new java.util.ArrayList<>(); while(z.hasNextLine()) l.add(z.nextLine()); s.append("|trail:").append(l); Files.delete(p);}catch(Exception e){s.append("|trail:").append(e);}
+return s.toString();}
+public static String malformed(){StringBuilder s=new StringBuilder();try{Path p=Path.of("sc470-bad.txt"); Files.write(p,new byte[]{(byte)0xC3,0x28}); Scanner z=new Scanner(p.toFile()); s.append("|bad:").append(z.hasNextLine()); try{s.append(":").append(z.nextLine());}catch(Exception e){s.append(":").append(e.getClass().getSimpleName()).append(":").append(e.getMessage());} Files.delete(p);}catch(Exception e){s.append("|bad:").append(e);}
+return s.toString();}}
