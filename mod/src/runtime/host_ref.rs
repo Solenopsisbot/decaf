@@ -2651,7 +2651,9 @@ const KINDS: &[KindInfo] = &[
     KindInfo {
         kind: HostKind::LiveGameObject,
         tag: "live",
-        class: ClassRule::Unknown { declared: live_declared },
+        class: ClassRule::Unknown {
+            declared: live_declared,
+        },
         canonical: always_canonical,
         methods: &LIVE_GAME_OBJECT_METHODS,
     },
@@ -2661,15 +2663,30 @@ static LIVE_GAME_OBJECT_METHODS: Methods = Methods {
     to_string: |_, _| Ok(None),
     hash_code: |_, _| Ok(None),
     equals: |handle, other, _| Ok(handle.same_object(other)),
-    instance_of: |handle, wanted, _| live_declared(handle.key_text()).iter().any(|c| c == wanted).then_some(true),
+    instance_of: |handle, wanted, _| {
+        live_declared(handle.key_text())
+            .iter()
+            .any(|c| c == wanted)
+            .then_some(true)
+    },
     crosses_jars: |_, _| true,
     compare_to: None,
 };
 
 fn live_declared(key: &str) -> Vec<String> {
     match key.split(':').next().unwrap_or("") {
-        "ServerPlayer" => ["net/minecraft/server/level/ServerPlayer", "net/minecraft/world/entity/player/Player", "net/minecraft/world/entity/LivingEntity", "net/minecraft/world/entity/Entity"].into_iter().map(str::to_owned).collect(),
-        "AbstractContainerMenu" => vec!["net/minecraft/world/inventory/AbstractContainerMenu".to_owned()],
+        "ServerPlayer" => [
+            "net/minecraft/server/level/ServerPlayer",
+            "net/minecraft/world/entity/player/Player",
+            "net/minecraft/world/entity/LivingEntity",
+            "net/minecraft/world/entity/Entity",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        "AbstractContainerMenu" => {
+            vec!["net/minecraft/world/inventory/AbstractContainerMenu".to_owned()]
+        }
         _ => Vec::new(),
     }
 }
