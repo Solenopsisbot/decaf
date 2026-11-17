@@ -1,0 +1,2 @@
+Java 25; classpath minecraft-26.3-server-game.jar plus every jar under ~/ava/scratch/vanilla-values/oracle/libraries; call SharedConstants.tryDetectVersion(), Bootstrap.bootStrap(), reflect public static BlockEntityTypes fields, then BuiltInRegistries.BLOCK_ENTITY_TYPE.getKey(field).
+Game jar SHA-256: a362163eec5d1612d520772bc16e5b39c09e3b234fdc045f56bf544284ee8ae6
