@@ -27897,6 +27897,37 @@ impl<H: Host> Runtime<'_, H> {
             });
         let recorded = marker.and_then(|marker| self.enum_constants.get(marker).cloned());
         match (r.name.as_str(), r.descriptor.as_str()) {
+            // `Enum.getDeclaringClass()`: the constant's class, or, for a constant
+            // with a body (an anonymous subclass `E$1`), that class's superclass,
+            // which is the enum (`zuper == Enum.class ? clazz : zuper`).
+            ("getDeclaringClass", "()Ljava/lang/Class;") => {
+                // A constant this invocation's `<clinit>` built: its allocation
+                // key names its real class, and the jar's class file its parent.
+                if let Some(key) =
+                    crate::runtime::jar_object::object_key(receiver.unwrap_or(&Value::Ref(None)))
+                {
+                    if recorded.is_none() {
+                        return Ok(None);
+                    }
+                    let class = crate::runtime::jar_object::class_of_key(key).to_owned();
+                    let Some(parent) = self.class(&class).map(|file| file.super_name.clone())
+                    else {
+                        return Ok(None);
+                    };
+                    let declaring = if parent == "java/lang/Enum" {
+                        class
+                    } else {
+                        parent
+                    };
+                    return Ok(Some(host_class::class_value(&declaring)));
+                }
+                // A host-made `enum/<class>/<name>` marker names the enum itself.
+                let class = marker
+                    .and_then(|marker| marker.strip_prefix("enum/"))
+                    .and_then(|rest| rest.rsplit_once('/'))
+                    .map(|(class, _)| class.to_owned());
+                Ok(class.map(|class| host_class::class_value(&class)))
+            }
             ("name", "()Ljava/lang/String;") | ("toString", "()Ljava/lang/String;") => {
                 Ok(recorded.map(|(name, _)| Value::Ref(Some(name))))
             }
