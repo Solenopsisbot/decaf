@@ -1,0 +1,17 @@
+boolean=[true, true]
+byte=[3, 3]
+char=[x, x]
+short=[3, 3]
+int=[3, 3]
+long=[3, 3]
+float=[-0.0, -0.0]
+double=[NaN, NaN]
+object=[x, x]
+object-nonstr=[java.lang.Object@764c12b6]
+object-boxed=[true, x, 1]
+char-surrogate=[?]
+range=[1, 7, 7, 4]
+from-negative=java.lang.ArrayIndexOutOfBoundsException:Array index out of range: -1
+to-large=java.lang.ArrayIndexOutOfBoundsException:Array index out of range: 9
+from-after-to=java.lang.IllegalArgumentException:fromIndex(5) > toIndex(3)
+store=java.lang.ArrayStoreException:java.lang.Integer
