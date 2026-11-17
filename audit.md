@@ -1,0 +1,299 @@
+# expect_ref audit
+Main already accepts Value::Host object handles via jar_object::is_object_handle; no confirmed silent candidates on a39eed2180.
+Counts: a=88, b=118, c=89.
+Counts are provisional textual classification; IO #500 and jdk_stream/Collections.reverse #496 excluded.
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jar_throwables.rs:132:        expect_ref(value)?;
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jar_throwables.rs:251:                let marker = expect_ref(receiver).cloned().unwrap_or_default();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/object_methods.rs:381:        if expect_ref(value).is_none() {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/object_methods.rs:519:        if expect_ref(a).is_some_and(|text| crate::stream_pipeline::is_stream_marker(text))
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/object_methods.rs:520:            || expect_ref(b).is_some_and(|text| crate::stream_pipeline::is_stream_marker(text))
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/object_methods.rs:1340:        let marker = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/object_methods.rs:1363:        if let Some(marker) = expect_ref(value)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/synchronized_views.rs:51:        let Some(wrapped) = args.first().filter(|value| expect_ref(value).is_some()) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/synchronized_views.rs:63:        if let Some(marker) = expect_ref(&view) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/synchronized_views.rs:79:        let marker = expect_ref(receiver)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/field_get_set.rs:733:            || expect_ref(value)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_new_set_from_map.rs:218:    let Some(marker) = expect_ref(value) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_reload.rs:552:        let resource = crate::expect_ref(&resource)?.to_owned();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/hash_bulk.rs:121:        let Some(marker) = expect_ref(receiver).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/hash_bulk.rs:159:        let Some(marker) = expect_ref(collection).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/hash_bulk.rs:184:            && let Some(marker) = expect_ref(map).cloned()
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/hash_bulk.rs:426:        let marker = expect_ref(receiver).cloned();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/hash_bulk.rs:739:        if let Some(marker) = expect_ref(collection) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/hash_bulk.rs:761:        let marker = expect_ref(seen).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/hash_bulk.rs:850:        let marker = expect_ref(map).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/host_registry.rs:582:            crate::expect_ref(&source).and_then(|marker| self.mutable_collections.get_mut(marker))
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/host_registry.rs:589:        if let (Some(cache), Some(marker)) = (cache, crate::expect_ref(&view)) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/array_deque.rs:281:        let Some(marker) = expect_ref(receiver).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/executors.rs:647:    if let Some(marker) = expect_ref(&future) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/executors.rs:661:    if let Some(marker) = expect_ref(&future) {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_string_builder.rs:679:        self.string_builders.get(expect_ref(value)?)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_string_builder.rs:885:                    if param.starts_with('L') && expect_ref(value).is_some() =>
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_string_builder.rs:890:                    if expect_ref(value).is_some_and(|marker| marker == receiver)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_string_builder.rs:913:        let marker = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:91:            let Some(value) = expect_ref(value) else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:224:    match expect_ref(value) {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:235:    let text = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:266:    let text = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:277:    let text = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:288:    let text = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:299:    let text = expect_ref(value)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:362:    let Some(haystack) = expect_ref(haystack) else {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:365:    let Some(needle) = expect_ref(needle) else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_lang.rs:379:    let Some(text) = expect_ref(value) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_writer.rs:367:    crate::expect_ref(v)?.rsplit_once('/').map(|(_, n)| n)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_identifier.rs:121:                .get(expect_ref(value)?)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_identifier.rs:246:        let marker = expect_ref(receiver)?.clone();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_nbt.rs:201:        if let Some(marker) = expect_ref(&value).cloned() {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_nbt.rs:215:                Some((entry_key(name)?, expect_ref(value)?.clone()))
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_nbt.rs:221:        expect_ref(self.nbt_entry_value(marker, key)?).cloned()
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_nbt.rs:233:            let marker = expect_ref(&compound).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_nbt.rs:241:        let marker = expect_ref(&object).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_nbt.rs:349:                let target = expect_ref(&copy).cloned().unwrap_or_default();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/facade_saved_data.rs:97:        self.types.get(expect_ref(value)?)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_spliterators.rs:304:                format!("{}|abstract-spliterator#est", expect_ref(this).unwrap()),
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_spliterators.rs:308:                format!("{}|abstract-spliterator#flags", expect_ref(this).unwrap()),
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_spliterators.rs:318:        let marker = expect_ref(this).cloned().unwrap_or_default();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/facade_server.rs:182:            expect_ref(arg)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/attachment_codec.rs:183:        if let Some(marker) = expect_ref(&object).cloned() {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/attachment_codec.rs:194:        let Some(marker) = expect_ref(result) else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/iteration_guard.rs:111:        let marker = expect_ref(value)?;
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/iteration_guard.rs:196:        let Some(marker) = expect_ref(receiver)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/iteration_guard.rs:207:                let source_marker = expect_ref(&source).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/iteration_guard.rs:345:        let marker = expect_ref(source).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/iteration_guard.rs:420:        let marker = expect_ref(source).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/iteration_guard.rs:483:        let marker = expect_ref(source).cloned().unwrap_or_default();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_surface.rs:657:    let text = expect_ref(value)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_surface.rs:855:    let name = expect_ref(args.first()?)?.clone();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_surface.rs:859:        let mouse = expect_ref(args.get(1)?).is_some_and(|t| t.ends_with("/MOUSE"));
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_surface.rs:888:        let Some(marker) = expect_ref(value) else {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_surface.rs:1238:                if let Some(key) = crate::expect_ref(&made) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/game_object.rs:148:        other => crate::expect_ref(other),
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/watch_service.rs:468:        if expect_ref(receiver).is_some_and(|marker| marker == "file-system/default")
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_locale_thread.rs:30:    let object = expect_ref(thread)?.strip_prefix("java/lang/Thread#")?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_locale_thread.rs:82:                let marker = expect_ref(locale)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_locale_thread.rs:141:                            let marker = expect_ref(other)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jar_compare.rs:93:                .or_else(|| crate::expect_ref(value).map(|text| text.as_str()))?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jar_compare.rs:173:            expect_ref(value)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_items.rs:364:                let slot = crate::expect_ref(args.first()?)?.strip_prefix(EQUIPMENT_SLOT)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_items.rs:367:            ("getItemInHand", _) => match crate::expect_ref(args.first()?)?.strip_prefix(HAND)? {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/brigadier.rs:524:    let name = expect_ref(value)?.strip_prefix(&format!("enum/{PERMISSION_LEVEL}/"))?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_config_register.rs:386:                    let text = expect_ref(&default).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/commons_pair.rs:47:        if let Some(marker) = expect_ref(&pair).cloned() {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_config_spec.rs:570:                    match expect_ref(&args[0]) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_config_spec.rs:620:                let marker = expect_ref(&pair).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_config_spec.rs:635:        let marker = expect_ref(&spec).cloned().unwrap_or_default();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_config_spec.rs:660:            match expect_ref(&args[0]) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_config_spec.rs:807:        let marker = expect_ref(&value).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/kotlin_stdlib.rs:413:                        Some(crate::expect_ref(args.get(1)?)?.clone()),
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/kotlin_stdlib.rs:421:                    let name = crate::expect_ref(args.get(1)?).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/kotlin_stdlib.rs:432:                    let name = crate::expect_ref(args.get(1)?).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/kotlin_stdlib.rs:443:                    let name = crate::expect_ref(args.get(1)?).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/kotlin_stdlib.rs:454:                    let name = crate::expect_ref(args.get(1)?).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/kotlin_stdlib.rs:464:                let name = crate::expect_ref(args.first()?)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/kotlin_stdlib.rs:486:                let mode = crate::expect_ref(args.first()?).and_then(|v| v.rsplit('/').next())?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/regex_calls.rs:41:        let marker = expect_ref(value)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/regex_calls.rs:172:        let pattern = expect_ref(StdHost::argument(r, args, 0)?).ok_or_else(|| {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/facade_text.rs:174:    expect_ref(value)?.strip_prefix(FORMATTING_PREFIX)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/facade_text.rs:239:            let Some(key) = expect_ref(key) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/facade_text.rs:348:                    crate::host_component::literal(expect_ref(sibling).map_or("", String::as_str))
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/list_equality.rs:108:        let marker = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/list_equality.rs:164:        let marker = expect_ref(value)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/file_attributes.rs:330:        if let Some(marker) = expect_ref(&snapshot) {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/parked_threads.rs:86:    let Some(marker) = expect_ref(value) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_model.rs:541:                let created = expect_ref(&object).cloned().unwrap_or_default();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_model.rs:886:                let marker = expect_ref(value).map_or("", String::as_str);
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_model.rs:1100:        let marker = expect_ref(value)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_model.rs:1117:        if let Some(marker) = expect_ref(key)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_model.rs:1226:    let marker = expect_ref(value).map(String::as_str).or_else(|| {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_model.rs:477:    let marker = expect_ref(receiver)?;
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_model.rs:1044:        let Some(marker) = expect_ref(receiver) else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_model.rs:1513:                    expect_ref(value)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/charset_decoder.rs:72:        let marker = expect_ref(receiver)?.clone();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/type_switch.rs:92:                    expect_ref(value).is_some_and(|marker| marker == text)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/type_switch.rs:125:        let Some(marker) = expect_ref(value) else {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/neoforge_attachments_tests.rs:293:        let marker = expect_ref(&nbt).unwrap().clone();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/neoforge_attachments_tests.rs:617:        let marker = expect_ref(value).unwrap().clone();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/neoforge_attachments.rs:692:                let class = expect_ref(&arg(0))
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_text.rs:194:                crate::expect_ref(value).ok_or_else(npe)?
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_text.rs:241:        if let Some(marker) = expect_ref(&list) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:749:                    let key = crate::expect_ref(&pair[0])?.clone();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:901:        Some(match expect_ref(&kind)?.as_str() {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:902:            "string" => Prim::Str(expect_ref(&value)?.clone()),
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:911:            .and_then(|value| expect_ref(&value).cloned())
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:944:            let key = expect_ref(key).cloned().ok_or_else(|| {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:985:            Prim::Str(expect_ref(value)?.clone())
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:1058:                    .any(|(name, _)| Some(name) == expect_ref(&key));
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:1097:        let Some(key) = expect_ref(key) else {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:1114:        let Some(key) = expect_ref(key).cloned() else {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:1234:                let Some(other_elements) = expect_ref(&other).and_then(|m| self.elements_of(m))
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:1383:            let Some(prim) = expect_ref(&primitive).and_then(|m| self.primitive_of(m)) else {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree.rs:1657:                    && expect_ref(&other)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/events.rs:2029:    match (crate::host_ids::identifier_key(value), expect_ref(value)) {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/events.rs:2039:        .find_map(|value| expect_ref(value).and_then(|text| order::priority_of(text)))
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/events.rs:2181:                expect_ref(value)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/events.rs:2220:            } else if let Some(class) = expect_ref(value).filter(|c| jar.classes.contains_key(*c)) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/events.rs:2620:                let name = expect_ref(&result)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/model_layers.rs:104:    crate::expect_ref(value).cloned()
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jar_text.rs:129:            && let Some((name, _)) = expect_ref(value).and_then(|m| self.enum_constants.get(m))
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jar_text.rs:200:        let Some(marker) = expect_ref(value) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jar_text.rs:316:            if expect_ref(receiver).is_some_and(|marker| self.is_live_stream(marker)) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/tree_map.rs:683:        let Some(marker) = expect_ref(receiver).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/tree_map.rs:925:                        .collection_comparator(expect_ref(&source).map_or("", |m| m.as_str()))
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/tree_map.rs:1001:        let Some(marker) = expect_ref(receiver).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/tree_map.rs:1057:                expect_ref(&source).and_then(|source| self.host.collection_comparator(source))
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/tree_map.rs:1418:        let Some(marker) = expect_ref(value) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/method_handles.rs:1353:                        expect_ref(receiver).filter(|marker| jdk_reflect_proxy::is_proxy(marker))
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/entity_registration.rs:92:        .or_else(|| expect_ref(v).cloned())
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/entity_registration.rs:198:        expect_ref(v)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:148:                let marker = expect_ref(receiver?)?.clone();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:162:                let registry = expect_ref(args.first()?)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:469:        let Some(marker) = expect_ref(value) else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:519:            || expect_ref(value).is_some_and(|marker| {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:539:                && expect_ref(value).is_some_and(|marker| {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:574:                expect_ref(&value)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:690:        if expect_ref(&value).is_some_and(|marker| self.is_live_stream(marker)) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:1218:            && expect_ref(receiver).is_some_and(|marker| {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/library_dispatch.rs:1568:    host.resource_stream_text(expect_ref(&stream)?)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_registrations.rs:75:    crate::expect_ref(value)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_registrations.rs:89:    crate::expect_ref(value)?
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/fabric_mods.rs:302:                let name = expect_ref(receiver)?.rsplit('/').next()?.to_owned();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/fabric_mods.rs:390:                let name = expect_ref(receiver)?
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/fabric_mods.rs:400:                let name = expect_ref(receiver)?
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/fabric_mods.rs:448:                .any(|value| expect_ref(value) == Some(&marker))
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/fabric_mods.rs:460:            && let Some(marker) = expect_ref(&made)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/priority_queue.rs:170:        let Some(marker) = expect_ref(receiver).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/priority_queue.rs:301:                let marker = expect_ref(receiver).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/priority_queue.rs:361:            let marker = expect_ref(receiver).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/priority_queue.rs:396:        let Some(marker) = expect_ref(receiver).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/priority_queue.rs:430:        let source_marker = expect_ref(&source).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:449:                                expect_ref(&value)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:800:                let map_marker = crate::expect_ref(&map)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:803:                let inverse_marker = crate::expect_ref(&inverse).cloned().ok_or_else(|| {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:869:                        crate::expect_ref(key)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:889:                            crate::expect_ref(key)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:946:        if let Some(marker) = crate::expect_ref(source) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1119:        let marker = crate::expect_ref(receiver)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1132:        let view_marker = crate::expect_ref(&view)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1209:                crate::expect_ref(source)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1221:                crate::expect_ref(source)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1291:                    crate::expect_ref(source)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1348:                let view_marker = crate::expect_ref(receiver).cloned().ok_or_else(|| {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1359:                                    crate::expect_ref(source).map_or("", String::as_str)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1420:            .collection_generation(crate::expect_ref(&source_value).map_or("", String::as_str))
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1465:                        crate::expect_ref(&source_value).map_or("", String::as_str),
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1518:            .bimap_inverse(crate::expect_ref(&source).unwrap())
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:1921:            let marker = expect_ref(&supplier).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:2257:            let marker = expect_ref(&cache).cloned().unwrap_or_default();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:2309:        let Some(marker) = expect_ref(&cache).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:2406:            let marker = expect_ref(&map).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/guava_model.rs:2421:        let Some(marker) = expect_ref(&map).cloned() else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/host_ids.rs:179:                .map(|id| crate::expect_ref(id).cloned())
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/stream_pipeline.rs:650:        let marker = expect_ref(value)?;
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/stream_pipeline.rs:673:        if let Some(marker) = expect_ref(stream)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/stream_pipeline.rs:746:        if let Some(marker) = expect_ref(stream) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/stream_pipeline.rs:756:        let (Some(marker), Some(source)) = (expect_ref(stream), expect_ref(collection)) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/stream_pipeline.rs:830:        let Some(marker) = expect_ref(collection) else {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/stream_pipeline.rs:1331:        let marker = expect_ref(stream)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/stream_pipeline.rs:1575:            let map = expect_ref(&origin.map).map_or("", String::as_str);
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/stream_pipeline.rs:1742:                    && expect_ref(&origin.collection)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/declarations_content.rs:223:                    if let Some(marker) = expect_ref(&built) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/declarations_content.rs:329:                self.register_attachment(expect_ref(&builder).cloned(), id, Vec::new(), None)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/gson_tree/typed.rs:632:            let Some((constant_name, _)) = expect_ref(&constant)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/neoforge_imc.rs:186:    expect_ref(value).cloned()
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_immutable.rs:524:        let source = expect_ref(source_value)?.clone();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_immutable.rs:561:            if let Some(key) = expect_ref(&made) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_immutable.rs:582:        if let Some(key) = expect_ref(&made) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_immutable.rs:774:            && let Some(marker) = expect_ref(&made)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_immutable.rs:788:        if let Some(marker) = expect_ref(list) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/host_map_entry.rs:752:        let marker = crate::expect_ref(map).cloned().unwrap_or_default();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/array_views.rs:95:        if let Some(marker) = expect_ref(&view).cloned() {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_skeletons/mod.rs:664:        Ok(expect_ref(&text).cloned().unwrap_or_else(|| "null".into()))
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_skeletons/list.rs:162:        expect_ref(object)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_skeletons/list.rs:181:        if let Some(marker) = expect_ref(object) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/jdk_reflect_proxy.rs:167:        let marker = expect_ref(&proxy).cloned().unwrap_or_default();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_text.rs:59:    let name = expect_ref(value)?.strip_prefix(FORMATTING_MARKER)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_text.rs:139:            let text = expect_ref(args.first()?)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_text.rs:175:            let name = expect_ref(args.first()?)?.to_ascii_uppercase();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/client_text.rs:477:            text_call(expect_ref(&gold).unwrap(), &gold, &to_string, &[]),
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/checkcast.rs:366:            Verdict::No if expect_ref(value).is_some_and(|marker| self.is_live_stream(marker)) => {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/checkcast.rs:654:        let marker = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_tostring.rs:16:    let marker = expect_ref(value)?.as_str();
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/java_tostring.rs:106:    let Some(marker) = expect_ref(value) else {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_count.rs:372:        let Some(marker) = expect_ref(target) else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_count.rs:480:        if let (Some((from, to)), Some(view)) = (token.creates, expect_ref(value))
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_count.rs:640:            let Some(marker) = expect_ref(arg).cloned() else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_count.rs:670:            if let Some(marker) = expect_ref(value)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_count.rs:779:        let marker = expect_ref(collection).map_or("", String::as_str);
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/mod_count.rs:808:        let marker = expect_ref(collection).map_or("", String::as_str);
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/unmodifiable_sublist.rs:40:            expect_ref(receiver).and_then(|key| self.host.unmodifiable_view_source(key))
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:3952:        if let Some(marker) = expect_ref(&list) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:4078:        if let Some(marker) = expect_ref(&made) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:4132:        if let Some(marker) = expect_ref(&made) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:4158:        if let Some(marker) = expect_ref(&made) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:4617:        let mut marker = expect_ref(receiver)?.clone();
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:4700:                let Some((bytes, index)) = expect_ref(Self::argument(r, args, 0)?)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:4804:        let marker = expect_ref(receiver)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:5226:        let marker = expect_ref(payload)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:5296:            let text = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:5350:        let marker = expect_ref(value)?;
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:5549:        let Some(marker) = expect_ref(receiver) else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:5856:        let marker = self.synchronized_target(expect_ref(value)?);
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:5870:        let Some(marker) = expect_ref(value) else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:5883:        let marker = self.synchronized_target(expect_ref(value)?);
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:5900:        if let Some(marker) = expect_ref(value) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:7564:                let Some(marker) = expect_ref(Self::argument(r, args, 0)?).cloned() else {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:7621:                if expect_ref(value)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8008:                if expect_ref(value)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8215:                let marker = expect_ref(receiver).to_owned();
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8413:                None if expect_ref(receiver)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8666:            let marker = expect_ref(receiver).ok_or_else(|| {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8715:            && expect_ref(receiver).is_some_and(|marker| self.resource_streams.contains_key(marker))
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8717:            let marker = expect_ref(receiver).ok_or_else(|| {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8780:            let marker = expect_ref(receiver)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8818:        let receiver_marker = expect_ref(receiver)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8861:            let marker = expect_ref(receiver)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8938:            let matches_capability = expect_ref(receiver)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:8939:                .zip(expect_ref(requested))
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:9178:                        && let Some(defaults) = expect_ref(defaults)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:9918:            let marker = expect_ref(receiver).ok_or_else(|| {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:10075:            if let Some(source) = expect_ref(receiver).and_then(|source| iterated_kind(source)) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:10079:            if let Some(view) = expect_ref(receiver) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:10493:                let made = match expect_ref(receiver)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:10511:                if let Some(marker) = expect_ref(&set) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:10892:                    (expect_ref(prefix).is_some()
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:10900:                    (expect_ref(suffix).is_some()
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:10908:                    (expect_ref(needle).is_some()
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:10916:                    (expect_ref(other).is_some()
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:11129:                    (expect_ref(receiver) == expect_ref(other)) as i32,
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:11225:                (expect_ref(receiver) == expect_ref(Self::argument(r, args, 0)?)) as i32,
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:11235:                        expect_ref(receiver).cloned().unwrap_or_default(),
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:11673:                if expect_ref(receiver).is_some_and(|text| value_class::is_plain_string(text)) =>
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:12149:                    None => expect_ref(registry_key)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:12271:                        || expect_ref(receiver)
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:12411:fn expect_ref(value: &Value) -> Option<&String> {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:12420:    expect_ref(value).map_or("", String::as_str)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:12592:    let value = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:13047:    expect_ref(value)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:26461:            .find_map(|value| expect_ref(value).and_then(|text| text.strip_prefix("charset/")));
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:26511:        let text = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:26548:            expect_ref(value)
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:26721:                expect_ref(receiver).or_else(|| host_service::stream_marker(receiver))
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:26732:                    let normal = |value: Option<&Value>| expect_ref(value?).map(|t| unix_normal(t));
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:26802:                                if let Some(marker) = expect_ref(&value) {
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:26862:                if let Some(marker) = expect_ref(&value) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:27108:                        if let Some(reader) = expect_ref(&value) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:27117:                        if let Some(writer) = expect_ref(&value) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:27127:                        if let Some(stream) = expect_ref(&value) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:27136:                        if let Some(stream) = expect_ref(&value) {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:27156:                    expect_ref(value).is_some_and(|marker| self.io_paths.contains_key(marker))
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28089:                        if let Some(marker) = expect_ref(&builder) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28121:                        if let Some(marker) = expect_ref(&writer) {
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28379:                    expect_ref(receiver.unwrap_or(&Value::Ref(None))).map(|text| text.as_str())
+- b: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28392:                expect_ref(receiver.unwrap_or(&Value::Ref(None))).map(|text| text.as_str())
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28449:        let marker = expect_ref(value)?;
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28481:                expect_ref(value)
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28582:        let marker = expect_ref(value)?;
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28773:        if let Some(marker) = expect_ref(&value) {
+- a: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:28814:        expect_ref(value).is_some_and(|marker| self.is_live_stream(marker))
+- c: /Users/sparks/ava/wt/expect-ref-audit/crates/horizon-native-java/src/lib.rs:30328:                                && expect_ref(&value).is_some_and(|marker| {
