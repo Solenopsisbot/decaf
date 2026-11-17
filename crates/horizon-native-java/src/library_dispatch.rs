@@ -1059,6 +1059,26 @@ impl<H: Host> Runtime<'_, H> {
                 };
                 Value::Int((count - pos).max(0))
             }
+            ("skip", "(J)J") if array_stream.is_some() => {
+                let Some(amount) = args.first().and_then(boxed_long) else {
+                    return Ok(None);
+                };
+                let amount = amount.max(0) as usize;
+                let pos = match self.fields.get(&field("pos", "I")) {
+                    Some(Value::Int(pos)) => (*pos).max(0) as usize,
+                    _ => 0,
+                };
+                let count = match self.fields.get(&field("count", "I")) {
+                    Some(Value::Int(count)) => (*count).max(0) as usize,
+                    _ => 0,
+                };
+                let skipped = amount.min(count.saturating_sub(pos));
+                self.fields.insert(
+                    field("pos", "I"),
+                    Value::Int(pos.saturating_add(skipped) as i32),
+                );
+                Value::Long(skipped as i64)
+            }
             ("read", "([B)I" | "([BII)I") => {
                 let target = match args.first() {
                     None | Some(Value::Ref(None)) => {
@@ -1088,7 +1108,9 @@ impl<H: Host> Runtime<'_, H> {
                     if offset < 0 || length < 0 || offset as usize + length as usize > capacity {
                         return Err(NativeError::UncaughtException {
                             class: "java/lang/IndexOutOfBoundsException".into(),
-                            message: None,
+                            message: Some(format!(
+                                "Range [{offset}, {offset} + {length}) out of bounds for length {capacity}",
+                            )),
                             frame: None,
                         });
                     }

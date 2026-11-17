@@ -1,0 +1,8 @@
+valueClass=java.lang.Double
+mergePresent=11.0
+mergeAbsent=5.0
+mergeToNull=null false
+mergeNullValue=java.lang.NullPointerException:null
+after={a=11.0, z=5.0}
+typed=6 {a=6}
+hashMap=m {a=m}

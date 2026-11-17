@@ -8614,7 +8614,9 @@ impl Host for StdHost {
                 return Ok(self.resource_enumeration(name));
             }
         }
-        if r.owner == "java/io/InputStream" || r.owner == "java/io/ByteArrayInputStream" {
+        if (r.owner == "java/io/InputStream" || r.owner == "java/io/ByteArrayInputStream")
+            && expect_ref(receiver).is_some_and(|marker| self.resource_streams.contains_key(marker))
+        {
             let marker = expect_ref(receiver).ok_or_else(|| {
                 NativeError::Metadata("malformed java/io/InputStream marker".into())
             })?;
@@ -29009,6 +29011,87 @@ impl<H: Host> Runtime<'_, H> {
                 0x14 => {
                     let i = read_u16(code, &mut pc)?;
                     stack.push(constant_wide_value(&file.pool, i)?);
+                }
+                0xc4 => {
+                    // JVMS `wide` prefixes the local-variable forms with a
+                    // u2 index, and gives iinc a signed u2 constant.
+                    let wide_op = *code.get(pc).ok_or(NativeError::Truncated)?;
+                    pc += 1;
+                    let index = read_u16(code, &mut pc)? as usize;
+                    match wide_op {
+                        0x15..=0x19 => {
+                            let loaded = locals.get(index).cloned().unwrap_or(Value::Ref(None));
+                            stack.push(self.dispatch_modify_variable(
+                                VariableAnchor::Load,
+                                index,
+                                local_opcode_type(wide_op - 0x15),
+                                loaded,
+                                class,
+                                method,
+                                desc,
+                                at,
+                            )?);
+                        }
+                        0x36..=0x3a => {
+                            let value = pop(&mut stack, class, method, at)?;
+                            let value = self.dispatch_modify_variable(
+                                VariableAnchor::Store,
+                                index,
+                                local_opcode_type(wide_op - 0x36),
+                                value,
+                                class,
+                                method,
+                                desc,
+                                at,
+                            )?;
+                            if let Some(local) = locals.get_mut(index) {
+                                *local = value;
+                            }
+                        }
+                        0x84 => {
+                            let amount = read_u16(code, &mut pc)? as i16 as i32;
+                            let value = match locals.get(index) {
+                                Some(Value::Int(value)) => value.wrapping_add(amount),
+                                _ => {
+                                    return Err(NativeError::TypeMismatch {
+                                        class: class.to_owned(),
+                                        method: method.to_owned(),
+                                        expected: "int local",
+                                    });
+                                }
+                            };
+                            if let Some(local) = locals.get_mut(index) {
+                                *local = Value::Int(value);
+                            } else {
+                                return Err(NativeError::TypeMismatch {
+                                    class: class.to_owned(),
+                                    method: method.to_owned(),
+                                    expected: "valid local",
+                                });
+                            }
+                        }
+                        0xa9 => {
+                            let target = match locals.get(index) {
+                                Some(Value::Int(target)) => *target as usize,
+                                _ => {
+                                    return Err(NativeError::TypeMismatch {
+                                        class: class.to_owned(),
+                                        method: method.to_owned(),
+                                        expected: "ret address",
+                                    });
+                                }
+                            };
+                            pc = target;
+                        }
+                        _ => {
+                            return Err(NativeError::UnsupportedOpcode {
+                                class: class.to_owned(),
+                                method: method.to_owned(),
+                                opcode: wide_op,
+                                pc: at,
+                            });
+                        }
+                    }
                 }
                 // iadd/isub/imul/idiv/irem. The long twins (odd opcodes) take
                 // the 64-bit path below so no long value is truncated. Add,
