@@ -207,7 +207,6 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(());
         };
         let mut table = self.take_table(&marker, kind);
-        self.host.entries_before_call(&marker, &r.name, args);
         // Nothing touched the list since the table last mirrored it
         // (`collection_store.rs`): nothing to reconcile (#203).
         let generation = self.host.collection_generation(&marker);
@@ -747,6 +746,7 @@ impl<H: Host> Runtime<'_, H> {
             _ => {}
         }
         let mut table = self.take_table(&marker, kind);
+        self.host.entries_before_call(&marker, &r.name, args);
         if tainted_argument && matches!(r.name.as_str(), "putAll" | "addAll") {
             table.tainted = true;
         }
