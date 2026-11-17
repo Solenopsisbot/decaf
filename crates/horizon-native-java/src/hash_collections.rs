@@ -747,7 +747,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         let mut table = self.take_table(&marker, kind);
         let track_entry_removal =
-            self.host.host_collection_class(receiver).as_deref() == Some("java/util/Hashtable");
+            self.host_collection_class(receiver).as_deref() == Some("java/util/Hashtable");
         if track_entry_removal {
             self.host.entries_before_call(&marker, &r.name, args);
         }
