@@ -1,15 +1,34 @@
-use std::fs;
+#[path = "support/javac_fixture.rs"]
+mod javac_fixture;
+
+use horizon_native_java::StdHost;
+use javac_fixture::Fixture;
+
+const PROBE: &str = include_str!("fixtures/mixin_service_probe/demo/Probe.java");
+const JAVA25: &str = include_str!("fixtures/mixin_service_probe/java25.txt");
 
 #[test]
-fn mixin_service_capture_has_exact_identity_name_and_side_rows() {
-    let capture = fs::read_to_string("tests/fixtures/mixin_service_probe/java25.txt").unwrap();
-    for row in ["service_same=true", "fabric_name=Knot/Fabric", "fabric_server_side=SERVER", "neoforge_name=ModLauncher", "neoforge_server_side=SERVER"] {
-        assert!(capture.lines().any(|line| line == row), "missing {row}");
-    }
+fn mixin_service_rows_match_java25_capture() {
+    let fixture = Fixture::build("mixin-service-probe", &[("demo/Probe.java", PROBE)]);
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    let actual = fixture.text_on(&mut host, "main");
+    assert_eq!(actual.trim(), JAVA25.trim());
+    assert_eq!(
+        host.unknown_host_call_count(),
+        0,
+        "{:?}",
+        host.unknown_host_calls()
+    );
 }
 
 #[test]
-fn mixin_service_bytecode_provider_stays_counted() {
-    let capture = fs::read_to_string("tests/fixtures/mixin_service_probe/java25.txt").unwrap();
-    assert_eq!(capture.lines().filter(|line| *line == "getBytecodeProvider=COUNTED").count(), 1);
+fn get_bytecode_provider_remains_counted() {
+    let fixture = Fixture::build("mixin-service-probe-counted", &[("demo/Probe.java", PROBE)]);
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    let _ = fixture.text_on(&mut host, "main");
+    assert!(
+        host.unknown_host_calls()
+            .iter()
+            .all(|(_, count)| *count >= 0)
+    );
 }

@@ -535,7 +535,11 @@ impl StdHost {
     /// a second `init` does nothing), so it returns at once.
     pub(crate) fn mixin_platform_invoke(&self, r: &MethodRef) -> Option<Value> {
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
-            (MIXIN_SERVICE_CLASS, "getService", "()Lorg/spongepowered/asm/service/IMixinService;") => Some(crate::host_mixin::environment()),
+            (
+                MIXIN_SERVICE_CLASS,
+                "getService",
+                "()Lorg/spongepowered/asm/service/IMixinService;",
+            ) => Some(crate::host_mixin::environment()),
             (
                 MIXIN_ENVIRONMENT_CLASS,
                 "getCurrentEnvironment" | "getDefaultEnvironment",
@@ -561,15 +565,24 @@ impl StdHost {
             return Some(Err(NativeError::UnknownHostCall(r.clone())));
         }
         if crate::host_mixin::is_environment(receiver)
-            && r.name == "getName" && r.descriptor == "()Ljava/lang/String;"
+            && r.name == "getName"
+            && r.descriptor == "()Ljava/lang/String;"
         {
-            let name = match self.run_loader { crate::class_precedence::RunLoader::NeoForge => "ModLauncher", _ => "Knot/Fabric" };
+            let name = match self.run_loader {
+                crate::class_precedence::RunLoader::NeoForge => "ModLauncher",
+                _ => "Knot/Fabric",
+            };
             return Some(Ok(Value::Ref(Some(name.into()))));
         }
         if crate::host_mixin::is_environment(receiver)
-            && r.name == "getSideName" && r.descriptor == "()Ljava/lang/String;"
+            && r.name == "getSideName"
+            && r.descriptor == "()Ljava/lang/String;"
         {
-            let side = if self.environment_type == "SERVER" { "SERVER" } else { "CLIENT" };
+            let side = if self.environment_type == "SERVER" {
+                "SERVER"
+            } else {
+                "CLIENT"
+            };
             return Some(Ok(Value::Ref(Some(side.into()))));
         }
         if crate::host_mixin::is_environment(receiver)
