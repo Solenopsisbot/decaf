@@ -1,0 +1,3 @@
+# Step 2 findings
+
+`visuality.registry.HitParticleRegistry.getEntityFromString(String)` calls `BuiltInRegistries.ENTITY_TYPE.getOptional(Identifier.parse(input))` and returns the Optional unchanged. Its reload lambda calls only `Optional.isPresent()` and, when present, `Optional.get()`, then stores the resulting `EntityType<?>` in a `HitParticleRegistry.Entry` alongside a particle. The captured bytecode does not call EntityType methods, compare against static EntityType constants, or inspect descriptions. A hit therefore needs stable identity as an EntityType handle, plus Optional presence/get; other EntityType methods remain counted.

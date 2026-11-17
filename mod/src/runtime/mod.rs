@@ -272,6 +272,7 @@ mod type_switch;
 mod value_class;
 mod vanilla_block_items;
 mod vanilla_blocks;
+mod vanilla_entity_types;
 mod vanilla_holders;
 mod vanilla_holders_table;
 mod vanilla_items;
