@@ -384,6 +384,7 @@ pub enum HostKind {
     NeoForgeModInfo,
     /// A `ModFileInfo`: key its file's first mod id.
     NeoForgeModFileInfo,
+    NeoForgePayloadRegistrar,
     /// A `ModConfig.Type` constant: key its name.
     NeoForgeConfigType,
     /// A detected `WorldVersion`: key its name.
@@ -609,6 +610,9 @@ pub enum HostKind {
     MeshDefinition,
     PartDefinition,
     LayerDefinition,
+    /// A `java.util.regex.Matcher` from `Pattern.matcher(input)`: a serial (one
+    /// object per call), the pattern text and the input (`host_jdk_constant.rs`).
+    RegexMatcher,
 }
 
 /// How a kind's Java class follows from its key.
@@ -1831,6 +1835,13 @@ const KINDS: &[KindInfo] = &[
         methods: &crate::host_neoforge_loader::OBJECT_METHODS,
     },
     KindInfo {
+        kind: HostKind::NeoForgePayloadRegistrar,
+        tag: "nfpr",
+        class: ClassRule::Fixed("net/neoforged/neoforge/network/registration/PayloadRegistrar"),
+        canonical: never_canonical,
+        methods: &crate::host_service::METHODS,
+    },
+    KindInfo {
         kind: HostKind::NeoForgeConfigType,
         tag: "nfct",
         class: ClassRule::Unknown {
@@ -2626,6 +2637,14 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed(crate::model_layers::LAYER_DEFINITION),
         canonical: always_canonical,
         methods: &crate::model_layers::IDENTITY_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::RegexMatcher,
+        tag: "rxm",
+        class: ClassRule::Fixed("java/util/regex/Matcher"),
+        // A serial per `matcher` call.
+        canonical: always_canonical,
+        methods: &crate::host_jdk_constant::MATCHER_METHODS,
     },
 ];
 

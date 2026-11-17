@@ -205,3 +205,20 @@ fn network_methods_remain_counted() {
         "{unknown:?}"
     );
 }
+
+#[test]
+fn cast_returns_the_same_codec_object() {
+    let codec = crate::stream_codec::static_call(
+        &crate::MethodRef { owner: crate::stream_codec::STREAM_CODEC.into(), name: "of".into(), descriptor: "(Lnet/minecraft/network/codec/StreamEncoder;Lnet/minecraft/network/codec/StreamDecoder;)Lnet/minecraft/network/codec/StreamCodec;".into() },
+        &[Value::Ref(None), Value::Ref(None)],
+    ).unwrap();
+    let call = crate::MethodRef {
+        owner: crate::stream_codec::STREAM_CODEC.into(),
+        name: "cast".into(),
+        descriptor: "()Lnet/minecraft/network/codec/StreamCodec;".into(),
+    };
+    let answer = crate::stream_codec::instance_call(&call, &codec, &[])
+        .unwrap()
+        .unwrap();
+    assert_eq!(answer, codec);
+}

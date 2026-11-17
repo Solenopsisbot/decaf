@@ -1,0 +1,1 @@
+package net.minecraft.network.syncher; public final class SynchedEntityData { public static <T> EntityDataAccessor<T> defineId(Class<? extends SyncedDataHolder> c, EntityDataSerializer<T> s){throw new UnsupportedOperationException();} public static final class DataValue<T>{} }

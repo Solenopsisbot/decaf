@@ -153,11 +153,11 @@ fn source_built_loader_probe_reads_host_side_paths_and_version() {
     };
     assert_eq!(
         run("SERVER", Some("26.3")),
-        "true|false|true|true|/horizon/config|/horizon/game|26.3|bus|true|26.3|true"
+        "true|false|true|true|/horizon/config|/horizon/game|26.3|no-bus|true|26.3|true"
     );
     assert_eq!(
         run("CLIENT", Some("26.3")),
-        "false|true|false|false|/horizon/config|/horizon/game|26.3|bus|true|26.3|false"
+        "false|true|false|false|/horizon/config|/horizon/game|26.3|no-bus|true|26.3|false"
     );
     // With no seeded version the host has no release to report: the container
     // is absent, so `Optional.get` throws instead of inventing one.

@@ -12,6 +12,8 @@ use std::{
 };
 use zip::write::SimpleFileOptions;
 
+const ORACLE: &str = include_str!("fixtures/bigdecimal_slice/oracle/java25.txt");
+
 const PROBE: &str = r#"package demo;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -181,7 +183,13 @@ fn java25_bigdecimal_slice_matches_the_jdk() {
     };
     assert_eq!(
         text,
-        "12.3400|12.3400|1.5|4|6|12.34|12.34|1.24|10.0|true|false|0|3825404|38256|0.00|0.00|2|2|0E+3|0"
+        ORACLE
+            .lines()
+            .find(|line| line.starts_with("values="))
+            .unwrap()
+            .split_once("=")
+            .unwrap()
+            .1
     );
     assert!(
         host.unknown_host_calls().is_empty(),
@@ -210,8 +218,15 @@ fn java25_review_edges_match_the_jdk() {
     };
     assert_eq!(
         text,
-        "NumberFormatException:Infinite or NaN|NumberFormatException:Infinite or NaN|NumberFormatException:Infinite or NaN|true|true|true|true|true|NullPointerException:Cannot read field \"oldMode\" because \"roundingMode\" is null|-2147483648"
+        ORACLE
+            .lines()
+            .find(|line| line.starts_with("reviewEdges="))
+            .unwrap()
+            .split_once("=")
+            .unwrap()
+            .1
     );
+
     assert!(
         host.unknown_host_calls().is_empty(),
         "{:?}",
@@ -239,7 +254,13 @@ fn java25_zero_scale_rows_match_layout_chars() {
     };
     assert_eq!(
         text,
-        "0=0|1=0.0|2=0.00|6=0.000000|7=0E-7|8=0E-8|-1=0E+1|-7=0E+7|DOWN=0E-7|CEILING=0E-7|FLOOR=-1E-7|HALF_UP=0E-7|HALF_DOWN=0E-7|HALF_EVEN=0E-7|"
+        ORACLE
+            .lines()
+            .find(|line| line.starts_with("zeroScaleRows="))
+            .unwrap()
+            .split_once("=")
+            .unwrap()
+            .1
     );
     assert!(
         host.unknown_host_calls().is_empty(),
@@ -268,7 +289,13 @@ fn java25_small_value_cache_identities_match_the_jdk() {
     };
     assert_eq!(
         text,
-        "0:true:true:true|1:true:true:true|2:true:true:true|3:true:true:true|4:true:true:true|5:true:true:true|6:true:true:true|7:true:true:true|8:true:true:true|9:true:true:true|10:true:true:true|"
+        ORACLE
+            .lines()
+            .find(|line| line.starts_with("cacheRows="))
+            .unwrap()
+            .split_once("=")
+            .unwrap()
+            .1
     );
     assert!(
         host.unknown_host_calls().is_empty(),

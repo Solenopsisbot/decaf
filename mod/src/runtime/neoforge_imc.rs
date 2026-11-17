@@ -52,6 +52,7 @@
 //! * **I2** a `null` predicate is counted and answers an empty stream (FML throws on the first
 //!   message the stream reaches).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -104,13 +105,19 @@ impl std::fmt::Debug for ImcState {
     }
 }
 
-/// A host's view of its bus: which bus, which jar it is there, and the container FML would have
-/// set active in `ModLoadingContext` (`None`: the `minecraft` container).
+/// A host's view of its bus: which bus and which jar it is there. The active
+/// `ModLoadingContext` container lives in the native thread-local below.
 #[derive(Debug, Clone, Default)]
 pub struct ImcHandle {
     bus: Arc<Mutex<ImcState>>,
     jar: String,
-    pub(crate) active: Option<String>,
+}
+
+thread_local! {
+    /// FML's `ModLoadingContext.context` active container. It is a
+    /// `ThreadLocal`, so a parked Java thread or an unknown foreign thread
+    /// must never inherit another thread's active mod.
+    static ACTIVE_CONTAINER: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn lock(bus: &Mutex<ImcState>) -> MutexGuard<'_, ImcState> {
@@ -135,7 +142,6 @@ impl ImcBus {
         host.imc = ImcHandle {
             bus: Arc::clone(&self.state),
             jar: key.to_owned(),
-            active: None,
         };
     }
 
@@ -160,8 +166,16 @@ impl ImcBus {
 /// Sets the container FML's `ModLoadingContext` holds while a construction, a post or a deferred
 /// task runs; answers the one it replaces.
 pub(crate) fn set_active<H: Host + ?Sized>(host: &mut H, id: Option<&str>) -> Option<String> {
-    let (imc, _) = host.neoforge_imc()?;
-    std::mem::replace(&mut imc.active, id.map(str::to_owned))
+    host.neoforge_imc()?;
+    ACTIVE_CONTAINER
+        .with(|active| std::mem::replace(&mut *active.borrow_mut(), id.map(str::to_owned)))
+}
+
+/// The mod id whose constructor or lifecycle callback is currently running.
+/// `None` is the loader's outside-of-a-mod state, which NeoForge exposes as
+/// the `minecraft` container.
+pub(crate) fn active_id(_handle: &ImcHandle) -> Option<String> {
+    ACTIVE_CONTAINER.with(|active| active.borrow().clone())
 }
 
 fn count(unknown: &mut BTreeMap<String, usize>, call: &str, why: &str) {
@@ -293,7 +307,7 @@ impl<H: Host> Runtime<'_, H> {
         };
         let sender = match sender {
             Some(sender) => text(sender),
-            None => Some(imc.active.clone().unwrap_or_else(|| "minecraft".into())),
+            None => Some(active_id(imc).unwrap_or_else(|| "minecraft".into())),
         };
         let receiver = text(receiver).unwrap_or_default();
         let message = Message {

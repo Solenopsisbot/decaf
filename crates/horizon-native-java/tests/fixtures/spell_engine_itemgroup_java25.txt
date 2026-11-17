@@ -1,0 +1,5 @@
+event=net.fabricmc.fabric.impl.base.event.ArrayBackedEvent
+same_event=true
+other_key_same=false
+register_return=void
+listener_fired=false

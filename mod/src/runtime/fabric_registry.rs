@@ -58,6 +58,16 @@ fn built(receiver: &Value) -> Option<(Value, bool)> {
 }
 
 pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value, NativeError>> {
+    if r.owner == "net/fabricmc/fabric/api/attachment/v1/AttachmentSyncPredicate"
+        && r.descriptor == "()Lnet/fabricmc/fabric/api/attachment/v1/AttachmentSyncPredicate;"
+        && matches!(r.name.as_str(), "all" | "targetOnly" | "allButTarget")
+        && args.is_empty()
+    {
+        return Some(Ok(Value::Host(HostRef::new(
+            HostKind::JarObject,
+            format!("attachment-sync-predicate/{}", r.name),
+        ))));
+    }
     match (r.owner.as_str(), r.name.as_str()) {
         ("net/minecraft/resources/ResourceKey", "createRegistryKey")
             if r.descriptor
@@ -97,7 +107,28 @@ pub(crate) fn instance_call(
     host: &mut StdHost,
     r: &MethodRef,
     receiver: &Value,
+    args: &[Value],
 ) -> Option<Result<Value, NativeError>> {
+    if r.owner == "net/fabricmc/fabric/api/attachment/v1/AttachmentSyncPredicate"
+        && r.name == "test"
+    {
+        let marker = crate::runtime::jar_object::instance_key(receiver)?;
+        let same = match (args.first()?, args.get(1)?) {
+            (Value::Host(a), Value::Host(b)) => a.same_object(b)?,
+            (Value::Ref(None), Value::Ref(None)) => true,
+            _ => return None,
+        };
+        let result = if marker.ends_with("/all") {
+            true
+        } else if marker.ends_with("/targetOnly") {
+            same
+        } else if marker.ends_with("/allButTarget") {
+            !same
+        } else {
+            return None;
+        };
+        return Some(Ok(Value::Int(result as i32)));
+    }
     if r.owner != BUILDER {
         return None;
     }

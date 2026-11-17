@@ -1,0 +1,12 @@
+natural.a.b=-1
+natural.a.c=-2
+natural.ab.abcd=-2
+natural.same=0
+natural.3.7=-1
+reverse.a.c=2
+reverse.ab.abcd=2
+naturalIdentity=true
+reverseIdentity=true
+reverseReverse=true
+natural.null=java.lang.NullPointerException:null
+reverse.null=java.lang.NullPointerException:Cannot invoke "java.lang.Comparable.compareTo(Object)" because "right" is null

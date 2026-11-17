@@ -23,6 +23,11 @@
 
 use super::*;
 
+/// The composite operations of Guava's two natural orderings. Their `toString`,
+/// like every callback's, is counted (`callback_marker::CALLBACK_TEXT`).
+pub(crate) const GUAVA_NATURAL: &str = "cmp.guava-natural";
+pub(crate) const GUAVA_REVERSE_NATURAL: &str = "cmp.guava-reverse-natural";
+
 const TYPE_TOKEN: &str = "com/google/common/reflect/TypeToken";
 /// The captured type a `TypeToken` subclass object keeps, under its marker.
 const RUNTIME_TYPE: &str = "#runtimeTypeLjava/lang/reflect/Type;";
@@ -245,6 +250,69 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        // Guava's `Ordering.natural()` (the `NaturalOrdering.INSTANCE` singleton)
+        // and its `reverse()` (the `ReverseNaturalOrdering.INSTANCE` singleton,
+        // whose own `reverse()` is `natural()` again): operand-free composites,
+        // so each is one object, as in Guava. jamlib orders its events with them.
+        if r.owner == "com/google/common/collect/Ordering" {
+            match (r.name.as_str(), r.descriptor.as_str(), receiver) {
+                ("natural", "()Lcom/google/common/collect/Ordering;", None) => {
+                    return Ok(Some(crate::runtime::callback_marker::composite(GUAVA_NATURAL, &[])));
+                }
+                ("reverse", "()Lcom/google/common/collect/Ordering;", Some(v)) => {
+                    match crate::runtime::callback_marker::composite_of(v).map(|(op, _)| op) {
+                        Some(op) if op == GUAVA_NATURAL => {
+                            return Ok(Some(crate::runtime::callback_marker::composite(
+                                GUAVA_REVERSE_NATURAL,
+                                &[],
+                            )));
+                        }
+                        Some(op) if op == GUAVA_REVERSE_NATURAL => {
+                            return Ok(Some(crate::runtime::callback_marker::composite(GUAVA_NATURAL, &[])));
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some((op, _)) = receiver.and_then(crate::runtime::callback_marker::composite_of)
+            && (op == GUAVA_NATURAL || op == GUAVA_REVERSE_NATURAL)
+            && r.name == "compare"
+            && r.descriptor == "(Ljava/lang/Object;Ljava/lang/Object;)I"
+            && let [left, right] = args
+        {
+            let npe = |message: Option<&str>| {
+                Err(thrown(
+                    "java/lang/NullPointerException",
+                    message.map(str::to_owned),
+                ))
+            };
+            // `NaturalOrdering.compare`: `checkNotNull(left); checkNotNull(right);
+            // return left.compareTo(right);`.
+            if op == GUAVA_NATURAL {
+                if *left == Value::Ref(None) || *right == Value::Ref(None) {
+                    return npe(None);
+                }
+                return Ok(Some(Value::Int(crate::runtime::jdk_stream::natural_compare(
+                    left, right,
+                )?)));
+            }
+            // `ReverseNaturalOrdering.compare`: `checkNotNull(left); if (left ==
+            // right) return 0; return right.compareTo(left);`, so a null `right`
+            // is the JVM's helpful NullPointerException.
+            if *left == Value::Ref(None) {
+                return npe(None);
+            }
+            if *right == Value::Ref(None) {
+                return npe(Some(
+                    "Cannot invoke \"java.lang.Comparable.compareTo(Object)\" because \"right\" is null",
+                ));
+            }
+            return Ok(Some(Value::Int(crate::runtime::jdk_stream::natural_compare(
+                right, left,
+            )?)));
+        }
         if (r.owner == "com/google/common/collect/ImmutableMap"
             || r.owner == "com/google/common/collect/ImmutableBiMap")
             && r.name == "copyOf"

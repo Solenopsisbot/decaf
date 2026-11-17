@@ -1,0 +1,7 @@
+capitalize=<null>||Hello|Éclair|😀x|ǅuro|ßeta
+pad=<null>|   |ab   |😀   |abxyx|xyxab|ééé|ab   |ab   |   ab|   ab|ab|ab
+unicode=false|true|true|true|fallback|fallback| 
+nullRules=right-null|left-null|repeat-null|contains-null|contains-needle-null|blank-null
+validate=java.lang.IllegalArgumentException:The validated expression is false|java.lang.IllegalArgumentException:bad é 7|java.lang.NullPointerException:Cannot invoke "java.util.function.Supplier.get()" because "messageSupplier" is null|ok
+surrogate=0061,d800|len=2
+nopIdentity=true

@@ -1,0 +1,4 @@
+. ~/ava/env.sh
+CP=/Users/sparks/ava/minecraft-26.3-server-game.jar:/Users/sparks/ava/scratch/vanilla-values/oracle/libraries/server/*
+javac -cp "$CP" -d probes/vanilla_enum probes/vanilla_enum/VanillaEnumOracle.java
+java -cp "probes/vanilla_enum:$CP" VanillaEnumOracle > probes/vanilla_enum/java25.txt

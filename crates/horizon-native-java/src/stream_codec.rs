@@ -129,6 +129,13 @@ pub(crate) fn instance_call(
             _ => {}
         }
     }
+    if r.owner == STREAM_CODEC
+        && r.name == "cast"
+        && r.descriptor == "()Lnet/minecraft/network/codec/StreamCodec;"
+        && args.is_empty()
+    {
+        return Some(Ok(receiver.clone()));
+    }
     if r.owner != STREAM_CODEC
         || r.name != "map"
         || r.descriptor

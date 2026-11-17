@@ -1,0 +1,19 @@
+CLASS net.minecraft.sounds.SoundSource
+MASTER|0|MASTER getName=master
+MUSIC|1|MUSIC getName=music
+RECORDS|2|RECORDS getName=record
+WEATHER|3|WEATHER getName=weather
+BLOCKS|4|BLOCKS getName=block
+HOSTILE|5|HOSTILE getName=hostile
+NEUTRAL|6|NEUTRAL getName=neutral
+PLAYERS|7|PLAYERS getName=player
+AMBIENT|8|AMBIENT getName=ambient
+VOICE|9|VOICE getName=voice
+UI|10|UI getName=ui
+CLASS net.minecraft.world.entity.ai.attributes.AttributeModifier$Operation
+ADD_VALUE|0|ADD_VALUE
+ADD_MULTIPLIED_BASE|1|ADD_MULTIPLIED_BASE
+ADD_MULTIPLIED_TOTAL|2|ADD_MULTIPLIED_TOTAL
+CLASS net.minecraft.world.entity.HumanoidArm
+LEFT|0|LEFT
+RIGHT|1|RIGHT
