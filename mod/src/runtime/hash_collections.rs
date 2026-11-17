@@ -746,13 +746,19 @@ impl<H: Host> Runtime<'_, H> {
             _ => {}
         }
         let mut table = self.take_table(&marker, kind);
-        self.host.entries_before_call(&marker, &r.name, args);
+        let track_entry_removal =
+            self.host.host_collection_class(receiver).as_deref() == Some("java/util/Hashtable");
+        if track_entry_removal {
+            self.host.entries_before_call(&marker, &r.name, args);
+        }
         if tainted_argument && matches!(r.name.as_str(), "putAll" | "addAll") {
             table.tainted = true;
         }
         let result = self.hash_member(r, receiver, kind, &mut table, args);
         self.host.store_hash_table(&marker, table);
-        self.host.entries_after_call(&marker);
+        if track_entry_removal {
+            self.host.entries_after_call(&marker);
+        }
         match result? {
             Some(answer) => Ok(Some(answer)),
             None => Ok(None),
