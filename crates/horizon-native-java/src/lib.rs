@@ -66,6 +66,7 @@ mod enum_value_of;
 pub mod events;
 mod executors;
 mod fabric_api_slice2;
+mod fabric_biome_modifications;
 mod fabric_block_api;
 mod fabric_creative_tab;
 mod fabric_mods;
@@ -3642,6 +3643,8 @@ pub struct StdHost {
     /// Fabric resource condition types and their registry (`fabric_resource_conditions.rs`).
     fabric_resource_conditions: fabric_resource_conditions::State,
     creative_tab: host_creative_tab::State,
+    /// Fabric biome modifications and their recorded modifiers (`fabric_biome_modifications.rs`).
+    fabric_biome_modifications: fabric_biome_modifications::State,
     vec2: vec2::State,
 }
 
@@ -3810,6 +3813,7 @@ impl StdHost {
             fabric_block_api: fabric_block_api::State::default(),
             fabric_resource_conditions: fabric_resource_conditions::State::default(),
             creative_tab: host_creative_tab::State::default(),
+            fabric_biome_modifications: fabric_biome_modifications::State::default(),
             vec2: vec2::State::default(),
         }
     }
@@ -6736,6 +6740,11 @@ impl Host for StdHost {
             return value;
         }
         if let Some(value) =
+            fabric_biome_modifications::static_call(&mut self.fabric_biome_modifications, r, args)
+        {
+            return value;
+        }
+        if let Some(value) =
             entity_registration::static_call(&mut self.entity_registration, r, args)
         {
             return value;
@@ -8236,6 +8245,14 @@ impl Host for StdHost {
         if let Some(value) =
             fabric_resource_conditions::instance_call(&self.fabric_resource_conditions, r, receiver)
         {
+            return value;
+        }
+        if let Some(value) = fabric_biome_modifications::instance_call(
+            &mut self.fabric_biome_modifications,
+            r,
+            receiver,
+            args,
+        ) {
             return value;
         }
         if let Some(value) = fabric_api_slice2::event_call(r, receiver, args) {
