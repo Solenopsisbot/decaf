@@ -49,7 +49,7 @@
 //! (`serde_json` here keeps object keys sorted, not in file order),
 //! `ContactInformation.asMap` (a `HashMap` in Fabric), `getCustomValues`,
 //! `getDependencies`, a custom number's `getAsNumber` (Fabric's is a
-//! `LazilyParsedNumber`), an icon path, and a `getAs*` of the wrong type.
+//! a parsed `Double` from `JsonReader.nextDouble()`, an icon path, and a `getAs*` of the wrong type.
 
 use super::*;
 
@@ -98,7 +98,18 @@ const JAVA_SPECIFICATION_VERSION: &str = "25";
 use crate::runtime::host_fabric_loader::{self as loader, Pointed};
 
 fn enum_marker(owner: &str, name: &str) -> Value {
-    Value::Ref(Some(format!("{owner}/{name}")))
+    Value::Ref(Some(format!("enum/{owner}/{name}")))
+}
+
+pub(crate) fn enum_constants(owner: &str) -> Option<&'static [&'static str]> {
+    match owner {
+        MOD_ENVIRONMENT => Some(ENVIRONMENTS),
+        CV_TYPE => Some(CV_TYPES),
+        _ => None,
+    }
+}
+pub(crate) fn enum_values(owner: &str) -> Option<Vec<Value>> {
+    enum_constants(owner).map(|names| names.iter().map(|name| enum_marker(owner, name)).collect())
 }
 
 fn text(value: impl Into<String>) -> Value {
@@ -388,6 +399,7 @@ impl StdHost {
                     CV_TYPES
                 };
                 let name = expect_ref(receiver)?
+                    .strip_prefix("enum/")?
                     .strip_prefix(r.owner.as_str())?
                     .strip_prefix('/')?;
                 let ordinal = constants.iter().position(|constant| *constant == name)?;
@@ -398,6 +410,7 @@ impl StdHost {
             }
             (MOD_ENVIRONMENT, "matches", "(Lnet/fabricmc/api/EnvType;)Z") => {
                 let name = expect_ref(receiver)?
+                    .strip_prefix("enum/")?
                     .strip_prefix(MOD_ENVIRONMENT)?
                     .strip_prefix('/')?;
                 let side = Self::argument(r, args, 0)
@@ -694,11 +707,50 @@ impl StdHost {
             return self.unknown_host_call(r);
         }
         let marker = |pointer: String| loader::pointed(Pointed::CustomValue, id, &pointer);
+        if r.name == "iterator" && r.descriptor == "()Ljava/util/Iterator;" {
+            if let serde_json::Value::Array(items) = value {
+                let values = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| loader::custom_value(id, &child(pointer, &i.to_string()), v))
+                    .collect();
+                return match self
+                    .new_host_iterator(values, Some("fabric/custom-value/array".into()))
+                {
+                    Some(iterator) => Ok(iterator),
+                    None => self.unknown_host_call(r),
+                };
+            }
+            if let serde_json::Value::Object(entries) = value {
+                let mut pairs = Vec::with_capacity(entries.len() * 2);
+                for (key, child_value) in entries {
+                    pairs.push(text(key.clone()));
+                    pairs.push(loader::custom_value(id, &child(pointer, key), child_value));
+                }
+                let entries = self.mint_map_entries(
+                    &Value::Ref(None),
+                    &pairs,
+                    crate::runtime::host_map_entry::EntryMade::Holder,
+                );
+                return match self
+                    .new_host_iterator(entries, Some("fabric/custom-value/object".into()))
+                {
+                    Some(iterator) => Ok(iterator),
+                    None => self.unknown_host_call(r),
+                };
+            }
+        }
         match (r.name.as_str(), r.descriptor.as_str(), value) {
             ("getType", _, _) => Ok(enum_marker(CV_TYPE, cv_type(value))),
             ("getAsObject" | "getAsArray", _, _) => Ok(marker(pointer.to_owned())),
             ("getAsString", _, serde_json::Value::String(string)) => Ok(text(string.clone())),
             ("getAsBoolean", _, serde_json::Value::Bool(flag)) => Ok(Value::Int(i32::from(*flag))),
+            ("getAsNumber", _, serde_json::Value::Number(number)) => {
+                match number.to_string().parse::<f64>() {
+                    Ok(value) => Ok(Value::Float(value)),
+                    Err(_) => self.unknown_host_call(r),
+                }
+            }
             ("size", "()I", serde_json::Value::Object(entries)) => {
                 Ok(Value::Int(entries.len() as i32))
             }
