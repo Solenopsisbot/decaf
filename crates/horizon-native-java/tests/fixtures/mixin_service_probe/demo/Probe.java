@@ -1,1 +1,5 @@
-public class Probe { public static void main(String[] a) { System.out.println("service_same=true"); System.out.println("fabric_name=Knot/Fabric"); System.out.println("fabric_server_side=SERVER"); System.out.println("neoforge_name=ModLauncher"); System.out.println("neoforge_server_side=SERVER"); System.out.println("getBytecodeProvider=COUNTED"); } }
+public class Probe {
+  public static String rows() { return "service_same=true\nfabric_name=Knot/Fabric\nfabric_server_side=SERVER\nneoforge_name=ModLauncher\nneoforge_server_side=SERVER\ngetBytecodeProvider=COUNTED\n"; }
+  public static void main(String[] a) { System.out.print(rows()); }
+  public static String provider() { return "COUNTED"; }
+}
