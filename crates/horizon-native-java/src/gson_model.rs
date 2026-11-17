@@ -888,7 +888,7 @@ impl<H: Host> Runtime<'_, H> {
                     let mut state = gson_writer::State::new(sink.clone());
                     state.apply_tree_style(&style.tree_style());
                     self.gson_writers.insert(wm.clone(), state);
-                    let Some(ac) = crate::jar_object::object_class(adapter) else {
+                    let Some(ac) = crate::jar_object::object_class(&adapter) else {
                         return Ok(None);
                     };
                     let result = self.invoke(
