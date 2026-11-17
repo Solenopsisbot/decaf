@@ -1738,6 +1738,7 @@ mod tests {
             "game_block_classes",
             "service_providers",
             "current_time_millis",
+            "nano_time_origin",
             "mods",
             "neoforge_mod_files",
             "run_loader",
