@@ -263,16 +263,6 @@ pub(crate) fn callback_text(value: &Value) -> Option<&str> {
     }
 }
 
-/// Whether a runtime marker's `text` (a host collection's) embeds a
-/// callback handle (`hcb:…`): such text is never printed. A plain `String`
-/// holds none, however it is spelled. An `HttpClient.Builder`'s marker
-/// (`hhcb:…`, tag `hcb`) is no callback.
-pub(crate) fn holds_callback(text: &str) -> bool {
-    text.match_indices("hcb:")
-        .any(|(at, _)| at == 0 || text.as_bytes()[at - 1] != b'h')
-        && !crate::value_class::is_plain_string(text)
-}
-
 /// The interfaces a callback keyed `key` implements: a lambda's call site
 /// interface and markers, a combinator's own interface.
 pub(crate) fn interfaces(key: &str) -> Vec<&str> {
@@ -531,17 +521,6 @@ mod tests {
     /// A key's bounded text never ends a cut value on an escaping `\`: the
     /// cut value and the sentinel stay two elements, whatever the cut lands
     /// on (#261 round-3 S1, `"A"×4094 + ",tail"` cut right after its `\`).
-    #[test]
-    fn a_builder_marker_is_no_callback() {
-        // An `HttpClient.Builder`'s marker (tag `hcb`) names no callback,
-        // alone or inside other text. (No runtime-made text holds a callback
-        // since #255 and #261; what `holds_callback` still answers for a
-        // jar's own `String` is #330.)
-        for text in ["hhcb:3", "list/hhcb:3", "a,hhcb:3", "hopt:hhcb:3"] {
-            assert!(!holds_callback(text), "{text}");
-        }
-    }
-
     #[test]
     fn a_cut_never_escapes_its_sentinel() {
         for length in 4090..4100 {
