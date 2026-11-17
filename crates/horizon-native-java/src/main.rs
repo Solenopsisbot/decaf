@@ -755,6 +755,7 @@ fn main() -> ExitCode {
     };
     let Cli {
         json,
+        dependency_prelude,
         mixin_plans,
         weave,
         links,
@@ -1032,7 +1033,7 @@ fn main() -> ExitCode {
                             (total > before).then_some((key, total - before))
                         })
                         .collect();
-                    report["unknown_host_calls"] = dependent_unknown.clone().into();
+                    report["unknown_host_calls"] = serde_json::json!(dependent_unknown);
                     report["unknown_host_call_count"] = dependent_unknown
                         .iter()
                         .map(|(_, n)| n)
