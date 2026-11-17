@@ -16,6 +16,7 @@ use std::{
     fs::File,
     path::Path,
     sync::Arc,
+    time::Instant,
 };
 
 #[cfg(test)]
@@ -3376,6 +3377,8 @@ pub struct StdHost {
     /// integer value, so this is intentionally an `i32` rather than a host
     /// clock read.  Keeping the value seeded makes bootstrap replayable.
     current_time_millis: i32,
+    /// Monotonic origin for `System.nanoTime`; each host gets its own clock.
+    nano_time_origin: Instant,
     mods: BTreeMap<String, String>,
     /// Each mod of a linked NeoForge jar: its own version, its file's first
     /// mod and that mod's version (`ModList`, `LoadingModList.getModFileById`,
@@ -3705,6 +3708,7 @@ impl StdHost {
             block_items: BTreeMap::new(),
             service_providers: BTreeMap::new(),
             current_time_millis: 0,
+            nano_time_origin: Instant::now(),
             mods: BTreeMap::new(),
             neoforge_mod_files: BTreeMap::new(),
             run_loader: class_precedence::RunLoader::default(),
@@ -8020,8 +8024,13 @@ impl Host for StdHost {
                 }))
             }
             ("java/lang/System", "currentTimeMillis", "()J") => {
-                Ok(Value::Int(self.current_time_millis))
+                Ok(Value::Long(i64::from(self.current_time_millis)))
             }
+            // Unlike the host-seeded currentTimeMillis, nanoTime has Java’s arbitrary origin.
+            // It is intentionally a real monotonic clock and therefore is not replay-deterministic.
+            ("java/lang/System", "nanoTime", "()J") => Ok(Value::Long(
+                self.nano_time_origin.elapsed().as_nanos() as i64,
+            )),
             ("java/lang/System", "lineSeparator", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some("\n".into())))
             }
@@ -41725,14 +41734,14 @@ mandatory = true
         };
         assert_eq!(
             host.invoke(&current_time_millis, &[]).unwrap(),
-            Value::Int(1_700_000_000)
+            Value::Long(1_700_000_000)
         );
 
         // The default is deterministic too; no host clock is consulted.
         let mut default_host = StdHost::new();
         assert_eq!(
             default_host.invoke(&current_time_millis, &[]).unwrap(),
-            Value::Int(0)
+            Value::Long(0)
         );
         let identity_hash = MethodRef {
             owner: "java/lang/System".into(),
