@@ -1,0 +1,9 @@
+[named]
+named   |nam|NAMED
+host named
+[null]
+[null]
+ok|0
+count|2
+two one|two,one
+prev|2
