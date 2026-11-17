@@ -9,8 +9,7 @@
 use super::*;
 
 fn hashtable_null_entry(handle: &HostRef, value: &Value) -> bool {
-    handle.kind() == HostKind::MapEntry
-        && crate::runtime::host_map_entry::entry_class(handle.key()) == "java/util/Hashtable$Entry"
+    crate::runtime::host_map_entry::entry_class(handle.key()) == "java/util/Hashtable$Entry"
         && matches!(value, Value::Ref(None))
 }
 
