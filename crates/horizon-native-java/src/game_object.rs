@@ -104,9 +104,8 @@ fn client_kind(rest: &str) -> HostKind {
         // `OptionInstance`s and vanilla `KeyMapping`s: one per name.
         "option" | "vanilla-key" => HostKind::GameSingleton,
         name if key.is_empty() && CLIENT_SINGLETONS.contains(&name) => HostKind::GameSingleton,
-        "item" | "block" | "mob-effect" | "effect-holder" | "attribute" | "particle-type" => {
-            HostKind::GameRegistryObject
-        }
+        "item" | "block" | "block-entity-type" | "mob-effect" | "effect-holder" | "attribute"
+        | "particle-type" => HostKind::GameRegistryObject,
         "style" | "text-color" | "vec3" | "awt-color" => HostKind::GameValue,
         "input-key" => HostKind::GameValue,
         "stack" if key == "empty" => HostKind::GameValue,
@@ -406,6 +405,7 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         (true, "mob-effect") => &["net/minecraft/world/effect/MobEffect"],
         (true, "attribute") => &["net/minecraft/world/entity/ai/attributes/Attribute"],
         (true, "block") => &["net/minecraft/world/level/block/Block"],
+        (true, "block-entity-type") => &["net/minecraft/world/level/block/entity/BlockEntityType"],
         (true, "style") => &["net/minecraft/network/chat/Style"],
         (true, "text-color") => &["net/minecraft/network/chat/TextColor"],
         (_, "key-category") => &["net/minecraft/client/KeyMapping$Category"],

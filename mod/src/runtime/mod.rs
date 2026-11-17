@@ -35,6 +35,7 @@ mod array_store;
 mod array_views;
 mod attachment_codec;
 mod bigdecimal_slice;
+mod block_entity_types;
 mod block_item_id;
 mod boxed;
 pub mod brigadier;
@@ -6431,6 +6432,9 @@ impl Host for StdHost {
         if let Some(value) = vanilla_values::static_field(r) {
             return Ok(value);
         }
+        if let Some(value) = block_entity_types::static_field(r) {
+            return Ok(value);
+        }
         if let Some(value) = mod_origin::static_field(r) {
             return Ok(value);
         }
@@ -11411,6 +11415,24 @@ impl Host for StdHost {
             | ("java/util/function/Predicate", "test", "(Ljava/lang/Object;)Z")
             | ("java/util/function/Supplier", "get", "()Ljava/lang/Object;") => {
                 self.unknown_host_call(r)
+            }
+            (
+                "net/minecraft/core/Registry",
+                "getKey",
+                "(Ljava/lang/Object;)Lnet/minecraft/resources/Identifier;",
+            ) if host_registry::registry_id(receiver) == Some("minecraft:block_entity_type")
+                && args
+                    .first()
+                    .and_then(crate::runtime::game_object::text)
+                    .and_then(|v| v.strip_prefix("client/block_entity_type/"))
+                    .is_some() =>
+            {
+                let id = args
+                    .first()
+                    .and_then(crate::runtime::game_object::text)
+                    .and_then(|v| v.strip_prefix("client/block_entity_type/"))
+                    .unwrap_or_default();
+                Ok(host_ids::identifier_of_text(id))
             }
             // `registry.key()`: the registry's key, `ResourceKey[minecraft:root /
             // <id>]`, the same interned key `Registries.X` is. Libraries index
