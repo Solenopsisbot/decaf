@@ -39,6 +39,7 @@
 use super::*;
 
 const LATCH: &str = "java/util/concurrent/CountDownLatch";
+const ATOMIC_BOOLEAN: &str = "java/util/concurrent/atomic/AtomicBoolean";
 const POOL: &str = "java/util/concurrent/ThreadPoolExecutor";
 /// The synthetic fields a latch and a pool keep their state under.
 const LATCH_COUNT: &str = "#latchCount";
@@ -54,6 +55,7 @@ pub(super) fn invoke<H: Host>(
 ) -> Result<Option<Value>, NativeError> {
     match r.owner.as_str() {
         LATCH => invoke_latch(rt, r, receiver, args),
+        ATOMIC_BOOLEAN => invoke_atomic_boolean(rt, r, receiver, args),
         POOL => invoke_pool(rt, r, receiver, args),
         _ => Ok(None),
     }
@@ -61,6 +63,62 @@ pub(super) fn invoke<H: Host>(
 
 fn state_key(marker: &str, field: &str) -> String {
     format!("{marker}|{field}")
+}
+
+fn invoke_atomic_boolean<H: Host>(
+    rt: &mut Runtime<'_, H>,
+    r: &MethodRef,
+    receiver: Option<&Value>,
+    args: &[Value],
+) -> Result<Option<Value>, NativeError> {
+    let Some(marker) = receiver.and_then(expect_ref) else {
+        return Ok(None);
+    };
+    let key = state_key(marker, "#atomicBoolean");
+    match (r.name.as_str(), r.descriptor.as_str()) {
+        ("<init>", "()V") => {
+            rt.fields.insert(key, Value::Int(0));
+            Ok(Some(Value::Void))
+        }
+        ("<init>", "(Z)V") => {
+            let value = expect_int(r, args.first().unwrap_or(&Value::Int(0)))? != 0;
+            rt.fields.insert(key, Value::Int(i32::from(value)));
+            Ok(Some(Value::Void))
+        }
+        _ => {
+            let Some(Value::Int(current)) = rt.fields.get(&key).cloned() else {
+                return Ok(None);
+            };
+            let value = match (r.name.as_str(), r.descriptor.as_str()) {
+                ("get", "()Z") | ("getPlain", "()Z") | ("getAcquire", "()Z") => Value::Int(current),
+                ("set" | "lazySet" | "setPlain" | "setRelease", "(Z)V") => {
+                    let next = expect_int(r, args.first().unwrap_or(&Value::Int(0)))?;
+                    rt.fields.insert(key, Value::Int(i32::from(next != 0)));
+                    Value::Void
+                }
+                ("compareAndSet", "(ZZ)Z") => {
+                    let expect = expect_int(r, args.first().unwrap_or(&Value::Int(0)))?;
+                    let update = expect_int(r, args.get(1).unwrap_or(&Value::Int(0)))?;
+                    if current == expect {
+                        rt.fields.insert(key, Value::Int(i32::from(update != 0)));
+                        Value::Int(1)
+                    } else {
+                        Value::Int(0)
+                    }
+                }
+                ("getAndSet", "(Z)Z") => {
+                    let update = expect_int(r, args.first().unwrap_or(&Value::Int(0)))?;
+                    rt.fields.insert(key, Value::Int(i32::from(update != 0)));
+                    Value::Int(current)
+                }
+                ("toString", "()Ljava/lang/String;") => {
+                    Value::Ref(Some((current != 0).to_string()))
+                }
+                _ => return Ok(None),
+            };
+            Ok(Some(value))
+        }
+    }
 }
 
 fn invoke_latch<H: Host>(
