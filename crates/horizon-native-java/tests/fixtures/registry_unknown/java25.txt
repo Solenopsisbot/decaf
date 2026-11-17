@@ -1,0 +1,8 @@
+Bstone=true
+Bnope=false
+Boptstone=true
+Boptnope=false
+Istone=true
+Inope=false
+Ioptstone=true
+Ioptnope=false
