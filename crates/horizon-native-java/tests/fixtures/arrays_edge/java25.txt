@@ -1,0 +1,3 @@
+getLength=java.lang.IllegalArgumentException:Argument is not an array
+copySrc=java.lang.ArrayStoreException:arraycopy: source type java.lang.String is not an array
+copyDst=java.lang.ArrayStoreException:arraycopy: destination type java.lang.String is not an array
