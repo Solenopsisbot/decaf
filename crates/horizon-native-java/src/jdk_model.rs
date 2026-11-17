@@ -106,6 +106,9 @@ pub(crate) fn canonical_charset(name: &str) -> Option<&'static str> {
 }
 
 /// Whether `owner` is one of the logger interfaces this module answers for.
+/// How far `log4j_factory_logger` walks a factory's jar superclasses.
+const MAX_FACTORY_SUPERCLASSES: usize = 16;
+
 fn is_logger_owner(owner: &str) -> bool {
     matches!(
         owner,
@@ -431,6 +434,18 @@ pub(crate) fn instance_call(
     if let Some(name) = crate::host_jdk::logger_name(receiver)
         && is_logger_owner(&r.owner)
     {
+        // A logger with a mod's own factory: the factory itself where Log4j keeps it as is
+        // (`getMessageFactory` on any other is counted). Everything else is any logger's
+        // `logger_call`: output methods are no-ops, as for every logger (whether Log4j would
+        // even build a message, through the factory or a `{}` argument's `toString`, depends on
+        // a logging configuration the host doesn't have), and level checks stay counted.
+        if let Some((exact, factory)) = crate::host_jdk::logger_factory(receiver)
+            && r.name == "getMessageFactory"
+        {
+            return (exact
+                && r.descriptor == "()Lorg/apache/logging/log4j/message/MessageFactory;")
+                .then_some(Ok(factory));
+        }
         return logger_call(r, &name);
     }
     if let Some(value) = crate::host_log4j_level::instance_call(r, receiver, args) {
@@ -1378,6 +1393,57 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
     /// `getName()`. A name the runtime cannot tell (a class it does not hold
     /// with a `$`, a value of unknown class, no caller frame) is counted and
     /// answered with the best name it has. `None` for any other call.
+    /// `LogManager.getLogger(String name, MessageFactory factory)` answered exactly: a null factory
+    /// is Log4j's default, the same logger as `getLogger(name)`; a mod's own factory object whose
+    /// class (and jar superclasses) declares no `equals`/`hashCode` keys the logger by identity
+    /// (`host_jdk::logger_factory_value`). `None` (counted) for a null or non-string name, a factory
+    /// the host made, or one that overrides `equals`/`hashCode` (the cache would run its code).
+    fn log4j_factory_logger(&self, api: &str, first: &str, args: &[Value]) -> Option<Value> {
+        if api != "log4j" || first != "Ljava/lang/String;" {
+            return None;
+        }
+        let [Value::Ref(Some(name)), factory] = args else {
+            return None;
+        };
+        if *factory == Value::Ref(None) {
+            return Some(logger_value("log4j", name));
+        }
+        let class = crate::class_of_value(factory)?;
+        let mut current = class.clone();
+        let mut exact = false;
+        for _ in 0..MAX_FACTORY_SUPERCLASSES {
+            if matches!(
+                current.as_str(),
+                "org/apache/logging/log4j/message/AbstractMessageFactory"
+                    | "org/apache/logging/log4j/message/FormattedMessageFactory"
+            ) {
+                exact = true;
+                break;
+            }
+            // Only the jar's own classes are walked; a library or JDK superclass ends it.
+            let Some(file) = self.class(&current) else {
+                break;
+            };
+            if file.methods.iter().any(|method| {
+                (method.name == "equals" && method.descriptor == "(Ljava/lang/Object;)Z")
+                    || (method.name == "hashCode" && method.descriptor == "()I")
+            }) {
+                return None;
+            }
+            if file.super_name.is_empty() || file.super_name == current {
+                break;
+            }
+            current = file.super_name.clone();
+        }
+        // A factory the host made (not a jar object) has no jar class to walk: counted.
+        self.class(&class)?;
+        Some(crate::host_jdk::logger_factory_value(
+            name,
+            factory.clone(),
+            exact,
+        ))
+    }
+
     pub(crate) fn invoke_logger_factory(
         &mut self,
         r: &MethodRef,
@@ -1419,6 +1485,9 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
             [] => (api, None),
             [first] => (api, Some(first.as_str())),
             [first, factory] if factory == "Lorg/apache/logging/log4j/message/MessageFactory;" => {
+                if let Some(value) = self.log4j_factory_logger(api, first, args) {
+                    return Ok(Some(value));
+                }
                 self.host.unknown_operand_call(r)?;
                 ("log4j-factory", Some(first.as_str()))
             }

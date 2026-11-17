@@ -71,7 +71,8 @@ const fn methods(to_string: crate::runtime::host_ref::ToStringFn) -> Methods {
 /// The `[a, b]` strings a two-value key holds.
 fn two_strings(handle: &HostRef) -> Option<(String, String)> {
     match handle.values()?.as_slice() {
-        [Value::Ref(Some(a)), Value::Ref(Some(b))] => Some((a.clone(), b.clone())),
+        // A logger made with a mod's own `MessageFactory` holds the factory third.
+        [Value::Ref(Some(a)), Value::Ref(Some(b)), ..] => Some((a.clone(), b.clone())),
         _ => None,
     }
 }
@@ -98,6 +99,50 @@ pub(crate) fn logger_value(api: &str, name: &str) -> Value {
     ))
 }
 
+/// A log4j logger made by `LogManager.getLogger(name, factory)` with a mod's own factory object.
+/// Log4j 2.26's `InternalLoggerRegistry` keys loggers by (factory, name), and a factory that
+/// doesn't override `equals`/`hashCode` compares by identity, so the handle holds the very factory
+/// and two calls with the same pair are the same logger. `exact`: the factory's class extends
+/// `AbstractMessageFactory` or `FormattedMessageFactory`, which Log4j keeps as is, so
+/// `getMessageFactory()` returns it (Java 25 capture, `tests/fixture_log4j_get_logger_factory.rs`);
+/// any other factory is wrapped in an adapter the host doesn't hold. Logging through it is any
+/// logger's no-op, and level checks stay counted (`jdk_model.rs`).
+pub(crate) fn logger_factory_value(name: &str, factory: Value, exact: bool) -> Value {
+    let api = if exact {
+        "log4j-factory-exact"
+    } else {
+        "log4j-factory-jar"
+    };
+    Value::Host(HostRef::of_values(
+        HostKind::Logger,
+        &[
+            Value::Ref(Some(api.into())),
+            Value::Ref(Some(name.into())),
+            factory,
+        ],
+    ))
+}
+
+/// The factory a [`logger_factory_value`] handle holds, and whether `getMessageFactory()` returns
+/// it as is.
+pub(crate) fn logger_factory(value: &Value) -> Option<(bool, Value)> {
+    let Value::Host(handle) = value else {
+        return None;
+    };
+    if handle.kind() != HostKind::Logger {
+        return None;
+    }
+    match handle.values()?.as_slice() {
+        [Value::Ref(Some(api)), _, factory] if api == "log4j-factory-exact" => {
+            Some((true, factory.clone()))
+        }
+        [Value::Ref(Some(api)), _, factory] if api == "log4j-factory-jar" => {
+            Some((false, factory.clone()))
+        }
+        _ => None,
+    }
+}
+
 /// The name of a logger handle, `None` for any other value.
 pub(crate) fn logger_name(value: &Value) -> Option<String> {
     match value {
@@ -117,7 +162,13 @@ fn logger_api(key: &str) -> Option<String> {
 pub(crate) fn logger_declared(key: &str) -> &'static [&'static str] {
     match logger_api(key).as_deref() {
         // `ExtendedLogger` extends `Logger`; the runtime holds neither.
-        Some("log4j" | "log4j-formatter" | "log4j-factory") => &[
+        Some(
+            "log4j"
+            | "log4j-formatter"
+            | "log4j-factory"
+            | "log4j-factory-exact"
+            | "log4j-factory-jar",
+        ) => &[
             "org/apache/logging/log4j/spi/ExtendedLogger",
             "org/apache/logging/log4j/Logger",
         ],
@@ -132,7 +183,14 @@ pub(crate) fn logger_declared(key: &str) -> &'static [&'static str] {
 pub(crate) fn logger_canonical(key: &str) -> bool {
     matches!(
         logger_api(key).as_deref(),
-        Some("log4j" | "log4j-formatter" | "slf4j" | "jul")
+        Some(
+            "log4j"
+                | "log4j-formatter"
+                | "log4j-factory-exact"
+                | "log4j-factory-jar"
+                | "slf4j"
+                | "jul"
+        )
     )
 }
 
