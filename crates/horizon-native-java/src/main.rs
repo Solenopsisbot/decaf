@@ -27,6 +27,7 @@ struct Cli {
     weave: Option<String>,
     /// `--link <jar>`: a dependency jar on the same class path, repeatable.
     links: Vec<String>,
+    dependency_prelude: bool,
     /// `--game-version <version>`: the release the host reports to the
     /// loader and the game's own version detector.
     game_version: Option<String>,
@@ -43,6 +44,7 @@ impl Cli {
         let mut mixin_plans = false;
         let mut weave = None;
         let mut links = Vec::new();
+        let mut dependency_prelude = false;
         let mut game_version = None;
         let mut game_block_classes = None;
         let mut positional = Vec::new();
@@ -57,6 +59,8 @@ impl Cli {
                 weave = Some(args.next()?);
             } else if arg == "--link" {
                 links.push(args.next()?);
+            } else if arg == "--dependency-prelude" {
+                dependency_prelude = true;
             } else if arg == "--game-version" {
                 game_version = Some(args.next()?);
             } else if arg == "--game-block-classes" {
@@ -71,6 +75,7 @@ impl Cli {
             mixin_plans,
             weave,
             links,
+            dependency_prelude,
             game_version,
             game_block_classes,
             path: positional.next()?,
@@ -924,6 +929,44 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    let mut dependency_prelude_report = Vec::new();
+    let mut prelude_calls = 0usize;
+    let mut prelude_unknown = 0usize;
+    if dependency_prelude && kind.split(',').any(|stage| stage == "main") {
+        for (link, dependency) in links.iter().zip(std::iter::repeat(())) {
+            let dependency = NativeJar::from_path(&PathBuf::from(link)).expect("linked jar loaded");
+            let mut verdict = "ok";
+            let mut unknown = 0usize;
+            let mut ran = 0usize;
+            for entry in dependency.discover_entrypoints("main") {
+                if entry.adapter.is_some() {
+                    verdict = "failed";
+                    continue;
+                }
+                match dependency.execute(&entry.class, entry.method.as_deref(), "main", &mut host) {
+                    Ok(report) => {
+                        prelude_calls += report.calls;
+                        ran += 1;
+                    }
+                    Err(_) => {
+                        verdict = "failed";
+                    }
+                }
+            }
+            unknown = host
+                .unknown_host_call_count()
+                .saturating_sub(prelude_unknown);
+            prelude_unknown += unknown;
+            if ran == 0 {
+                verdict = "failed";
+            }
+            dependency_prelude_report.push(
+                serde_json::json!({"jar": link, "verdict": verdict, "unknown_host_calls": unknown}),
+            );
+        }
+    }
+    let dependent_call_mark = prelude_calls;
+    let dependent_unknown_mark = prelude_unknown;
     // Each entrypoint runs under the stage that names it. A failing one is
     // recorded and the rest still run, as in the game's loader (`load_jar`
     // after #31): the failure is this interpreter's limit, not a reason to
@@ -970,7 +1013,14 @@ fn main() -> ExitCode {
             if json {
                 let commands = command_summary(&jar, &host, kind != "client" && !force_client);
                 println!("{}", {
-                    let mut report = execution_json(&kind, &entrypoints, calls, &host, &jar);
+                    let mut report = execution_json(
+                        &kind,
+                        &entrypoints,
+                        calls.saturating_sub(dependent_call_mark),
+                        &host,
+                        &jar,
+                    );
+                    report["dependency_prelude"] = dependency_prelude_report.clone().into();
                     report["verdict"] = horizon_native_java::verdict::verdict(
                         ran,
                         failures.len(),
