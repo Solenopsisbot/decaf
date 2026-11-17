@@ -19800,6 +19800,7 @@ impl NativeJar {
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
             io_files,
@@ -20015,6 +20016,7 @@ impl NativeJar {
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
             io_files,
@@ -20186,6 +20188,7 @@ impl NativeJar {
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
             io_files,
@@ -22402,6 +22405,7 @@ struct Runtime<'a, H> {
     /// `OutputStreamWriter`) opens the same sink as the writer it wraps, so the
     /// text is committed once and a later close cannot truncate it.
     io_writers: BTreeMap<String, String>,
+    io_closed: BTreeSet<String>,
     /// Charset selected by each writer sink; UTF-8 is Java 25's default.
     io_writer_charsets: BTreeMap<String, String>,
     /// Charset-independent bytes committed for each virtual file. Text is
@@ -35926,6 +35930,7 @@ mod tests {
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
@@ -35998,6 +36003,7 @@ mod tests {
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
@@ -43150,6 +43156,7 @@ mandatory = true
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
@@ -43364,6 +43371,7 @@ mandatory = true
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
@@ -43553,6 +43561,7 @@ mandatory = true
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
@@ -43918,6 +43927,7 @@ mandatory = true
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
@@ -44227,6 +44237,7 @@ mandatory = true
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
@@ -49494,6 +49505,7 @@ mandatory = true
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
@@ -49553,6 +49565,7 @@ mandatory = true
 
             string_readers: BTreeMap::new(),
             io_writers: BTreeMap::new(),
+            io_closed: BTreeSet::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
             io_paths: BTreeMap::new(),
