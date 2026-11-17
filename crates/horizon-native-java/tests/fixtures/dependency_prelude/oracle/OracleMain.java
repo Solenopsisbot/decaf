@@ -1,0 +1,1 @@
+public class OracleMain { static boolean latch; static void library(){ latch=true; } static String dependent(){ return Boolean.toString(latch); } public static void main(String[] a){ System.out.println(dependent()); library(); System.out.println(dependent()); } }

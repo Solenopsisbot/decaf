@@ -2,6 +2,7 @@ use horizon_native_java::{NativeJar, StdHost, Value};
 #[path = "support/javac_fixture.rs"]
 mod javac_fixture;
 use javac_fixture::Fixture;
+const JAVA25: &str = include_str!("fixtures/dependency_prelude/java25.txt");
 const PROBE: &str = "public class Probe { public static String rows(){ return \"dependency-main-before-dependent\"; } }";
 #[test]
 fn dependency_prelude_order_is_dependency_first_and_accounting_is_separate() {
