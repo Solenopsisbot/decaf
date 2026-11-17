@@ -534,6 +534,7 @@ fn heap_entries(heap: &JavaHeap, host: &StdHost) -> usize {
         + host.component_states.len()
         + host.ranged_attributes.len()
         + host.entity_registration.entry_count()
+        + host.tool_material.entry_count()
 }
 
 fn over_count_bound(heap: &JavaHeap) -> bool {
@@ -1060,6 +1061,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     host.component_states.retain(|key, _| keep(key));
     host.map_entries.retain(keep);
     host.entity_registration.retain_keys(keep);
+    host.tool_material.retain_keys(keep);
     host.prune_keyed_tables(keep);
     host.render_objects
         .retain(|key, _| render_live.contains(key));
@@ -1701,6 +1703,7 @@ mod tests {
             "brigadier",
             "imc",
             "entity_registration",
+            "tool_material",
         ];
         const HOLDS_NO_OBJECT: &[&str] = &[
             "next_unmodifiable_collection",

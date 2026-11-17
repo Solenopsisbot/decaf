@@ -217,6 +217,7 @@ mod optionull;
 mod owned_class;
 mod parked_threads;
 mod server_values;
+mod tool_material;
 mod vanilla_entity_data_pool;
 /// A live callback token for tests that hand a host a listener without a jar
 /// (`callback_marker.rs`).
@@ -263,6 +264,7 @@ mod vanilla_blocks;
 mod vanilla_holders;
 mod vanilla_holders_table;
 mod vanilla_registries;
+mod vanilla_registry_keys;
 mod vanilla_values;
 pub mod verdict;
 mod watch_service;
@@ -3630,6 +3632,7 @@ pub struct StdHost {
     /// FML's `InterModComms` queues, shared with the other jars of a game (`neoforge_imc.rs`).
     imc: neoforge_imc::ImcHandle,
     entity_registration: entity_registration::State,
+    tool_material: tool_material::State,
 }
 
 impl Default for StdHost {
@@ -3793,6 +3796,7 @@ impl StdHost {
             brigadier: Default::default(),
             imc: neoforge_imc::ImcHandle::default(),
             entity_registration: entity_registration::State::default(),
+            tool_material: tool_material::State::default(),
         }
     }
 
@@ -6414,6 +6418,9 @@ impl Host for StdHost {
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
+        if let Some(value) = tool_material::static_field(&mut self.tool_material, r) {
+            return value;
+        }
         if let Some(value) = entity_registration::static_field(&mut self.entity_registration, r) {
             return value;
         }
@@ -6472,6 +6479,9 @@ impl Host for StdHost {
         if r.owner == "java/awt/Color"
             && let Some(value) = client_surface::awt_constant(&r.name)
         {
+            return Ok(value);
+        }
+        if let Some(value) = vanilla_registry_keys::static_field(r) {
             return Ok(value);
         }
         if let Some(value) = vanilla_holders::static_field(r) {
@@ -8082,6 +8092,11 @@ impl Host for StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Value, NativeError> {
+        if let Some(value) =
+            tool_material::instance_call(&mut self.tool_material, r, receiver, args)
+        {
+            return value;
+        }
         if let Some(value) =
             entity_registration::instance_call(&mut self.entity_registration, r, receiver, args)
         {
@@ -13139,6 +13154,14 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
         "net/minecraft/core/Direction$Axis" => &["X", "Y", "Z"],
         "net/minecraft/core/Direction$AxisDirection" => &["POSITIVE", "NEGATIVE"],
         "net/minecraft/world/InteractionHand" => &["MAIN_HAND", "OFF_HAND"],
+        "net/minecraft/sounds/SoundSource" => &[
+            "MASTER", "MUSIC", "RECORDS", "WEATHER", "BLOCKS", "HOSTILE", "NEUTRAL", "PLAYERS",
+            "AMBIENT", "VOICE", "UI",
+        ],
+        "net/minecraft/world/entity/ai/attributes/AttributeModifier$Operation" => {
+            &["ADD_VALUE", "ADD_MULTIPLIED_BASE", "ADD_MULTIPLIED_TOTAL"]
+        }
+        "net/minecraft/world/entity/HumanoidArm" => &["LEFT", "RIGHT"],
         "net/minecraft/world/entity/EquipmentSlot" => {
             &["MAINHAND", "OFFHAND", "FEET", "LEGS", "CHEST", "HEAD"]
         }
@@ -25932,6 +25955,9 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }
+        if let Some(values) = crate::runtime::entity_registration::enum_values(&r.owner) {
+            return Some(self.new_array_value(&format!("[L{};", r.owner), values));
+        }
         if let Some(values) = crate::runtime::vanilla_values::enum_values(r) {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }
@@ -25944,6 +25970,55 @@ impl<H: Host> Runtime<'_, H> {
             .map(|name| Value::Ref(Some(format!("enum/{}/{name}", r.owner))))
             .collect::<Vec<_>>();
         Some(self.new_array_value(&format!("[L{};", r.owner), values))
+    }
+
+    /// `E.valueOf(String)` on a game enum whose constants the host lists
+    /// (`game_enum_constants`): the same value `E.values()` holds at that
+    /// constant's position, so it is the constant itself. `Enum.valueOf`'s
+    /// failures are Java's: a null name is `NullPointerException("Name is
+    /// null")`, an unknown one `IllegalArgumentException("No enum constant
+    /// <canonical class name>.<name>")`.
+    fn invoke_game_enum_value_of(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.name != "valueOf" || r.descriptor != format!("(Ljava/lang/String;)L{};", r.owner) {
+            return Ok(None);
+        }
+        let Some(constants) = game_enum_constants(&r.owner) else {
+            return Ok(None);
+        };
+        let name = match args.first() {
+            Some(Value::Ref(Some(name))) => name,
+            Some(Value::Ref(None)) => {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: Some("Name is null".into()),
+                    frame: None,
+                });
+            }
+            _ => return Ok(None),
+        };
+        let Some(index) = constants.iter().position(|constant| constant == name) else {
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/IllegalArgumentException".into(),
+                message: Some(format!(
+                    "No enum constant {}.{name}",
+                    r.owner.replace(['/', '$'], ".")
+                )),
+                frame: None,
+            });
+        };
+        let values = MethodRef {
+            owner: r.owner.clone(),
+            name: "values".into(),
+            descriptor: format!("()[L{};", r.owner),
+        };
+        let Some(array) = self.invoke_game_enum_values(&values) else {
+            return Ok(None);
+        };
+        Ok(self.array(&array)?.get(index).cloned())
     }
 
     /// Answer the vanilla static helpers mod bootstraps call.
@@ -27852,6 +27927,24 @@ impl<H: Host> Runtime<'_, H> {
         if r.owner != "java/lang/Enum" && !game_constant {
             return Ok(None);
         }
+        if game_constant
+            && r.owner == "net/minecraft/sounds/SoundSource"
+            && r.name == "getName"
+            && r.descriptor == "()Ljava/lang/String;"
+        {
+            let name = receiver
+                .and_then(expect_ref)
+                .and_then(|m| m.rsplit("/").next())
+                .map(|n| match n {
+                    "MASTER" => "master".to_owned(),
+                    "MUSIC" => "music".to_owned(),
+                    "RECORDS" => "record".to_owned(),
+                    "BLOCKS" => "block".to_owned(),
+                    "PLAYERS" => "player".to_owned(),
+                    _ => n.to_ascii_lowercase(),
+                });
+            return Ok(name.map(|name| Value::Ref(Some(name))));
+        }
         if game_constant && matches!(r.name.as_str(), "name" | "toString") {
             let name = receiver
                 .and_then(expect_ref)
@@ -27879,6 +27972,37 @@ impl<H: Host> Runtime<'_, H> {
             });
         let recorded = marker.and_then(|marker| self.enum_constants.get(marker).cloned());
         match (r.name.as_str(), r.descriptor.as_str()) {
+            // `Enum.getDeclaringClass()`: the constant's class, or, for a constant
+            // with a body (an anonymous subclass `E$1`), that class's superclass,
+            // which is the enum (`zuper == Enum.class ? clazz : zuper`).
+            ("getDeclaringClass", "()Ljava/lang/Class;") => {
+                // A constant this invocation's `<clinit>` built: its allocation
+                // key names its real class, and the jar's class file its parent.
+                if let Some(key) =
+                    crate::runtime::jar_object::object_key(receiver.unwrap_or(&Value::Ref(None)))
+                {
+                    if recorded.is_none() {
+                        return Ok(None);
+                    }
+                    let class = crate::runtime::jar_object::class_of_key(key).to_owned();
+                    let Some(parent) = self.class(&class).map(|file| file.super_name.clone())
+                    else {
+                        return Ok(None);
+                    };
+                    let declaring = if parent == "java/lang/Enum" {
+                        class
+                    } else {
+                        parent
+                    };
+                    return Ok(Some(host_class::class_value(&declaring)));
+                }
+                // A host-made `enum/<class>/<name>` marker names the enum itself.
+                let class = marker
+                    .and_then(|marker| marker.strip_prefix("enum/"))
+                    .and_then(|rest| rest.rsplit_once('/'))
+                    .map(|(class, _)| class.to_owned());
+                Ok(class.map(|class| host_class::class_value(&class)))
+            }
             ("name", "()Ljava/lang/String;") | ("toString", "()Ljava/lang/String;") => {
                 Ok(recorded.map(|(name, _)| Value::Ref(Some(name))))
             }
@@ -30495,6 +30619,10 @@ impl<H: Host> Runtime<'_, H> {
                     ) {
                         value
                     } else if let Some(value) = self.invoke_game_enum_values(&r) {
+                        value
+                    } else if let Some(value) =
+                        invoke_or_catch!(at, self.invoke_game_enum_value_of(&r, &args))
+                    {
                         value
                     } else if let Some(value) = invoke_or_catch!(
                         at,

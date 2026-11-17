@@ -1,0 +1,14 @@
+same=true
+different=true
+equals=true
+notEquals=false
+set.size=3
+set.contains=true
+set.missing=false
+set.duplicate=java.lang.IllegalArgumentException:duplicate element: ResourceKey[minecraft:enchantment / minecraft:knockback]
+text=ResourceKey[minecraft:enchantment / minecraft:knockback]
+identifier=minecraft:knockback
+registry=minecraft:enchantment
+created.default=true
+created.parsed=true
+created.other=false

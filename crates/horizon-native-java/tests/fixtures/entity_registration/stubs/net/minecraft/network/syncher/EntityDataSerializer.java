@@ -1,0 +1,1 @@
+package net.minecraft.network.syncher; import net.minecraft.network.codec.StreamCodec; import net.minecraft.network.RegistryFriendlyByteBuf; public interface EntityDataSerializer<T>{ StreamCodec<? super RegistryFriendlyByteBuf,T> codec(); T copy(T x); }

@@ -233,6 +233,36 @@ pub(crate) fn pattern(text: &str) -> Value {
     ))
 }
 
+static NEXT_MATCHER: AtomicU64 = AtomicU64::new(0);
+
+/// `pattern.matcher(input)`: a new `Matcher` object per call, holding the pattern
+/// text and the input. Only `matches()` is answered (`jdk_model.rs`); every other
+/// `Matcher` method is counted.
+pub(crate) fn matcher(pattern: &str, input: &str) -> Value {
+    Value::Host(HostRef::of_values(
+        HostKind::RegexMatcher,
+        &[
+            Value::Long(NEXT_MATCHER.fetch_add(1, Ordering::Relaxed) as i64),
+            Value::Ref(Some(pattern.to_owned())),
+            Value::Ref(Some(input.to_owned())),
+        ],
+    ))
+}
+
+/// The pattern text and input of a `Matcher` handle.
+pub(crate) fn matcher_parts(value: &Value) -> Option<(String, String)> {
+    let Value::Host(handle) = value else {
+        return None;
+    };
+    if handle.kind() != HostKind::RegexMatcher {
+        return None;
+    }
+    match <[Value; 3]>::try_from(handle.values()?) {
+        Ok([_, Value::Ref(Some(pattern)), Value::Ref(Some(input))]) => Some((pattern, input)),
+        _ => None,
+    }
+}
+
 /// The text of a `Pattern` handle.
 pub(crate) fn pattern_text(value: &Value) -> Option<String> {
     let Value::Host(handle) = value else {
@@ -344,6 +374,14 @@ pub(crate) const LOCALE_METHODS: Methods =
         crosses_jars: |_, _| true,
         compare_to: None,
     };
+
+/// A `Matcher`'s `toString` reports its region and last match, which the model
+/// does not keep, and its hash is an identity hash: both are counted.
+pub(crate) const MATCHER_METHODS: Methods = Methods {
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    ..CONSTANT_METHODS
+};
 
 pub(crate) const PATTERN_METHODS: Methods = Methods {
     to_string: |handle, _| Ok(handle_pattern(handle)),

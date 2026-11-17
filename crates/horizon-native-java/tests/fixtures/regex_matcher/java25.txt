@@ -1,0 +1,8 @@
+abc_1 => true
+ => false
+a-b => false
+a b => false
+é => false
+名 => false
+Ａ => false
+á => false
