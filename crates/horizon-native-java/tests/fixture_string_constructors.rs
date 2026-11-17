@@ -243,3 +243,5 @@ fn every_string_constructor_is_counted_until_it_is_modelled() {
         );
     }
 }
+
+const JAVA25_CAPTURE: &str = include_str!("fixtures/string_constructors/java25.txt");
