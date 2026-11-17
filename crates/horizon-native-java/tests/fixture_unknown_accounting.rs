@@ -172,4 +172,3 @@ fn every_distinct_unknown_call_is_counted() {
     assert_eq!(host.unknown_host_calls().len(), 100);
     assert_eq!(host.unknown_host_call_count(), 200);
 }
-
