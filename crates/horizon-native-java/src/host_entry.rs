@@ -8,9 +8,11 @@
 
 use super::*;
 
-fn hashtable_null_entry(handle: &HostRef, value: &Value) -> bool {
+fn hashtable_null_entry<H: Host>(runtime: &Runtime<'_, H>, handle: &HostRef) -> bool {
     crate::host_map_entry::entry_class(handle.key()) == "java/util/Hashtable$Entry"
-        && matches!(value, Value::Ref(None))
+        && runtime
+            .map_entry_now(&Value::Host(handle.clone()))
+            .is_some_and(|(_, value)| matches!(value, Value::Ref(None)))
 }
 
 impl<H: Host> Runtime<'_, H> {
@@ -28,7 +30,7 @@ impl<H: Host> Runtime<'_, H> {
         if !crate::host_map_entry::is_entry(value) {
             return Ok(None);
         }
-        if hashtable_null_entry(handle, value) {
+        if hashtable_null_entry(self, handle) {
             return Err(NativeError::UncaughtException {
                 class: "java/lang/NullPointerException".into(),
                 message: Some(

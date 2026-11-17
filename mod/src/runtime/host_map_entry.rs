@@ -144,6 +144,10 @@ fn entry_mode(map_class: &str) -> Option<(&'static str, Mode)> {
         "java/util/LinkedHashMap" => ("java/util/LinkedHashMap$Entry", Mode::Node { nulls: true }),
         "java/util/TreeMap" => ("java/util/TreeMap$Entry", Mode::Node { nulls: true }),
         "java/util/Hashtable" => ("java/util/Hashtable$Entry", Mode::Node { nulls: false }),
+        "java/util/Properties" => (
+            "java/util/concurrent/ConcurrentHashMap$MapEntry",
+            Mode::Concurrent,
+        ),
         "java/util/WeakHashMap" => ("java/util/WeakHashMap$Entry", Mode::Node { nulls: true }),
         "java/util/EnumMap" => ("java/util/EnumMap$EntryIterator$Entry", Mode::Fresh),
         "java/util/IdentityHashMap" => {
