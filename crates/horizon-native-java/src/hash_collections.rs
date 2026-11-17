@@ -597,6 +597,9 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &mut [Value],
     ) -> Result<Option<Value>, NativeError> {
+        if matches!(r.name.as_str(), "keys" | "elements") && r.owner == "java/util/Hashtable" {
+            return Err(NativeError::UncaughtException { class: "java/lang/UnsupportedOperationException".into(), message: None, frame: None });
+        }
         // A SetFromMap's order is its backing HashMap/LinkedHashMap's order.
         // Refresh the table for both the receiver and any collection argument,
         // so copying/printing the view sees the same live order as the map.
