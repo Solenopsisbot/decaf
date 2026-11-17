@@ -14432,7 +14432,7 @@ fn iterated_kind(marker: &str) -> Option<String> {
 
 fn host_enum_ordinal(host: &StdHost, value: &Value) -> Option<i32> {
     let marker = expect_ref(value)?;
-    if let Some((_, ordinal)) = host.enum_constants.get(marker) {
+    if let Some((_, ordinal)) = host.heap.enum_constants.get(marker) {
         return Some(*ordinal);
     }
     let (class, name) = marker.strip_prefix("enum/")?.rsplit_once('/')?;
