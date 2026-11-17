@@ -8503,6 +8503,19 @@ impl Host for StdHost {
             }
             return match (r.name.as_str(), r.descriptor.as_str()) {
                 ("<init>", descriptor) => {
+                    let parameters = descriptor_arguments(descriptor);
+                    if parameters
+                        .iter()
+                        .position(|parameter| parameter == "Ljava/lang/String;")
+                        .and_then(|index| args.get(index))
+                        .is_some_and(|value| matches!(value, Value::Ref(None)))
+                    {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/lang/NullPointerException".into(),
+                            message: Some("'name' is null".into()),
+                            frame: None,
+                        });
+                    }
                     let marker = marker.clone();
                     self.note_thread_made(&marker, descriptor, args);
                     Ok(Value::Void)
