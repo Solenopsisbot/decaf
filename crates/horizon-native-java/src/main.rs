@@ -932,6 +932,7 @@ fn main() -> ExitCode {
     let mut dependency_prelude_report = Vec::new();
     let mut prelude_calls = 0usize;
     let mut prelude_unknown = 0usize;
+    let mut prelude_unknown_map = BTreeMap::new();
     if dependency_prelude && kind.split(',').any(|stage| stage == "main") {
         for (link, dependency) in links.iter().zip(std::iter::repeat(())) {
             let dependency = NativeJar::from_path(&PathBuf::from(link)).expect("linked jar loaded");
@@ -957,6 +958,9 @@ fn main() -> ExitCode {
                 .unknown_host_call_count()
                 .saturating_sub(prelude_unknown);
             prelude_unknown += unknown;
+            for (key, count) in host.unknown_host_calls() {
+                prelude_unknown_map.insert(key, count);
+            }
             if ran == 0 {
                 verdict = "failed";
             }
@@ -1020,6 +1024,20 @@ fn main() -> ExitCode {
                         &host,
                         &jar,
                     );
+                    let dependent_unknown: Vec<_> = host
+                        .unknown_host_calls()
+                        .into_iter()
+                        .filter_map(|(key, total)| {
+                            let before = prelude_unknown_map.get(&key).copied().unwrap_or(0);
+                            (total > before).then_some((key, total - before))
+                        })
+                        .collect();
+                    report["unknown_host_calls"] = dependent_unknown.clone().into();
+                    report["unknown_host_call_count"] = dependent_unknown
+                        .iter()
+                        .map(|(_, n)| n)
+                        .sum::<usize>()
+                        .into();
                     report["dependency_prelude"] = dependency_prelude_report.clone().into();
                     report["verdict"] = horizon_native_java::verdict::verdict(
                         ran,
