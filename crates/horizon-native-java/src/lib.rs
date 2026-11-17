@@ -4271,7 +4271,7 @@ impl StdHost {
 
     fn resource_stream(&mut self, name: &str) -> Value {
         let name = name.strip_prefix('/').unwrap_or(name);
-        let Some(marker) = self.resource(name).map(str::to_owned) else {
+        let Some(marker) = self.resource(name).map(|value| value.to_owned()) else {
             return Value::Ref(None);
         };
         let bytes = self.resource_bytes.get(name).cloned().or_else(|| {
@@ -7803,55 +7803,7 @@ impl Host for StdHost {
                 }
                 Ok(path_value(text))
             }
-            // The virtual filesystem keeps no files of its own: a path is
-            // readable only when the caller seeded the same resource name.
-            // A read of anything else reports Java's `IOException`, which a
-            // config bootstrap catches and answers by writing defaults; it
-            // never becomes a null that a later `String.split` NPEs on.
-            ("java/nio/file/Files", "exists" | "notExists", descriptor)
-                if descriptor.starts_with("(Ljava/nio/file/Path;") =>
-            {
-                let path = path_text(Self::argument(r, args, 0)?);
-                let exists = self.resource(path.trim_start_matches('/')).is_some();
-                Ok(Value::Int(i32::from(if r.name == "exists" {
-                    exists
-                } else {
-                    !exists
-                })))
-            }
-            ("java/nio/file/Files", "readString", descriptor)
-                if descriptor.starts_with("(Ljava/nio/file/Path;") =>
-            {
-                let path = path_text(Self::argument(r, args, 0)?);
-                match self.resource(path.trim_start_matches('/')) {
-                    Some(text) => Ok(Value::Ref(Some(text.to_owned()))),
-                    None => Err(NativeError::UncaughtException {
-                        class: "java/io/IOException".into(),
-                        message: Some(format!("{path}: no such file")),
-                        frame: None,
-                    }),
-                }
-            }
-            (
-                "java/nio/file/Files",
-                "createDirectories" | "createFile" | "write" | "writeString" | "delete"
-                | "deleteIfExists",
-                descriptor,
-            ) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
-                Ok(Self::argument(r, args, 0)?.clone())
-            }
-            // Moves and copies the file model can't make (`files_move.rs`)
-            // are counted: answering the target did nothing.
-            ("java/nio/file/Files", "move" | "copy", descriptor)
-                if descriptor.starts_with("(Ljava/nio/file/Path;") =>
-            {
-                self.unknown_host_call(r)
-            }
-            (
-                "java/nio/file/Files",
-                "isDirectory" | "isRegularFile" | "isSymbolicLink" | "isExecutable",
-                descriptor,
-            ) if descriptor.starts_with("(Ljava/nio/file/Path;") => Ok(Value::Int(0)),
+            // Filesystem state is modelled by Runtime::io_files/io_dirs in invoke_io.
             // `ResourceKey.create(registryKey, id)` interns the key of
             // `registryKey.identifier()` and `id` (`host_ids.rs`).
             ("net/minecraft/resources/ResourceKey", "create", descriptor)
@@ -13321,6 +13273,7 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
         "org/slf4j/event/Level" => &["ERROR", "WARN", "INFO", "DEBUG", "TRACE"],
         // The JDK's open options, checked by `Files`' writers (`open_options.rs`).
         "java/nio/file/StandardOpenOption" => open_options::STANDARD_OPEN_OPTIONS,
+        "java/nio/file/LinkOption" => &["NOFOLLOW_LINKS"],
         // `Collector.of`'s characteristics (`stream_pipeline.rs`).
         "java/util/stream/Collector$Characteristics" => {
             &["CONCURRENT", "UNORDERED", "IDENTITY_FINISH"]
@@ -26813,41 +26766,139 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 let path = host_path::sandbox_canonical(&display_path);
+                let seeded_text =
+                    library_dispatch::resource_text(self.host, path.trim_start_matches('/'));
+                let present = self.io_files.contains_key(&path) || seeded_text.is_some();
+                let is_dir = self.io_dirs.contains(&path) || path == "/horizon/game";
+                if args
+                    .first()
+                    .is_some_and(|value| matches!(value, Value::Ref(None)))
+                {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: Some("Cannot invoke \"java.nio.file.Path.getFileSystem()\" because \"path\" is null".into()),
+                        frame: None,
+                    });
+                }
                 if let Some(value) = self.jar_root_files(r, &display_path, class, method)? {
                     return Ok(Some(value));
                 }
                 Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                     ("exists", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
-                        if !self.io_files.contains_key(&path) {
-                            // A resource the jar ships still answers through the
-                            // host's table.
-                            return Ok(None);
-                        }
-                        Value::Int(1)
+                        Value::Int(i32::from(present))
                     }
                     ("notExists", descriptor)
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
-                        if !self.io_files.contains_key(&path) {
-                            return Ok(None);
-                        }
+                        Value::Int(i32::from(!present))
+                    }
+                    ("isReadable", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        Value::Int(i32::from(self.io_files.contains_key(&path)))
+                    }
+                    ("isDirectory", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        Value::Int(i32::from(is_dir))
+                    }
+                    ("isRegularFile", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        Value::Int(i32::from(present && !self.io_dirs.contains(&path)))
+                    }
+                    ("isSymbolicLink", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
                         Value::Int(0)
+                    }
+                    ("isExecutable", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        Value::Int(i32::from(self.io_dirs.contains(&path)))
                     }
                     ("readString", descriptor)
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         match self.io_files.get(&path) {
                             Some(text) => Value::Ref(Some(text.clone())),
-                            None => return Ok(None),
+                            None => match seeded_text {
+                                Some(text) => Value::Ref(Some(text)),
+                                None if path.starts_with("/horizon/") => {
+                                    return Err(NativeError::UncaughtException {
+                                        class: "java/nio/file/NoSuchFileException".into(),
+                                        message: Some(display_path.clone()),
+                                        frame: None,
+                                    });
+                                }
+                                None => return Ok(None),
+                            },
                         }
                     }
                     ("writeString", descriptor)
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
+                        let option_names = args
+                            .last()
+                            .and_then(|value| self.owned_array(value))
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(expect_ref)
+                                    .map(|value| value.to_owned())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let create_new =
+                            option_names.iter().any(|name| name.contains("/CREATE_NEW"));
+                        let append = option_names.iter().any(|name| name.contains("/APPEND"));
+                        let truncate = option_names
+                            .iter()
+                            .any(|name| name.contains("/TRUNCATE_EXISTING"));
+                        let create = option_names.iter().any(|name| name.ends_with("/CREATE"));
+                        let write_only = option_names.iter().any(|name| name.ends_with("/WRITE"));
+                        if create_new && self.io_files.contains_key(&path) {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/nio/file/FileAlreadyExistsException".into(),
+                                message: Some(display_path.clone()),
+                                frame: None,
+                            });
+                        }
+                        if (truncate || append || write_only)
+                            && !create
+                            && !create_new
+                            && !self.io_files.contains_key(&path)
+                        {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/nio/file/NoSuchFileException".into(),
+                                message: Some(display_path.clone()),
+                                frame: None,
+                            });
+                        }
+                        // An existing file opened without `TRUNCATE_EXISTING` or `APPEND` (`WRITE`,
+                        // `CREATE`) is overwritten in place: Java keeps the old bytes past the new
+                        // text (`x` over `abc` is `xbc`). Not modelled: count it.
+                        if !option_names.is_empty()
+                            && !truncate
+                            && !append
+                            && !create_new
+                            && self.io_files.contains_key(&path)
+                        {
+                            return self.host.unknown_operand_call(r).map(Some);
+                        }
                         let text = args
                             .get(1)
                             .map(|value| expect_string(value).to_owned())
                             .unwrap_or_default();
+                        let text = if append {
+                            format!(
+                                "{}{}",
+                                self.io_files.get(&path).cloned().unwrap_or_default(),
+                                text
+                            )
+                        } else {
+                            text
+                        };
                         self.watch_whole_write(&path, text.is_empty());
                         self.io_store_file_with_charset_args(path, text, args)?;
                         args.first().cloned().unwrap_or(Value::Ref(None))
@@ -26897,7 +26948,19 @@ impl<H: Host> Runtime<'_, H> {
                         } else {
                             self.watch_created(&path);
                         }
-                        self.io_dirs.insert(path.clone());
+                        let mut current = path.clone();
+                        loop {
+                            self.io_dirs.insert(current.clone());
+                            self.io_files.entry(current.clone()).or_default();
+                            let Some((parent, _)) = current.rsplit_once('/') else {
+                                break;
+                            };
+                            if parent.is_empty() || parent == "/horizon/game" {
+                                break;
+                            }
+                            current = parent.to_owned();
+                        }
+                        self.io_dirs.insert("/horizon/game".to_owned());
                         self.io_files.entry(path.clone()).or_default();
                         self.io_file_bytes.entry(path).or_default();
                         args.first().cloned().unwrap_or(Value::Ref(None))
