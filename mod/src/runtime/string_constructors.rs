@@ -407,12 +407,6 @@ pub(crate) fn build<H: Host>(
                 ));
             }
         },
-        "(Ljava/lang/StringBuilder;)V" | "(Ljava/lang/StringBuffer;)V" => {
-            let Some(Value::Ref(Some(marker))) = args.first() else {
-                return Ok(None);
-            };
-            runtime.string_builders.get(marker).cloned()
-        }
         "([B)V" | "([BII)V" => {
             return decode_bytes(
                 runtime,

@@ -152,8 +152,6 @@ fn modelled_constructors_answer_java_25() {
         ("bytesRangeName", "ab"),
         ("empty", "0"),
         ("copy", "xy"),
-        ("builder", "sb"),
-        ("buffer", "bf"),
     ];
     for (name, expected) in cases {
         let mut host = StdHost::new();
