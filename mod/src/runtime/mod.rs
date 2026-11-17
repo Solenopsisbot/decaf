@@ -3510,6 +3510,8 @@ pub struct StdHost {
     shared_empties: BTreeMap<&'static str, String>,
     /// Explicitly seeded Minecraft RandomSource state, keyed by its host handle.
     random_sources: BTreeMap<String, random_source::State>,
+    random_seed_uniquifier: u64,
+    random_time_origin: std::time::Instant,
     /// The collections Java hands out as the same object on every call (a
     /// map's views, `System.getProperties()`), by what they are of: their
     /// keys (`StdHost::cached_collection`).
@@ -3762,6 +3764,8 @@ impl StdHost {
             component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             random_sources: BTreeMap::new(),
+            random_seed_uniquifier: 8_682_522_807_148_012,
+            random_time_origin: std::time::Instant::now(),
             empty_collections: std::collections::BTreeSet::new(),
             shared_empties: BTreeMap::new(),
             cached_collections: BTreeMap::new(),
