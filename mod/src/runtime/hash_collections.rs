@@ -207,6 +207,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(());
         };
         let mut table = self.take_table(&marker, kind);
+        self.host.entries_before_call(&marker, &r.name, args);
         // Nothing touched the list since the table last mirrored it
         // (`collection_store.rs`): nothing to reconcile (#203).
         let generation = self.host.collection_generation(&marker);
@@ -751,6 +752,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         let result = self.hash_member(r, receiver, kind, &mut table, args);
         self.host.store_hash_table(&marker, table);
+        self.host.entries_after_call(&marker);
         match result? {
             Some(answer) => Ok(Some(answer)),
             None => Ok(None),

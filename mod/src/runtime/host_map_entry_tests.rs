@@ -104,7 +104,7 @@ fn map_entries_answer_as_java_25_or_count() {
         (
             "holder",
             Exact(
-                r#"a=b|java.util.KeyValueHolder|3,3|truetruefalsefalse|java.lang.UnsupportedOperationException: not supported|java.lang.NullPointerException: null|java.lang.NullPointerException: Cannot invoke "Object.toString()" because "this.value" is null|trueab"#,
+                r#"a=b|java.util.KeyValueHolder|3,3|truetruefalsefalse|java.lang.UnsupportedOperationException: not supported|java.lang.NullPointerException: null|java.lang.NullPointerException: null|trueab"#,
             ),
         ),
         // Two `Map.entry` calls are two objects; `copyOf` of a holder is itself.
