@@ -69,6 +69,7 @@ mod enum_value_of;
 pub mod events;
 mod executors;
 mod fabric_api_slice2;
+mod fabric_block_api;
 mod fabric_creative_tab;
 mod fabric_mods;
 mod fabric_registry;
@@ -3635,6 +3636,8 @@ pub struct StdHost {
     imc: neoforge_imc::ImcHandle,
     entity_registration: entity_registration::State,
     tool_material: tool_material::State,
+    /// one table per host; a conflict between two jars' registrations is not detected
+    fabric_block_api: fabric_block_api::State,
 }
 
 impl Default for StdHost {
@@ -3799,6 +3802,7 @@ impl StdHost {
             imc: neoforge_imc::ImcHandle::default(),
             entity_registration: entity_registration::State::default(),
             tool_material: tool_material::State::default(),
+            fabric_block_api: fabric_block_api::State::default(),
         }
     }
 
@@ -6709,6 +6713,9 @@ impl Host for StdHost {
     }
 
     fn invoke(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
+        if let Some(value) = fabric_block_api::static_call(&mut self.fabric_block_api, r, args) {
+            return value;
+        }
         if let Some(value) =
             entity_registration::static_call(&mut self.entity_registration, r, args)
         {
@@ -8240,6 +8247,11 @@ impl Host for StdHost {
         }
         // Fabric's container list and per-mod metadata (`fabric_mods.rs`).
         if let Some(value) = self.fabric_mods_instance(r, receiver, args) {
+            return value;
+        }
+        if let Some(value) =
+            fabric_block_api::instance_call(&mut self.fabric_block_api, r, receiver, args)
+        {
             return value;
         }
         if let Some(value) = fabric_api_slice2::event_call(r, receiver, args) {
