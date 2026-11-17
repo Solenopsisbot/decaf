@@ -8126,6 +8126,12 @@ impl Host for StdHost {
             return value;
         }
         self.record(r, Some(receiver), args);
+        if r.owner == "java/lang/String"
+            && matches!(receiver, Value::Host(handle) if handle.kind() == HostKind::JarObject
+                && jar_object::class_of_key(handle.key_text()) == "java/lang/String")
+        {
+            return self.unknown_operand_call(r);
+        }
         if let Some(v) = host_url::instance_call(r, receiver) {
             return v;
         }
