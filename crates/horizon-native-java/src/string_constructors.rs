@@ -402,8 +402,7 @@ pub(crate) fn build<H: Host>(
             _ => {
                 return Err(thrown(
                     "java/lang/NullPointerException",
-                    "Cannot read field "value" because "original" is null"
-                        .into(),
+                    r#"Cannot read field "value" because "original" is null"#.into(),
                 ));
             }
         },
