@@ -382,10 +382,10 @@ impl<H: Host> Runtime<'_, H> {
             && r.name == "read"
             && r.descriptor == "(Ljava/nio/file/Path;)Lnet/minecraft/nbt/CompoundTag;"
         {
-            let Some(path) = args.first().and_then(expect_ref) else {
+            let Some(path) = args.first().and_then(crate::host_path::path_key) else {
                 return Ok(None);
             };
-            let display = path.strip_prefix("path:").unwrap_or(path);
+            let display = path;
             let canonical = crate::host_path::sandbox_canonical(display);
             let present = self.io_files.contains_key(&canonical)
                 || crate::library_dispatch::resource_text(self.host, canonical.trim_start_matches('/')).is_some();
