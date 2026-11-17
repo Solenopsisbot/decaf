@@ -597,6 +597,32 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &mut [Value],
     ) -> Result<Option<Value>, NativeError> {
+        if matches!(r.name.as_str(), "keys" | "elements") && r.owner == "java/util/Hashtable" {
+            let receiver = receiver.expect("Hashtable member receiver");
+            let collection = self.call_virtual(
+                crate::jdk_call::Site::Virtual,
+                "java/util/Map",
+                if r.name == "keys" { "keySet" } else { "values" },
+                if r.name == "keys" {
+                    "()Ljava/util/Set;"
+                } else {
+                    "()Ljava/util/Collection;"
+                },
+                receiver,
+                &[],
+            )?;
+            let iterator = self.call_virtual(
+                crate::jdk_call::Site::Interface,
+                "java/util/Collection",
+                "iterator",
+                "()Ljava/util/Iterator;",
+                &collection,
+                &[],
+            )?;
+            return Ok(self
+                .host
+                .new_enumeration(crate::host_iterator::EnumerationOver::Iterator(iterator)));
+        }
         // A SetFromMap's order is its backing HashMap/LinkedHashMap's order.
         // Refresh the table for both the receiver and any collection argument,
         // so copying/printing the view sees the same live order as the map.
