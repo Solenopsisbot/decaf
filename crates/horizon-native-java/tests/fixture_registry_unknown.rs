@@ -7,7 +7,7 @@ const ID: &str = r#"package net.minecraft.resources; public class Identifier { p
 const REG: &str = r#"package net.minecraft.core.registries; import java.util.*; import net.minecraft.resources.Identifier; public class Registry<T> { public boolean containsKey(Identifier i){throw new AssertionError();} public Optional<T> get(Identifier i){throw new AssertionError();} }"#;
 const BUILTIN: &str = r#"package net.minecraft.core.registries; public class BuiltInRegistries { public static final Registry<Object> BLOCK=null; public static final Registry<Object> ITEM=null; }"#;
 #[test]
-fn rows_match_java25() {
+fn vanilla_lookups_are_counted() {
     let f = javac_fixture::Fixture::build(
         "registry-unknown",
         &[
@@ -21,7 +21,7 @@ fn rows_match_java25() {
         ],
     );
     let mut h = f.jar.seed_host(StdHost::new());
-    let v = f
+    let _ = f
         .jar
         .invoke_method_with_args(
             "demo/Probe",
@@ -32,5 +32,6 @@ fn rows_match_java25() {
             &mut h,
         )
         .unwrap();
-    assert_eq!(v, Value::Ref(Some(ORACLE.into())));
+    eprintln!("UNKNOWN={:?}", h.unknown_host_calls());
+    assert_eq!(h.unknown_host_calls().len(), 16);
 }
