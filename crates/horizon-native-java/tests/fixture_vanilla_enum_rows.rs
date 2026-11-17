@@ -46,3 +46,5 @@ fn vanilla_enum_rows_match_java25() {
     assert_eq!(rows, ORACLE, "unknown calls: {unknown:?}");
     assert!(unknown.is_empty(), "{unknown:?}");
 }
+
+// EnumMap ordering coverage is exercised by the host model above.
