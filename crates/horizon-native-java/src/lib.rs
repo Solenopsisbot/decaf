@@ -14436,7 +14436,10 @@ fn host_enum_ordinal(host: &StdHost, value: &Value) -> Option<i32> {
         return Some(*ordinal);
     }
     let (class, name) = marker.strip_prefix("enum/")?.rsplit_once('/')?;
-    game_enum_constants(class)?.iter().position(|constant| *constant == name).map(|ordinal| ordinal as i32)
+    game_enum_constants(class)?
+        .iter()
+        .position(|constant| *constant == name)
+        .map(|ordinal| ordinal as i32)
 }
 
 fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<Value>, NativeError> {
@@ -14447,12 +14450,14 @@ fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<Value>, N
     // EnumMap iterates by enum ordinal, independently of insertion order. The
     // host knows ordinals for jar enums and the game enums listed by
     // `game_enum_constants`; unknown enum classes retain their host order.
-    if expect_ref(value)
-        .and_then(|marker| marker.split_once('#').map(|(class, _)| class))
+    if expect_ref(value).and_then(|marker| marker.split_once('#').map(|(class, _)| class))
         == Some("java/util/EnumMap")
     {
         let mut pairs = values.as_chunks::<2>().0.to_vec();
-        if pairs.iter().all(|pair| host_enum_ordinal(host, &pair[0]).is_some()) {
+        if pairs
+            .iter()
+            .all(|pair| host_enum_ordinal(host, &pair[0]).is_some())
+        {
             pairs.sort_by_key(|pair| host_enum_ordinal(host, &pair[0]).unwrap_or_default());
             values = pairs.into_iter().flatten().collect();
         }
