@@ -278,6 +278,7 @@ mod vanilla_holders_table;
 mod vanilla_items;
 mod vanilla_registries;
 mod vanilla_registry_keys;
+mod vanilla_static;
 mod vanilla_values;
 pub mod verdict;
 mod watch_service;
@@ -6543,6 +6544,9 @@ impl Host for StdHost {
         self.record(r, None, &[]);
         // `ModEnvironment` and `CustomValue.CvType` (`fabric_mods.rs`).
         // ModOrigin.Kind constants (mod_origin.rs).
+        if let Some(value) = vanilla_static::static_field(r) {
+            return Ok(value);
+        }
         if let Some(value) = vanilla_values::static_field(r) {
             return Ok(value);
         }
