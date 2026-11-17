@@ -1,0 +1,6 @@
+https://a.b/c?d#e => https://a.b/c?d#e
+file:///tmp/x => file:/tmp/x
+jar:file:/x.jar!/y => jar:file:/x.jar!/y
+relative => java.lang.IllegalArgumentException:URI is not absolute
+foo:bar => java.net.MalformedURLException:unknown protocol: foo
+mailto:a@b => mailto:a@b
