@@ -265,7 +265,15 @@ fn invoke_stream<H: Host>(
     if !rt.fields.contains_key(&format!("{marker}|{NIO_STREAM}")) {
         return Ok(None);
     }
-    rt.io_commit(&marker);
+    if r.name == "close" {
+        if rt.io_closed.contains(&marker) {
+            return Ok(Some(Value::Void));
+        }
+        rt.io_commit(&marker);
+        rt.io_closed.insert(marker);
+    } else {
+        rt.io_commit(&marker);
+    }
     Ok(Some(Value::Void))
 }
 
