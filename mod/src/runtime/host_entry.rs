@@ -8,6 +8,12 @@
 
 use super::*;
 
+fn hashtable_null_entry(handle: &HostRef, value: &Value) -> bool {
+    handle.kind() == HostKind::MapEntry
+        && crate::runtime::host_map_entry::entry_class(handle.key()) == "java/util/Hashtable$Entry"
+        && matches!(value, Value::Ref(None))
+}
+
 impl<H: Host> Runtime<'_, H> {
     /// `entry.toString()` for a host map entry; `None` for any other value. An entry whose
     /// contents or parts' text are unknown is counted.

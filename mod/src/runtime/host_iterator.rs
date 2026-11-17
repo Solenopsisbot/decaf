@@ -202,6 +202,13 @@ impl<H: Host> Runtime<'_, H> {
         };
         Ok(Some(
             match ((r.name.as_str(), r.descriptor.as_str()), over) {
+                (("remove", "()V"), EnumerationOver::Iterator(_)) => {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/UnsupportedOperationException".into(),
+                        message: None,
+                        frame: None,
+                    });
+                }
                 (("hasMoreElements", "()Z"), EnumerationOver::Iterator(iterator)) => self
                     .call_virtual(
                         Site::Interface,

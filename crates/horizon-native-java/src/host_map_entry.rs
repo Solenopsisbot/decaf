@@ -1079,7 +1079,11 @@ impl StdHost {
                 {
                     if let Some(state) = self.map_entries.states.get_mut(&entry_key) {
                         state.key = key.clone();
-                        state.value = if matches!(&state.life, Life::Live { nulls: false, .. }) {
+                        state.value = if entry_class(&match &state.handle {
+                            Value::Host(h) => h.key(),
+                            _ => String::new(),
+                        }) == "java/util/Hashtable$Entry"
+                        {
                             Value::Ref(None)
                         } else {
                             value
@@ -1158,7 +1162,11 @@ impl StdHost {
                 && let Some(state) = self.map_entries.states.get_mut(&entry_key)
             {
                 state.key = key.clone();
-                state.value = if matches!(&state.life, Life::Live { nulls: false, .. }) {
+                state.value = if entry_class(&match &state.handle {
+                    Value::Host(h) => h.key(),
+                    _ => String::new(),
+                }) == "java/util/Hashtable$Entry"
+                {
                     Value::Ref(None)
                 } else {
                     value.clone()
@@ -1188,6 +1196,16 @@ fn entry_text(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<String
     let Some((key, value)) = parts(handle, nested) else {
         return Ok(None);
     };
+    if handle.kind() == HostKind::MapEntry
+        && entry_class(handle.key()) == "java/util/Hashtable$Entry"
+        && matches!(value, Value::Ref(None))
+    {
+        return Err(NativeError::UncaughtException {
+            class: "java/lang/NullPointerException".into(),
+            message: None,
+            frame: None,
+        });
+    }
     let (Some(key), Some(value)) = (nested.text(&key)?, nested.text(&value)?) else {
         return Ok(None);
     };
