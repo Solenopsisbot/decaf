@@ -8150,6 +8150,25 @@ impl Host for StdHost {
         // A jar's `new URI(text)` is a JDK object no model reads: building it from text
         // `URI` accepts has no effect to answer, and every member is counted, never its
         // key (`host_jdk_value.rs`; `URI.create` is the modelled handle).
+        if r.owner == "java/net/URI" && r.name == "toURL" && r.descriptor == "()Ljava/net/URL;" {
+            if let Some(text) = host_jdk_value::uri_text(receiver) {
+                let Some((scheme, _)) = text.split_once(':') else {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/IllegalArgumentException".into(),
+                        message: Some("URI is not absolute".into()),
+                        frame: None,
+                    });
+                };
+                if !matches!(scheme, "http" | "https" | "file" | "jar" | "ftp" | "mailto") {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/net/MalformedURLException".into(),
+                        message: Some(format!("unknown protocol: {scheme}")),
+                        frame: None,
+                    });
+                }
+                return Ok(Value::Ref(Some(format!("url/{text}"))));
+            }
+        }
         if r.owner == "java/net/URI" && jar_object::object_class(receiver) == Some("java/net/URI") {
             if let ("<init>", "(Ljava/lang/String;)V", [Value::Ref(Some(text))]) =
                 (r.name.as_str(), r.descriptor.as_str(), args)
