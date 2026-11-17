@@ -1,1 +1,1 @@
-read=[1, 2, 3];size=3;after=java.io.IOException:Stream Closed;append=[1, 2, 3, 4, 5]
+bytes=[8, 7];after=java.io.IOException:Stream Closed;negOff=java.lang.IndexOutOfBoundsException:null;negLen=java.lang.IndexOutOfBoundsException:null;over=java.lang.IndexOutOfBoundsException:null;null=java.lang.NullPointerException:null;parent=java.io.FileNotFoundException:missing-parent/x.zip (No such file or directory)
