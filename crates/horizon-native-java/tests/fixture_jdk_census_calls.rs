@@ -210,10 +210,7 @@ public final class Main {
                 "java/lang/String#formatted([Ljava/lang/Object;)Ljava/lang/String;".to_owned(),
                 3,
             ),
-            (
-                "java/util/Properties#stringPropertyNames()Ljava/util/Set;".to_owned(),
-                1,
-            ),
+            // `Properties.stringPropertyNames()` is answered as JDK 25 builds it (#500).
         ]
     );
 }

@@ -2377,6 +2377,9 @@ pub struct EventDispatch {
 /// keeps no such state", which the caller turns into a counted path of its own (#246's review:
 /// a silent `null` from `unknown_operand_call` printed a hook-tier player as `null`).
 pub trait Host {
+    fn properties_put_all(&mut self, _marker: &str, _entries: Vec<(String, String)>) -> bool {
+        false
+    }
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
         Err(NativeError::UnknownHostCall(r.clone()))
     }
@@ -4689,6 +4692,26 @@ impl StdHost {
     /// parse happens here; `getProperty` answers from the same table `get`
     /// uses. The format's escapes and continuations are read as plain
     /// assignments, which is what a metadata file declares.
+    pub(crate) fn properties_put_all(&mut self, marker: &str, additions: Vec<(String, String)>) {
+        let values = self
+            .mutable_collections
+            .entry(marker.to_owned())
+            .or_default();
+        for (key, value) in additions {
+            let key = Value::Ref(Some(key));
+            let value = Value::Ref(Some(value));
+            match values
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .find(|pair| pair[0] == key)
+            {
+                Some(pair) => pair[1] = value,
+                None => values.extend([key, value]),
+            }
+        }
+    }
+
     fn properties_member(
         &mut self,
         r: &MethodRef,
@@ -4696,36 +4719,32 @@ impl StdHost {
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         match (r.name.as_str(), r.descriptor.as_str()) {
-            ("load", "(Ljava/io/InputStream;)V") | ("load", "(Ljava/io/Reader;)V") => {
-                // Only a host resource stream has bytes the host can parse.
-                // Any other stream (a file the jar opened, a null) would load
-                // entries the host never sees, so the call is counted rather
-                // than answered as an empty load.
-                let Some((bytes, index)) = expect_ref(Self::argument(r, args, 0)?)
-                    .and_then(|stream| self.resource_streams.get_mut(stream))
-                else {
+            ("load", "(Ljava/io/Reader;)V") => self.unknown_host_call(r).map(Some),
+            ("load", "(Ljava/io/InputStream;)V") => {
+                let source_value = Self::argument(r, args, 0)?;
+                let source = jar_object::object_key(source_value)
+                    .or_else(|| expect_ref(source_value).map(String::as_str))
+                    .and_then(|stream| {
+                        if let Some((bytes, index)) = self.resource_streams.get_mut(stream) {
+                            let text: String = bytes[*index..].iter().map(|b| *b as char).collect();
+                            *index = bytes.len();
+                            return Some(text);
+                        }
+                        let path = self.io_paths.get(stream)?;
+                        let bytes = self.io_file_bytes.get(path)?;
+                        Some(bytes.iter().map(|b| *b as char).collect())
+                    });
+                let Some(text) = source else {
                     return self.unknown_host_call(r).map(Some);
                 };
-                let text = String::from_utf8_lossy(&bytes[*index..]).into_owned();
-                *index = bytes.len();
-                let additions = properties_entries(&text);
-                let values = self
-                    .mutable_collections
-                    .entry(marker.to_owned())
-                    .or_default();
-                for (key, value) in additions {
-                    let key = Value::Ref(Some(key));
-                    let value = Value::Ref(Some(value));
-                    match values
-                        .as_chunks_mut::<2>()
-                        .0
-                        .iter_mut()
-                        .find(|pair| pair[0] == key)
-                    {
-                        Some(pair) => pair[1] = value,
-                        None => values.extend([key, value]),
+                let additions = properties_entries(&text).map_err(|message| {
+                    NativeError::UncaughtException {
+                        class: "java/lang/IllegalArgumentException".into(),
+                        message: Some(message),
+                        frame: None,
                     }
-                }
+                })?;
+                self.properties_put_all(marker, additions);
                 Ok(Some(Value::Void))
             }
             ("getProperty", "(Ljava/lang/String;)Ljava/lang/String;") => {
@@ -4780,8 +4799,58 @@ impl StdHost {
                 values.extend([key, value]);
                 Ok(Some(Value::Ref(None)))
             }
-            ("stringPropertyNames", "()Ljava/util/Set;")
-            | ("keys", "()Ljava/util/Enumeration;")
+            ("stringPropertyNames", "()Ljava/util/Set;") => {
+                // JDK 25: `enumerateStringProperties(h)` fills a new `HashMap<String, String>`
+                // with the defaults chain's entries first, then this table's (a later put
+                // overwrites an earlier key), keeping only entries whose key and value are both
+                // `String`s; the answer is `Collections.unmodifiableSet(h.keySet())`, a snapshot
+                // in `HashMap` order that throws on `add`.
+                let mut chain = Vec::new();
+                let mut current = Some(marker.to_owned());
+                let mut seen = BTreeSet::new();
+                while let Some(owner) = current
+                    && seen.insert(owner.clone())
+                {
+                    current = self.properties_defaults(&owner);
+                    chain.push(owner);
+                }
+                let mut keys: Vec<Value> = Vec::new();
+                for owner in chain.iter().rev() {
+                    let Some(pairs) = self.mutable_collections.get(owner) else {
+                        continue;
+                    };
+                    for pair in pairs.as_chunks::<2>().0 {
+                        if let (Value::Ref(Some(_)), Value::Ref(Some(_))) = (&pair[0], &pair[1])
+                            && !keys.contains(&pair[0])
+                        {
+                            keys.push(pair[0].clone());
+                        }
+                    }
+                }
+                // `h.keySet()` iterates the `HashMap`'s bins, not insertion order
+                // (`hash_map_order.rs`); a bin Java would turn into a tree has no known order,
+                // so the call is counted rather than guessed.
+                let texts: Vec<&str> = keys
+                    .iter()
+                    .filter_map(|key| match key {
+                        Value::Ref(Some(text)) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let Some(order) = crate::hash_map_order::key_set_order(&texts, |text| {
+                    crate::hash_map_order::java_string_hash(text)
+                }) else {
+                    return self.unknown_host_call(r).map(Some);
+                };
+                let keys: Vec<Value> = order.into_iter().map(|i| keys[i].clone()).collect();
+                let snapshot = self.new_collection("java/util/HashSet", keys);
+                match self.unmodifiable_view_as("java/util/Collections$UnmodifiableSet", &snapshot)
+                {
+                    Some(view) => Ok(Some(view)),
+                    None => self.unknown_host_call(r).map(Some),
+                }
+            }
+            ("keys", "()Ljava/util/Enumeration;")
             | ("propertyNames", "()Ljava/util/Enumeration;")
             | ("keySet", "()Ljava/util/Set;")
             | ("values", "()Ljava/util/Collection;") => self.unknown_host_call(r).map(Some),
@@ -5659,6 +5728,10 @@ pub(crate) fn check_jdk_capacity(r: &MethodRef, args: &[Value]) -> Result<(), Na
 }
 
 impl Host for StdHost {
+    fn properties_put_all(&mut self, marker: &str, entries: Vec<(String, String)>) -> bool {
+        self.properties_put_all(marker, entries);
+        true
+    }
     fn register_render_handle(&mut self, key: &str) {
         self.register_render_handle(key);
     }
@@ -14524,52 +14597,138 @@ fn string_from_char_code(code: i32) -> String {
     char::from_u32(code as u32).map_or_else(String::new, String::from)
 }
 
-fn properties_entries(text: &str) -> Vec<(String, String)> {
-    let mut entries = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
-            continue;
-        }
-        let (key, value) = match line.split_once('=') {
-            Some((key, value)) => (key, value),
-            None => match line.split_once(':') {
-                Some((key, value)) => (key, value),
-                None => match line.split_once(char::is_whitespace) {
-                    Some((key, value)) => (key, value),
-                    None => (line, ""),
-                },
-            },
-        };
-        entries.push((
-            property_unescape(key.trim()),
-            property_unescape(value.trim()),
-        ));
-    }
-    entries
+/// The physical lines of a `.properties` text, without their terminators: like JDK 25's
+/// `Properties.LineReader`, `\r\n` is ONE terminator, and a lone `\r` or `\n` ends a line too.
+/// (Splitting on `\r` and `\n` separately would turn every `\r\n` into an extra empty line,
+/// which ends a `\`-continued entry early.)
+/// [`properties_entries`] for the integration tests.
+#[doc(hidden)]
+pub fn properties_entries_for_tests(text: &str) -> Result<Vec<(String, String)>, String> {
+    properties_entries(text)
 }
 
-/// Undo the escapes a `.properties` value may carry.
-fn property_unescape(text: &str) -> String {
-    let mut value = String::with_capacity(text.len());
-    let mut escaped = false;
-    for character in text.chars() {
-        if escaped {
-            value.push(match character {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'f' => '\u{0c}',
-                other => other,
-            });
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else {
-            value.push(character);
+fn properties_physical_lines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                lines.push(&text[start..i]);
+                i += if bytes.get(i + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = i;
+            }
+            b'\n' => {
+                lines.push(&text[start..i]);
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
         }
     }
-    value
+    if start < bytes.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+fn properties_entries(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut logical = Vec::new();
+    let mut current = String::new();
+    for line in properties_physical_lines(text) {
+        let continued = line.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1;
+        let mut part = line.to_owned();
+        if continued {
+            part.pop();
+        }
+        if !current.is_empty() {
+            part = part.trim_start_matches([' ', '\t', '\u{000c}']).to_owned();
+        }
+        current.push_str(&part);
+        if !continued {
+            logical.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        logical.push(current);
+    }
+    let mut out = Vec::new();
+    for line in logical {
+        let chars: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < chars.len() && matches!(chars[i], ' ' | '\t' | '\u{000c}') {
+            i += 1;
+        }
+        if i == chars.len() || chars[i] == '#' || chars[i] == '!' {
+            continue;
+        }
+        let start = i;
+        let mut escaped = false;
+        while i < chars.len() {
+            let c = chars[i];
+            if !escaped && matches!(c, '=' | ':' | ' ' | '\t' | '\u{000c}') {
+                break;
+            }
+            if c == '\\' {
+                escaped = !escaped;
+            } else {
+                escaped = false;
+            }
+            i += 1;
+        }
+        let end = i;
+        while i < chars.len() && matches!(chars[i], ' ' | '\t' | '\u{000c}') {
+            i += 1;
+        }
+        if i < chars.len() && matches!(chars[i], '=' | ':') {
+            i += 1;
+            while i < chars.len() && matches!(chars[i], ' ' | '\t' | '\u{000c}') {
+                i += 1;
+            }
+        }
+        out.push((
+            property_unescape(&chars[start..end].iter().collect::<String>())?,
+            property_unescape(&chars[i..].iter().collect::<String>())?,
+        ));
+    }
+    Ok(out)
+}
+fn property_unescape(text: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut it = text.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('t') => out.push('\t'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('f') => out.push('\u{c}'),
+            Some('u') => {
+                let mut n = 0u32;
+                for _ in 0..4 {
+                    let Some(c) = it.next() else {
+                        return Err("Malformed \\uxxxx encoding.".into());
+                    };
+                    let Some(d) = c.to_digit(16) else {
+                        return Err("Malformed \\uxxxx encoding.".into());
+                    };
+                    n = n * 16 + d;
+                }
+                out.push(char::from_u32(n).unwrap());
+            }
+            Some(x) => out.push(x),
+            None => out.push('\\'),
+        }
+    }
+    Ok(out)
 }
 
 /// The JDK's range check for a list read, write or removal.
@@ -19894,6 +20053,7 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
@@ -20109,6 +20269,7 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
@@ -20280,6 +20441,7 @@ impl NativeJar {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_paths,
@@ -22491,6 +22653,7 @@ struct Runtime<'a, H> {
     /// reader) this invocation built exposes to `Reader#read` and to
     /// `Gson.fromJson(Reader, Class)`, keyed by the reader's marker.
     string_readers: BTreeMap<String, String>,
+    io_stream_paths: BTreeMap<String, String>,
     /// Text each `java.io` writer this invocation built holds, keyed by its
     /// sink: `file:<path>` for a writer over a virtual file, `mem:<marker>` for
     /// one that only exists in memory. A wrapper (`BufferedWriter`,
@@ -26703,6 +26866,8 @@ impl<H: Host> Runtime<'_, H> {
             });
         };
         self.string_readers.insert(marker.to_owned(), text);
+        self.io_stream_paths
+            .insert(marker.to_owned(), path.to_owned());
         Ok(())
     }
 
@@ -27114,7 +27279,7 @@ impl<H: Host> Runtime<'_, H> {
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         let value = self.new_object("java/io/BufferedReader");
-                        if let Some(reader) = expect_ref(&value) {
+                        if let Some(reader) = jar_object::object_key(&value) {
                             self.io_open_reader(r, reader, &path, false)?;
                         }
                         value
@@ -27123,7 +27288,7 @@ impl<H: Host> Runtime<'_, H> {
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         let value = self.new_object("java/io/BufferedWriter");
-                        if let Some(writer) = expect_ref(&value) {
+                        if let Some(writer) = jar_object::object_key(&value) {
                             self.io_open_writer(writer, Some(path), true)?;
                             self.io_set_writer_charset(writer, args);
                         }
@@ -27133,7 +27298,7 @@ impl<H: Host> Runtime<'_, H> {
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         let value = self.new_object("java/io/FileInputStream");
-                        if let Some(stream) = expect_ref(&value) {
+                        if let Some(stream) = jar_object::object_key(&value) {
                             self.io_open_reader(r, stream, &path, false)?;
                         }
                         value
@@ -27142,7 +27307,7 @@ impl<H: Host> Runtime<'_, H> {
                         if descriptor.starts_with("(Ljava/nio/file/Path;") =>
                     {
                         let value = self.new_object("java/io/FileOutputStream");
-                        if let Some(stream) = expect_ref(&value) {
+                        if let Some(stream) = jar_object::object_key(&value) {
                             self.io_open_writer(stream, Some(path), true)?;
                         }
                         value
@@ -28039,6 +28204,64 @@ impl<H: Host> Runtime<'_, H> {
     /// string. Objects of a jar's own class are not instantiated (that needs
     /// field injection the native path does not model), so their JSON shape is
     /// returned as a modelled map, never as a masked empty value.
+    fn invoke_properties_reader(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "java/util/Properties"
+            || r.name != "load"
+            || !matches!(
+                r.descriptor.as_str(),
+                "(Ljava/io/Reader;)V" | "(Ljava/io/InputStream;)V"
+            )
+        {
+            return Ok(None);
+        }
+        let (Some(marker), Some(reader)) = (
+            receiver
+                .and_then(expect_ref)
+                .map(String::as_str)
+                .or_else(|| receiver.and_then(jar_object::object_key)),
+            args.first()
+                .and_then(jar_object::object_key)
+                .or_else(|| args.first().and_then(expect_ref).map(String::as_str)),
+        ) else {
+            return Ok(None);
+        };
+        let text = if r.descriptor == "(Ljava/io/InputStream;)V" {
+            // A stream `Files.newInputStream`/`FileInputStream` opened over a file the
+            // invocation wrote: `io_open_reader` recorded its path. `load(InputStream)`
+            // reads the file's bytes as ISO-8859-1, one char per byte, to the end.
+            let Some(path) = self.io_stream_paths.get(reader).cloned() else {
+                return Ok(None);
+            };
+            let Some(bytes) = self.io_file_bytes.get(&path) else {
+                return Ok(None);
+            };
+            let text = bytes.iter().map(|b| char::from(*b)).collect::<String>();
+            // Consumed: a later read sees the end of the stream.
+            self.string_readers.insert(reader.to_owned(), String::new());
+            text
+        } else {
+            let Some(text) = self.string_readers.remove(reader) else {
+                return Ok(None);
+            };
+            self.string_readers.insert(reader.to_owned(), String::new());
+            text
+        };
+        let entries = properties_entries(&text).map_err(|m| NativeError::UncaughtException {
+            class: "java/lang/IllegalArgumentException".into(),
+            message: Some(m),
+            frame: None,
+        })?;
+        if !self.host.properties_put_all(marker, entries) {
+            return self.host.unknown_operand_call(r).map(Some);
+        }
+        Ok(Some(Value::Void))
+    }
+
     fn invoke_gson(
         &mut self,
         r: &MethodRef,
@@ -30624,6 +30847,11 @@ impl<H: Host> Runtime<'_, H> {
                                 == "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;")
                     {
                         invoke_or_catch!(at, format_java_string_call(self, &r, &args))
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_properties_reader(&r, receiver.as_ref(), &args)
+                    ) {
+                        value
                     } else if let Some(value) = invoke_or_catch!(
                         at,
                         self.invoke_unmodifiable_sublist(&r, op, receiver.as_ref(), &args)
@@ -36014,6 +36242,7 @@ mod tests {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -36086,6 +36315,7 @@ mod tests {
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -43238,6 +43468,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -43452,6 +43683,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -43641,6 +43873,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -44006,6 +44239,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -44315,6 +44549,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -49582,6 +49817,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
@@ -49641,6 +49877,7 @@ mandatory = true
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
+            io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
             io_writer_charsets: BTreeMap::new(),
             io_file_bytes: BTreeMap::new(),
