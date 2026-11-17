@@ -618,6 +618,8 @@ pub enum HostKind {
     /// Fabric's `BlockApiLookup`, one per (id, API class, context class) (`fabric_block_api.rs`).
     FabricBlockApiLookup,
     Url,
+    /// A live Sunrise game object (entity or menu), keyed by stable identity.
+    LiveGameObject,
 }
 
 /// How a kind's Java class follows from its key.
@@ -2672,7 +2674,49 @@ const KINDS: &[KindInfo] = &[
         canonical: never_canonical,
         methods: &crate::runtime::host_url::URL_METHODS,
     },
+    KindInfo {
+        kind: HostKind::LiveGameObject,
+        tag: "live",
+        class: ClassRule::Unknown {
+            declared: live_declared,
+        },
+        canonical: always_canonical,
+        methods: &LIVE_GAME_OBJECT_METHODS,
+    },
 ];
+
+static LIVE_GAME_OBJECT_METHODS: Methods = Methods {
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    equals: |handle, other, _| match other {
+        Value::Host(other) => Ok(handle.same_object(other)),
+        _ => Ok(Some(false)),
+    },
+    instance_of: |handle, wanted, _| {
+        live_declared(handle.key_text())
+            .contains(&wanted)
+            .then_some(true)
+    },
+    crosses_jars: |_, _| true,
+    compare_to: None,
+};
+
+/// The types a live handle's object surely is, by key family: its class and every superclass,
+/// as javap shows them for 26.3 (`tests/fixtures/live_objects/javap_facts.txt`). Interfaces and
+/// anything else stay counted.
+fn live_declared(key: &str) -> &'static [&'static str] {
+    match key.split(':').next().unwrap_or("") {
+        "ServerPlayer" => &[
+            "net/minecraft/server/level/ServerPlayer",
+            "net/minecraft/world/entity/player/Player",
+            "net/minecraft/world/entity/Avatar",
+            "net/minecraft/world/entity/LivingEntity",
+            "net/minecraft/world/entity/Entity",
+        ],
+        "AbstractContainerMenu" => &["net/minecraft/world/inventory/AbstractContainerMenu"],
+        _ => &[],
+    }
+}
 
 impl HostKind {
     /// The kind's row: `KINDS` is in declaration order, so the discriminant
@@ -2758,6 +2802,11 @@ impl HostKind {
 impl HostRef {
     /// A handle with `key` as it is (a number, a name). A key that holds
     /// values is built with [`Self::of_values`].
+    #[doc(hidden)]
+    pub fn live_game_object_for_test(key: impl Into<String>) -> Self {
+        Self::new(HostKind::LiveGameObject, key)
+    }
+
     pub(crate) fn new(kind: HostKind, key: impl Into<String>) -> Self {
         Self {
             kind,

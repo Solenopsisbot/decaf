@@ -1710,6 +1710,9 @@ mod tests {
             "vec2",
         ];
         const HOLDS_NO_OBJECT: &[&str] = &[
+            // Live-object keys the host issued or tombstoned: host identities, never jar objects.
+            "live_objects_issued",
+            "live_objects_removed",
             "next_unmodifiable_collection",
             "next_reversed_view",
             "next_ranged_attribute",

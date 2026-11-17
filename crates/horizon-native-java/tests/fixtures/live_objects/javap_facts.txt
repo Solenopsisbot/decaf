@@ -1,0 +1,9 @@
+public class net.minecraft.server.level.ServerPlayer extends net.minecraft.world.entity.player.Player {
+public abstract class net.minecraft.world.entity.player.Player extends net.minecraft.world.entity.Avatar implements net.minecraft.world.entity.ContainerUser {
+public abstract class net.minecraft.world.entity.Avatar extends net.minecraft.world.entity.LivingEntity {
+public abstract class net.minecraft.world.entity.LivingEntity extends net.minecraft.world.entity.Entity implements net.minecraft.world.entity.Attackable,net.minecraft.world.waypoints.WaypointTransmitter {
+public abstract class net.minecraft.world.entity.Entity implements net.minecraft.world.Nameable, net.minecraft.world.level.entity.EntityAccess, net.minecraft.world.scores.ScoreHolder, net.minecraft.network.syncher.SyncedDataHolder, net.minecraft.core.component.DataComponentGetter, net.minecraft.world.entity.ItemOwner, net.minecraft.world.entity.SlotProvider, net.minecraft.util.debug.DebugValueSource, net.minecraft.core.TypedInstance<net.minecraft.world.entity.EntityType<?>> {
+public abstract class net.minecraft.world.inventory.AbstractContainerMenu {
+  public void setPos(double, double, double);
+  public final double getX();
+  public final boolean isRemoved();
