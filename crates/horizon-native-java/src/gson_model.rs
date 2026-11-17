@@ -601,10 +601,21 @@ impl<H: Host> Runtime<'_, H> {
                                 if let Some(adapter_class) =
                                     crate::jar_object::object_class(&adapter)
                                 {
-                                    if self.class_is_instance(
-                                        adapter_class,
-                                        "com/google/gson/TypeAdapter",
-                                    ) {
+                                    let mut current = Some(adapter_class);
+                                    let mut is_type_adapter = false;
+                                    for _ in 0..MAX_SUPERCLASS_WALK {
+                                        if current == Some("com/google/gson/TypeAdapter") {
+                                            is_type_adapter = true;
+                                            break;
+                                        }
+                                        current = current
+                                            .and_then(|name| self.class(name))
+                                            .and_then(|file| {
+                                                (!file.super_name.is_empty())
+                                                    .then_some(file.super_name.as_str())
+                                            });
+                                    }
+                                    if is_type_adapter {
                                         self.gson_type_adapters
                                             .entry(marker.clone())
                                             .or_default()
@@ -763,7 +774,7 @@ impl<H: Host> Runtime<'_, H> {
         if crate::callback_marker::callback_text(adapter).is_some() {
             return Ok(());
         }
-        let Some(class) = crate::jar_object::object_class(&adapter) else {
+        let Some(class) = crate::jar_object::object_class(adapter) else {
             return Err(not_a_supported_adapter("java/lang/String"));
         };
         if self.class(class).is_none() {
@@ -877,7 +888,7 @@ impl<H: Host> Runtime<'_, H> {
                     let mut state = gson_writer::State::new(sink.clone());
                     state.apply_tree_style(&style.tree_style());
                     self.gson_writers.insert(wm.clone(), state);
-                    let Some(ac) = crate::jar_object::object_class(&adapter) else {
+                    let Some(ac) = crate::jar_object::object_class(adapter) else {
                         return Ok(None);
                     };
                     let result = self.invoke(
