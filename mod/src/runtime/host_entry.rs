@@ -11,7 +11,8 @@ use super::*;
 fn hashtable_null_entry<H: Host>(runtime: &Runtime<'_, H>, handle: &HostRef) -> bool {
     crate::runtime::host_map_entry::entry_class(handle.key()) == "java/util/Hashtable$Entry"
         && runtime
-            .map_entry_now(&Value::Host(handle.clone()))
+            .host
+            .map_entry_parts(&Value::Host(handle.clone()))
             .is_some_and(|(_, value)| matches!(value, Value::Ref(None)))
 }
 
