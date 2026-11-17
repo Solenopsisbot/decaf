@@ -1,1 +1,1 @@
-import net.minecraft.server.Bootstrap; import net.minecraft.SharedConstants; public class Capture { public static void main(String[] a){SharedConstants.tryDetectVersion(); Bootstrap.bootStrap(); System.out.print(demo.Probe.rows());}}
+import net.minecraft.server.Bootstrap; import net.minecraft.SharedConstants; public class Capture { public static void main(String[] a){SharedConstants.tryDetectVersion(); Bootstrap.bootStrap(); System.out.print(demo.Probe.exact());}}
