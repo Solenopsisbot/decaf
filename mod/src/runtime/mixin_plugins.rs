@@ -565,27 +565,6 @@ impl StdHost {
             return Some(Err(NativeError::UnknownHostCall(r.clone())));
         }
         if crate::runtime::host_mixin::is_environment(receiver)
-            && r.name == "getName"
-            && r.descriptor == "()Ljava/lang/String;"
-        {
-            let name = match self.run_loader {
-                crate::runtime::class_precedence::RunLoader::NeoForge => "ModLauncher",
-                _ => "Knot/Fabric",
-            };
-            return Some(Ok(Value::Ref(Some(name.into()))));
-        }
-        if crate::runtime::host_mixin::is_environment(receiver)
-            && r.name == "getSideName"
-            && r.descriptor == "()Ljava/lang/String;"
-        {
-            let side = if self.environment_type == "SERVER" {
-                "SERVER"
-            } else {
-                "CLIENT"
-            };
-            return Some(Ok(Value::Ref(Some(side.into()))));
-        }
-        if crate::runtime::host_mixin::is_environment(receiver)
             && r.name == "getSide"
             && r.descriptor == "()Lorg/spongepowered/asm/mixin/MixinEnvironment$Side;"
         {

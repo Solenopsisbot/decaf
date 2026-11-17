@@ -1,6 +1,2 @@
-service_same=true
-fabric_name=Knot/Fabric
-fabric_server_side=SERVER
-neoforge_name=ModLauncher
-neoforge_server_side=SERVER
-getBytecodeProvider=COUNTED
+name=COUNTED
+side=COUNTED
