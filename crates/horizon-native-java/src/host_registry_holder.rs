@@ -776,7 +776,7 @@ mod tests {
                 &[crate::host_ids::identifier("minecraft", "stone")],
             )
             .unwrap();
-        assert_eq!(result, Value::Ref(None));
+        assert_eq!(result, Value::Int(0));
         assert_eq!(host.unknown_host_calls().len(), 1);
     }
     use super::*;
