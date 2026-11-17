@@ -132,7 +132,7 @@ pub(crate) fn logger_declared(key: &str) -> &'static [&'static str] {
 pub(crate) fn logger_canonical(key: &str) -> bool {
     matches!(
         logger_api(key).as_deref(),
-        Some("log4j" | "log4j-formatter" | "slf4j" | "jul")
+        Some("log4j" | "log4j-formatter" | "log4j-factory" | "slf4j" | "jul")
     )
 }
 
