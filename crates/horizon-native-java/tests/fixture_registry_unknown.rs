@@ -1,8 +1,7 @@
 #[path = "support/javac_fixture.rs"]
 mod javac_fixture;
-use horizon_native_java::{StdHost, Value};
+use horizon_native_java::StdHost;
 const PROBE: &str = include_str!("fixtures/registry_unknown/demo/Probe.java");
-const ORACLE: &str = include_str!("fixtures/registry_unknown/java25.txt");
 const ID: &str = r#"package net.minecraft.resources; public class Identifier { public static Identifier parse(String s){return null;} }"#;
 const REG: &str = r#"package net.minecraft.core.registries; import java.util.*; import net.minecraft.resources.Identifier; public class Registry<T> { public boolean containsKey(Identifier i){throw new AssertionError();} public Optional<T> get(Identifier i){throw new AssertionError();} }"#;
 const BUILTIN: &str = r#"package net.minecraft.core.registries; public class BuiltInRegistries { public static final Registry<Object> BLOCK=null; public static final Registry<Object> ITEM=null; }"#;
@@ -32,6 +31,5 @@ fn vanilla_lookups_are_counted() {
             &mut h,
         )
         .unwrap();
-    eprintln!("UNKNOWN={:?}", h.unknown_host_calls());
-    assert_eq!(h.unknown_host_calls().len(), 16);
+    assert_eq!(h.unknown_host_calls(), vec![("net/minecraft/core/registries/Registry#containsKey(Lnet/minecraft/resources/Identifier;)Z".into(), 4), ("net/minecraft/core/registries/Registry#get(Lnet/minecraft/resources/Identifier;)Ljava/util/Optional;".into(), 4)]);
 }
