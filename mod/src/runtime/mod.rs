@@ -28391,7 +28391,7 @@ impl<H: Host> Runtime<'_, H> {
                         match self.gson_to_json_string(
                             args.first().unwrap_or(&Value::Ref(None)),
                             &style,
-                            receiver.and_then(expect_ref),
+                            receiver.and_then(expect_ref).map(|x| x.as_str()),
                         )? {
                             Some(text) => Ok(Some(Value::Ref(Some(text)))),
                             // A value with no honest JSON shape is a counted
@@ -28462,7 +28462,7 @@ impl<H: Host> Runtime<'_, H> {
                         let Some(text) = self.gson_to_json_string(
                             args.first().unwrap_or(&Value::Ref(None)),
                             &style,
-                            receiver.and_then(expect_ref),
+                            receiver.and_then(expect_ref).map(|x| x.as_str()),
                         )?
                         else {
                             return self

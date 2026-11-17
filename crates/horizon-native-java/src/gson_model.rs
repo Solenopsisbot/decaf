@@ -881,7 +881,8 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(class) = crate::jar_object::object_class(value) {
             if let Some(adapter) = self
                 .gson_type_adapters
-                .values()
+                .get(gson_marker.unwrap_or_default())
+                .into_iter()
                 .flat_map(|v| v.iter())
                 .rev()
                 .find(|(ty, _)| ty == class)
