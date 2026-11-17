@@ -24343,21 +24343,39 @@ impl<H: Host> Runtime<'_, H> {
         }
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("toString", descriptor) if descriptor.ends_with(")Ljava/lang/String;") => {
-                let Some(array) = args.first() else { return Ok(None) };
-                if *array == Value::Ref(None) { return Ok(Some(Value::Ref(Some("null".into())))); }
-                let Some(class) = host_array::exact_class(array) else { return Ok(None) };
-                let values = self.arrays.get(host_array::array_key(array).unwrap()).map(|a| a.values().into_owned()).ok_or_else(|| NativeError::Metadata("array is not owned by this invocation".into()))?;
-                let text = values.iter().map(|value| match value {
-                    Value::Ref(None) => "null".to_owned(),
-                    Value::Ref(Some(text)) => text.clone(),
-                    Value::Int(value) if class.ends_with('Z') => (*value != 0).to_string(),
-                    Value::Int(value) if class.ends_with('C') => char::from_u32(*value as u32).unwrap_or('\u{fffd}').to_string(),
-                    Value::Int(value) => value.to_string(),
-                    Value::Long(value) => value.to_string(),
-                    Value::Float(value) if class.ends_with('F') => format!("{value:?}"),
-                    Value::Float(value) => format!("{value:?}"),
-                    other => format!("{other:?}"),
-                }).collect::<Vec<_>>().join(", ");
+                let Some(array) = args.first() else {
+                    return Ok(None);
+                };
+                if *array == Value::Ref(None) {
+                    return Ok(Some(Value::Ref(Some("null".into()))));
+                }
+                let Some(class) = host_array::exact_class(array) else {
+                    return Ok(None);
+                };
+                let values = self
+                    .arrays
+                    .get(host_array::array_key(array).unwrap())
+                    .map(|a| a.values().into_owned())
+                    .ok_or_else(|| {
+                        NativeError::Metadata("array is not owned by this invocation".into())
+                    })?;
+                let text = values
+                    .iter()
+                    .map(|value| match value {
+                        Value::Ref(None) => "null".to_owned(),
+                        Value::Ref(Some(text)) => text.clone(),
+                        Value::Int(value) if class.ends_with('Z') => (*value != 0).to_string(),
+                        Value::Int(value) if class.ends_with('C') => char::from_u32(*value as u32)
+                            .unwrap_or('\u{fffd}')
+                            .to_string(),
+                        Value::Int(value) => value.to_string(),
+                        Value::Long(value) => value.to_string(),
+                        Value::Float(value) if class.ends_with('F') => format!("{value:?}"),
+                        Value::Float(value) => format!("{value:?}"),
+                        other => format!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 Ok(Some(Value::Ref(Some(format!("[{text}]")))))
             }
             ("copyOf", _) | ("copyOfRange", _) => {
