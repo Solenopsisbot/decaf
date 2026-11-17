@@ -1201,9 +1201,9 @@ impl StdHost {
             ("java/awt/Color", name) => awt_constant(name).map(Ok),
             // Item, block and effect constants answer only in a firing: an
             // entrypoint reading `Items.DIAMOND` keeps the answer it always got.
-            ("net/minecraft/world/item/Items", name) if frame.is_some() => Some(Ok(marker(
-                format!("{}{}", items::ITEM, items::constant_id(name)),
-            ))),
+            ("net/minecraft/world/item/Items", name) if frame.is_some() => {
+                items::constant_id(name).map(|id| Ok(marker(format!("{}{}", items::ITEM, id))))
+            }
             // The id 26.3 registers for the constant (`vanilla_blocks.rs`); a
             // constant 26.3 lacks is no block (#239's review B2).
             ("net/minecraft/world/level/block/Blocks", name) if frame.is_some() => {
@@ -1515,12 +1515,15 @@ impl StdHost {
         }
         // `BuiltInRegistries.ITEM.getKey(item)`: the item's identifier.
         if r.name == "getKey"
+            && (text == "client/registry/minecraft:block_entity_type"
+                || text == "registry/minecraft:block_entity_type")
             && let Some(id) = args
                 .first()
                 .and_then(crate::runtime::game_object::text)
                 .and_then(|a| {
                     a.strip_prefix(items::ITEM)
                         .or_else(|| a.strip_prefix(items::BLOCK))
+                        .or_else(|| a.strip_prefix("client/block_entity_type/"))
                 })
         {
             return Some(Ok(crate::runtime::host_ids::identifier_of_text(id)));

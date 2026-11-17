@@ -1,0 +1,17 @@
+dir0=false
+dir1=true,isDir=true,isReg=false,read=true,sym=false,exec=true
+file=true,isDir=false,isReg=true,read=true,sym=false,exec=false,text=hello
+list=1
+afterDelete=false,not=true
+missing=NoSuchFileException:game/files-vfs/missing.txt
+createNew=FileAlreadyExistsException:game/files-vfs/existing.txt
+append=ab
+truncateMissing=NoSuchFileException:game/files-vfs/truncate.txt
+appendMissing=NoSuchFileException:game/files-vfs/append-missing.txt
+createAppend=ok,text=z
+appendTruncate=IllegalArgumentException:APPEND + TRUNCATE_EXISTING not allowed
+readOption=IllegalArgumentException:READ not allowed
+writeMissing=NoSuchFileException:game/files-vfs/w.txt
+sync=ok
+dsync=ok
+writeExisting=ok

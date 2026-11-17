@@ -293,7 +293,14 @@ impl<H: Host> Runtime<'_, H> {
         match options {
             None => true,
             Some(Value::Ref(None)) => false,
-            Some(value) => self.array(value).is_ok_and(|items| items.is_empty()),
+            Some(value) => self.array(value).is_ok_and(|items| {
+                items.iter().all(|item| match item {
+                    Value::Ref(Some(marker)) => {
+                        marker.contains("java/nio/file/LinkOption/NOFOLLOW_LINKS")
+                    }
+                    _ => false,
+                })
+            }),
         }
     }
 

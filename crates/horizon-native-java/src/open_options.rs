@@ -60,6 +60,10 @@ enum Verdict {
     Throws(NativeError),
     /// The outcome depends on state the model does not keep: count the call.
     Unmodelled,
+    /// `Files.writeString` with options among `CREATE`, `CREATE_NEW`, `APPEND`,
+    /// `TRUNCATE_EXISTING` and `WRITE`: the runtime's `writeString` applies them
+    /// (and counts the in-place overwrite it does not model).
+    WriteStringOptions,
 }
 
 /// Answer a `Files` writer whose options this model checks, or a stream's
@@ -149,9 +153,10 @@ fn invoke_files<H: Host>(
     let Some(elements) = rt.owned_array(options) else {
         return Ok(Some(rt.host.unknown_operand_call(r)?));
     };
-    match check(&elements) {
+    match check(&elements, &r.name) {
         Verdict::Throws(error) => Err(error),
         Verdict::Unmodelled => Ok(Some(rt.host.unknown_operand_call(r)?)),
+        Verdict::WriteStringOptions => rt.invoke_io(r, receiver, args, class, method),
         Verdict::CreateOrTruncate => {
             let opened = rt.invoke_io(r, receiver, args, class, method)?;
             if r.name == "newOutputStream"
@@ -167,7 +172,7 @@ fn invoke_files<H: Host>(
 
 /// Check one option array the way `FileSystemProvider.newOutputStream` and
 /// `UnixChannelFactory` do in JDK 25.
-fn check(elements: &[Value]) -> Verdict {
+fn check(elements: &[Value], method: &str) -> Verdict {
     // An empty array is the default `CREATE, TRUNCATE_EXISTING, WRITE`.
     if elements.is_empty() {
         return Verdict::CreateOrTruncate;
@@ -207,6 +212,8 @@ fn check(elements: &[Value]) -> Verdict {
             Some("APPEND + TRUNCATE_EXISTING not allowed"),
         ));
     }
+    // `WRITE`, `SYNC`, `DSYNC` and `SPARSE` change nothing the model can observe in a
+    // create-or-truncate open.
     let silent = |name: &&str| matches!(*name, "WRITE" | "SYNC" | "DSYNC" | "SPARSE");
     if has("CREATE")
         && has("TRUNCATE_EXISTING")
@@ -215,6 +222,18 @@ fn check(elements: &[Value]) -> Verdict {
             .all(|name| silent(name) || matches!(*name, "CREATE" | "TRUNCATE_EXISTING"))
     {
         return Verdict::CreateOrTruncate;
+    }
+    // `writeString` applies these itself (runtime `Files.writeString`); a stream or any other
+    // option (`SYNC`, `DSYNC`, `SPARSE`, `DELETE_ON_CLOSE`, a custom one) stays counted.
+    if method == "writeString"
+        && names.iter().all(|name| {
+            matches!(
+                *name,
+                "CREATE" | "CREATE_NEW" | "APPEND" | "TRUNCATE_EXISTING" | "WRITE"
+            )
+        })
+    {
+        return Verdict::WriteStringOptions;
     }
     Verdict::Unmodelled
 }

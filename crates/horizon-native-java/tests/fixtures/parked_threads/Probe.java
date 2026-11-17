@@ -10,6 +10,11 @@ public final class Probe {
         }
     }
 
+    public static String nullName() {
+        try { new Thread((String) null); return "ok"; }
+        catch (Throwable t) { return t.getClass().getName() + ":" + t.getMessage(); }
+    }
+
     public static String run() {
         new Thread(new Worker(), "watcher-1").start();
         new Thread(() -> ran = true).start();

@@ -316,6 +316,18 @@ impl StdHost {
         self.brigadier_root_texts(out);
         // A server's saved data (`facade_saved_data.rs`).
         self.saved_data.root_texts(out);
+        // Fabric resource condition types' ids and codecs (`fabric_resource_conditions.rs`).
+        for held in self.fabric_resource_conditions.values() {
+            value(held, out);
+        }
+        // Fabric creative tab builders' and tabs' recorded arguments (`host_creative_tab.rs`).
+        for held in self.creative_tab.values() {
+            value(held, out);
+        }
+        // Fabric biome modifications' ids, selectors and modifiers (`fabric_biome_modifications.rs`).
+        for held in self.fabric_biome_modifications.values() {
+            value(held, out);
+        }
         // NeoForge attachment types and live values (`neoforge_attachments.rs`).
         self.neoforge_attachments.root_texts(out);
         // The objects the loader built and keeps (an entrypoint instance,
@@ -535,6 +547,7 @@ fn heap_entries(heap: &JavaHeap, host: &StdHost) -> usize {
         + host.ranged_attributes.len()
         + host.entity_registration.entry_count()
         + host.tool_material.entry_count()
+        + host.vec2.entry_count()
 }
 
 fn over_count_bound(heap: &JavaHeap) -> bool {
@@ -1062,6 +1075,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     host.map_entries.retain(keep);
     host.entity_registration.retain_keys(keep);
     host.tool_material.retain_keys(keep);
+    host.vec2.retain_keys(keep);
     host.prune_keyed_tables(keep);
     host.render_objects
         .retain(|key, _| render_live.contains(key));
@@ -1704,6 +1718,11 @@ mod tests {
             "imc",
             "entity_registration",
             "tool_material",
+            "fabric_block_api",
+            "fabric_resource_conditions",
+            "creative_tab",
+            "fabric_biome_modifications",
+            "vec2",
         ];
         const HOLDS_NO_OBJECT: &[&str] = &[
             "next_unmodifiable_collection",
@@ -1723,6 +1742,7 @@ mod tests {
             "neoforge_mod_files",
             "run_loader",
             "own_loader_classes",
+            "own_mod_id",
             "fabric_metadata",
             "fabric_origins",
             "environment_type",

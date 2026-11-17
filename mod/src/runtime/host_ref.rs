@@ -615,6 +615,17 @@ pub enum HostKind {
     RegexMatcher,
     /// Vanilla's ItemStackTemplate built by `fromNonEmptyStack` (`host_item_stack_template.rs`).
     ItemStackTemplate,
+    /// Fabric CreativeModeTab builder and built tab handles.
+    CreativeModeTabBuilder,
+    CreativeModeTab,
+    /// Fabric's `BlockApiLookup`, one per (id, API class, context class) (`fabric_block_api.rs`).
+    FabricBlockApiLookup,
+    Url,
+    /// A Fabric `ResourceConditionType` that `create` made (`fabric_resource_conditions.rs`).
+    FabricResourceConditionType,
+    /// A Fabric `BiomeModification` that `BiomeModifications.create` made
+    /// (`fabric_biome_modifications.rs`).
+    FabricBiomeModification,
 }
 
 /// How a kind's Java class follows from its key.
@@ -2654,6 +2665,58 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("net/minecraft/world/item/ItemStackTemplate"),
         canonical: always_canonical,
         methods: &crate::runtime::host_item_stack_template::METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CreativeModeTabBuilder,
+        tag: "cmb",
+        class: ClassRule::Fixed("net/minecraft/world/item/CreativeModeTab$Builder"),
+        canonical: never_canonical,
+        // No overrides: identity `equals`, counted `hashCode`/`toString`.
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CreativeModeTab,
+        tag: "cmt",
+        class: ClassRule::Fixed("net/minecraft/world/item/CreativeModeTab"),
+        canonical: never_canonical,
+        // No overrides: identity `equals`, counted `hashCode`/`toString`.
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricBlockApiLookup,
+        tag: "fbal",
+        class: ClassRule::Fixed("net/fabricmc/fabric/api/lookup/v1/block/BlockApiLookup"),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Url,
+        tag: "url",
+        class: ClassRule::Fixed("java/net/URL"),
+        canonical: never_canonical,
+        methods: &crate::runtime::host_url::URL_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricResourceConditionType,
+        tag: "frct",
+        // The anonymous `ResourceConditionType$1`: surely a `ResourceConditionType`; its exact
+        // class (`getClass`) is counted.
+        class: ClassRule::Unknown {
+            declared: crate::runtime::fabric_resource_conditions::declared_types,
+        },
+        canonical: never_canonical,
+        // It overrides only `id()` and `codec()`: identity `equals`, `hashCode`/`toString`
+        // counted (they print the identity hash).
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricBiomeModification,
+        tag: "fbm",
+        // `create` is `new BiomeModification(id)`, and its constructor is package-private.
+        class: ClassRule::Fixed(crate::runtime::fabric_biome_modifications::MODIFICATION),
+        canonical: never_canonical,
+        // It overrides nothing of `Object`: identity `equals`, `hashCode`/`toString` counted.
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
     },
 ];
 
