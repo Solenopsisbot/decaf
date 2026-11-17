@@ -452,9 +452,15 @@ fn registry_call(
             let Some(id) = args.first().and_then(|value| id_argument(&registry, value)) else {
                 return Some(host.unknown_host_call(r));
             };
-            Some(Ok(Value::Int(i32::from(
-                host.observed_registry_entry(&registry, &id).is_some(),
-            ))))
+            if host.observed_registry_entry(&registry, &id).is_some() {
+                return Some(Ok(Value::Int(1)));
+            }
+            // Built-in registries are only partially observed: an unobserved
+            // vanilla id must remain unknown rather than silently becoming false.
+            if crate::runtime::vanilla_registries::is_built_in(&registry) && id.starts_with("minecraft:") {
+                return Some(host.unknown_host_call(r));
+            }
+            Some(Ok(Value::Int(0)))
         }
         _ => None,
     }
@@ -755,6 +761,24 @@ pub(crate) fn instance_call(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unobserved_vanilla_contains_key_is_counted() {
+        let mut host = StdHost::new();
+        let registry = crate::runtime::host_registry::registry("minecraft:block");
+        let result = host
+            .invoke_instance(
+                &MethodRef {
+                    owner: "net/minecraft/core/Registry".into(),
+                    name: "containsKey".into(),
+                    descriptor: "(Lnet/minecraft/resources/Identifier;)Z".into(),
+                },
+                &registry,
+                &[crate::runtime::host_ids::identifier("minecraft", "stone")],
+            )
+            .unwrap();
+        assert_eq!(result, Value::Ref(None));
+        assert_eq!(host.unknown_host_calls().len(), 1);
+    }
     use super::*;
     use crate::runtime::{Host, MethodRef};
 
