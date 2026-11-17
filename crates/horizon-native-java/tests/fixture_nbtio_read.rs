@@ -1,9 +1,11 @@
 #[path = "support/javac_fixture.rs"] mod javac_fixture;
 const PROBE: &str = include_str!("fixtures/nbtio_read/demo/Probe.java");
+const NBTIO: &str = include_str!("fixtures/nbtio_read/net/minecraft/nbt/NbtIo.java");
+const TAG: &str = include_str!("fixtures/nbtio_read/net/minecraft/nbt/CompoundTag.java");
 const ORACLE: &str = include_str!("fixtures/nbtio_read/java25.txt");
 #[test]
 fn nbtio_rows_match_java() {
- let fixture=javac_fixture::Fixture::build("nbtio-read", &[("demo/Probe.java",PROBE)]);
+ let fixture=javac_fixture::Fixture::build("nbtio-read", &[("demo/Probe.java",PROBE),("net/minecraft/nbt/NbtIo.java",NBTIO),("net/minecraft/nbt/CompoundTag.java",TAG)]);
  let mut host=fixture.jar.seed_host(horizon_native_java::StdHost::new());
  let answer=fixture.jar.invoke_method_with_args("demo/Probe","rows","()Ljava/lang/String;",None,&[],&mut host).unwrap();
  let text=match answer { horizon_native_java::Value::Ref(Some(s))=>s, other=>format!("{other:?}") };
