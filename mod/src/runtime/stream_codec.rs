@@ -238,7 +238,9 @@ fn class_of_value(value: &Value) -> Option<String> {
 
 /// Whether a value is a modeled network codec handle.
 pub(crate) fn is_stream_codec(value: &Value) -> bool {
-    matches!(value, Value::Host(handle) if handle.kind() == HostKind::StreamCodec)
+    matches!(value, Value::Host(handle) if handle.kind() == HostKind::StreamCodec
+        || (handle.kind() == HostKind::OpaqueCodec
+            && handle.key() == STREAM_CODEC))
 }
 
 /// The declared type used by content declarations.
