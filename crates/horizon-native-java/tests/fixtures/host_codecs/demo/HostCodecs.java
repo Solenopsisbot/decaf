@@ -6,8 +6,10 @@ import com.mojang.datafixers.util.Either;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.Lifecycle;
 import com.mojang.serialization.MapCodec;
+import com.mojang.serialization.codecs.RecordCodecBuilder;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.codec.ByteBufCodecs;
+import net.minecraft.resources.Identifier;
 import java.util.*;
 
 /** DataFixerUpper's Pair and the game's codecs as host objects (#156 P5c). */
@@ -160,6 +162,54 @@ public final class HostCodecs {
     return Codec.STRING + "|" + Codec.INT + "|" + Codec.BOOL;
   }
 
+  record One(int a) {}
+  record Three(int a, String b, boolean c) {}
+  record Eight(int a, int b, int c, int d, int e, int f, int g, int h) {}
+  static int throwingGetter(One value) {
+    throw new IllegalStateException("getter");
+  }
+
+  /** Record builders execute their jar callback and retain fields/getters/constructors. */
+  public static String recordConstruction() {
+    Codec<One> one = com.mojang.serialization.codecs.RecordCodecBuilder.create(i ->
+        i.group(Codec.INT.fieldOf("a").forGetter(One::a)).apply(i, One::new));
+    MapCodec<Three> three = com.mojang.serialization.codecs.RecordCodecBuilder.mapCodec(i ->
+        i.group(Codec.INT.fieldOf("a").forGetter(Three::a),
+            Codec.STRING.optionalFieldOf("b", "").forGetter(Three::b),
+            Codec.BOOL.optionalFieldOf("c", true).forGetter(Three::c))
+            .apply(i, Three::new));
+    Codec<Eight> eight = com.mojang.serialization.codecs.RecordCodecBuilder.create(i ->
+        i.group(Codec.INT.fieldOf("a").forGetter(Eight::a),
+            Codec.INT.fieldOf("b").forGetter(Eight::b),
+            Codec.INT.fieldOf("c").forGetter(Eight::c),
+            Codec.INT.fieldOf("d").forGetter(Eight::d),
+            Codec.INT.fieldOf("e").forGetter(Eight::e),
+            Codec.INT.fieldOf("f").forGetter(Eight::f),
+            Codec.INT.fieldOf("g").forGetter(Eight::g),
+            Codec.INT.fieldOf("h").forGetter(Eight::h))
+            .apply(i, Eight::new));
+    MapCodec<Integer> required = Codec.INT.fieldOf("required");
+    MapCodec<?> optional = Codec.INT.optionalFieldOf("optional");
+    MapCodec<Integer> defaulted = Codec.INT.optionalFieldOf("defaulted", 7);
+    Codec<?> list = Codec.INT.listOf();
+    Codec<Integer> mapped = Codec.INT.xmap(x -> x + 1, x -> x - 1);
+    Codec<One> nested = RecordCodecBuilder.create(i ->
+        i.group(one.fieldOf("one").forGetter((One x) -> x)).apply(i, x -> x));
+    Codec<One> throwing = RecordCodecBuilder.create(i ->
+        i.group(Codec.INT.fieldOf("a").forGetter(HostCodecs::throwingGetter)).apply(i, One::new));
+    return (one instanceof Codec) + "|" + (three instanceof MapCodec) + "|" + (eight instanceof Codec)
+        + "|" + (nested instanceof Codec) + "|" + (throwing instanceof Codec)
+        + "|" + required + "|" + optional + "|" + defaulted + "|" + list + "|" + mapped
+        + "|" + (Lifecycle.stable() == Lifecycle.stable()) + "|" + (Lifecycle.experimental() == Lifecycle.experimental())
+        + "|" + Lifecycle.stable() + "|" + Lifecycle.experimental();
+  }
+
+  public static String identifierCodec() {
+    Object first = Identifier.CODEC;
+    Object second = Identifier.CODEC;
+    return (first instanceof Codec) + "|" + (first == second);
+  }
+
   /** A pair is never equal to an object that is not a pair (#199 F4). */
   public static String pairVsJdk() {
     Pair<Integer, String> p = Pair.of(1, "a");
@@ -175,7 +225,7 @@ public final class HostCodecs {
   /** Broad DFU operations are deliberately counted until the execution phase is modelled. */
   public static String countedOperations() {
     int calls = 0;
-    try { Codec.INT.listOf(); } catch (Throwable ignored) {} finally { calls++; }
+    try { Codec.INT.listOf(1, 3); } catch (Throwable ignored) {} finally { calls++; }
     try { ((Codec) Codec.INT).dispatch(null, null); } catch (Throwable ignored) {} finally { calls++; }
     try { ((Codec) Codec.INT).orElse((Codec) Codec.INT); } catch (Throwable ignored) {} finally { calls++; }
     try { Codec.INT.validate(x -> null); } catch (Throwable ignored) {} finally { calls++; }
@@ -338,4 +388,70 @@ public final class HostCodecs {
     System.gc();
     return kept.toString();
   }
+  // One probe per text form, so each is either exact or counted on its own (#410 review).
+  private static com.mojang.serialization.DataResult<Integer> ok(int value) {
+    return com.mojang.serialization.DataResult.success(value);
+  }
+
+  /** `Codec.flatXmap`: the receiver's text and a suffix. */
+  public static String textFlatXmap() {
+    return String.valueOf(Codec.INT.flatXmap(x -> ok(x + 1), x -> ok(x - 1)));
+  }
+
+  /** `Codec.comapFlatMap`. */
+  public static String textComapFlatMap() {
+    return String.valueOf(Codec.INT.comapFlatMap(x -> ok(x + 1), x -> x - 1));
+  }
+
+  /** `MapCodec.xmap` over a field. */
+  public static String textMapXmap() {
+    return String.valueOf(Codec.INT.fieldOf("x").xmap(x -> x + 1, x -> x - 1));
+  }
+
+  /** `MapCodec.flatXmap` over a field. */
+  public static String textMapFlatXmap() {
+    return String.valueOf(Codec.INT.fieldOf("x").flatXmap(x -> ok(x + 1), x -> ok(x - 1)));
+  }
+
+  /** A list codec, and one mapped. */
+  public static String textList() {
+    return Codec.INT.listOf() + "|" + Codec.STRING.listOf().xmap(x -> x, x -> x);
+  }
+
+  /**
+   * A record codec built by `create`, its map codec twin, and that one's `codec()`. Their text
+   * holds a lambda's identity hash, which differs every run, so only its fixed start is read.
+   */
+  public static String textRecord() {
+    Codec<One> created = RecordCodecBuilder.create(i ->
+        i.group(Codec.INT.fieldOf("a").forGetter(One::a)).apply(i, One::new));
+    MapCodec<One> mapped = RecordCodecBuilder.mapCodec(i ->
+        i.group(Codec.INT.fieldOf("a").forGetter(One::a)).apply(i, One::new));
+    String start = "RecordCodec[UnitDecoder[";
+    return created.toString().startsWith(start) + "|" + mapped.toString().startsWith(start)
+        + "|" + mapped.codec().toString().startsWith(start);
+  }
+
+  static int createCalls;
+
+  /** `create` runs its builder callback once, while it is called. */
+  public static String createCounter() {
+    createCalls = 0;
+    Codec<One> codec = RecordCodecBuilder.create(i -> {
+      createCalls++;
+      return i.group(Codec.INT.fieldOf("a").forGetter(One::a)).apply(i, One::new);
+    });
+    return createCalls + "|" + (codec != null);
+  }
+
+  /** Once too when the callback hands back nothing a builder made. */
+  public static String createCounterNull() {
+    createCalls = 0;
+    RecordCodecBuilder.create(x -> { createCalls++; return (App) null; });
+    return Integer.toString(createCalls);
+  }
+
+  public static String createThrows() { try { RecordCodecBuilder.create(x -> { throw new IllegalArgumentException("boom"); }); return "none"; } catch (Throwable t) { return t.getClass().getName() + ":" + t.getMessage(); } }
+  public static String encodeUnknown() { try { Codec.INT.encodeStart(null, 1); } catch (Throwable ignored) {} return "called"; }
+
 }

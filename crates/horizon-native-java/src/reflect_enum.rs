@@ -49,6 +49,8 @@ impl<H: Host> Runtime<'_, H> {
             held_enum
                 .or(jdk_enum)
                 .or_else(|| game_constants.map(|_| true))
+                // A game enum whose constants are not listed: an enum all the same.
+                .or_else(|| crate::game_enum_class(&class).then_some(true))
         };
         if is_enum_query {
             return Ok(known_enum.map(|is_enum| Value::Int(i32::from(is_enum))));

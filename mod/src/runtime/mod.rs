@@ -13138,6 +13138,24 @@ fn marker_id(value: &str) -> Option<String> {
     (lowercase(namespace, b"_.-") && lowercase(path, b"_./-")).then(|| value.to_owned())
 }
 
+/// Game enums whose constants [`game_enum_constants`] does not list. `Class.isEnum` is true
+/// for them (each `extends java.lang.Enum` in the 26.3 jar), and that is all this answers:
+/// their `values()`, `valueOf` and `getEnumConstants` stay counted. Bookshelf asks `isEnum`
+/// of these while it builds codec helpers in class initialization.
+///
+/// They must stay out of `game_enum_constants`: an empty list there answers `values()` with an
+/// empty array and `valueOf` with "No enum constant", where Java has both.
+pub(crate) fn game_enum_class(class: &str) -> bool {
+    matches!(
+        class,
+        "net/minecraft/world/item/Rarity"
+            | "net/minecraft/core/Direction$Plane"
+            | "net/minecraft/world/entity/MobCategory"
+            | "net/minecraft/world/item/DyeColor"
+            | "net/minecraft/world/Difficulty"
+    )
+}
+
 /// Constants of the game enums whose `values()` the host answers.
 ///
 /// Only enums whose declaration order vanilla pins are listed; a mod calling
@@ -13553,6 +13571,15 @@ impl StdHost {
             },
             _ => return self.unknown_host_call(r),
         };
+        if handle.kind() == HostKind::Class
+            && r.name == "isEnum"
+            && r.descriptor == "()Z"
+            && let Some(class) = crate::runtime::host_class::class_name(&Value::Host(handle.clone()))
+            && game_enum_constants(class).is_some()
+        {
+            self.unknown_host_call(r)?;
+            return Ok(Value::Int(1));
+        }
         let answer = match r.name.as_str() {
             // A callback's text: counted, a text answered, never its key.
             "toString" if handle.kind() == HostKind::Callback => {
@@ -14004,7 +14031,7 @@ fn is_codec_type(name: &str) -> bool {
             | "com/mojang/serialization/MapCodec"
             | "com/mojang/serialization/codecs/PrimitiveCodec"
             | "com/mojang/serialization/codecs/RecordCodecBuilder"
-    )
+    ) || name.ends_with("Codec")
 }
 
 fn empty_collection_kind(descriptor: &str) -> Option<&'static str> {

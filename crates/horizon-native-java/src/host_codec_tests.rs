@@ -132,6 +132,11 @@ fn pairs_and_codecs_answer_as_java_25_or_count() {
         ),
         ("pairMaps", Exact("(2, b)|(3, B)|3B|true")),
         (
+            "recordConstruction",
+            Exact(oracle_row("recordConstruction")),
+        ),
+        ("identifierCodec", Exact(oracle_row("identifierCodec"))),
+        (
             "pairSubclass",
             Exact("demo.HostCodecs$SubPair|1|sub|7|own7|true"),
         ),
@@ -189,6 +194,21 @@ fn pairs_and_codecs_answer_as_java_25_or_count() {
             CountedAs(oracle_row("countedOperations")),
         ),
         ("dfuText", Exact(oracle_row("dfuText"))),
+        ("textFlatXmap", Exact(oracle_row("textFlatXmap"))),
+        ("textComapFlatMap", Exact(oracle_row("textComapFlatMap"))),
+        ("textMapXmap", Exact(oracle_row("textMapXmap"))),
+        ("textMapFlatXmap", Exact(oracle_row("textMapFlatXmap"))),
+        ("textList", Exact(oracle_row("textList"))),
+        // A record codec's text holds a lambda's identity hash: counted, never answered.
+        ("textRecord", Counted),
+        ("createCounter", Exact(oracle_row("createCounter"))),
+        // Counted (the callback's result is no product), but still run exactly once.
+        (
+            "createCounterNull",
+            CountedAs(oracle_row("createCounterNull")),
+        ),
+        ("createThrows", Exact(oracle_row("createThrows"))),
+        ("encodeUnknown", CountedAs(oracle_row("encodeUnknown"))),
         (
             "forgedDfuReceiver",
             CountedAs(oracle_row("forgedDfuReceiver")),
