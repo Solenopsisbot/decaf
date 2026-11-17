@@ -204,6 +204,15 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
         return Some(comparator);
     }
     match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+        // JDK 25 Math.toRadians: one correctly-rounded multiplication by the
+        // specified DEGREES_TO_RADIANS constant, including NaN and infinities.
+        ("java/lang/Math", "toRadians", "(D)D") => {
+            let value = args.first().and_then(|v| match v {
+                Value::Float(v) => Some(*v),
+                _ => None,
+            })?;
+            Some(Ok(Value::Float(value * 0.017453292519943295_f64)))
+        }
         // `Modifier`'s predicates over the access flags reflection answers
         // (`Field.getModifiers`): config frameworks check `isPublic`/`isStatic`
         // before they read a field, and the neutral `false` made every field
