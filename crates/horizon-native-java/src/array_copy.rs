@@ -94,6 +94,14 @@ impl<H: Host> Runtime<'_, H> {
             value_class::array_component(dst),
             host_array::array_key(dst),
         ) else {
+            if let Value::Ref(Some(text)) = dst
+                && value_class::is_plain_string(text)
+            {
+                return Err(thrown(
+                    "java/lang/ArrayStoreException",
+                    Some("arraycopy: destination type java.lang.String is not an array".into()),
+                ));
+            }
             return self.host.unknown_operand_call(r).map(Some);
         };
         let src_primitive = PRIMITIVES.contains(&src_component.as_str());
