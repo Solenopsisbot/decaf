@@ -1158,7 +1158,11 @@ impl StdHost {
                 && let Some(state) = self.map_entries.states.get_mut(&entry_key)
             {
                 state.key = key.clone();
-                state.value = if !nulls { Value::Ref(None) } else { value.clone() };
+                state.value = if !nulls {
+                    Value::Ref(None)
+                } else {
+                    value.clone()
+                };
             }
             self.map_entries.set_life(&entry_key, life);
         }

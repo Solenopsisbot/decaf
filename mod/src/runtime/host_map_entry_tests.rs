@@ -191,7 +191,12 @@ fn map_entries_answer_as_java_25_or_count() {
             ),
         ),
         // `Hashtable` removal nulls the detached node value; re-put makes a new node.
-        ("hashtableDetached", Exact(r#"null|java.lang.NullPointerException: Cannot invoke "Object.toString()" because "this.value" is null"#)),
+        (
+            "hashtableDetached",
+            Exact(
+                r#"null|java.lang.NullPointerException: Cannot invoke "Object.toString()" because "this.value" is null"#,
+            ),
+        ),
         // `WeakHashMap`: its nodes.
         (
             "weakEntries",
