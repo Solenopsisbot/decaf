@@ -612,31 +612,6 @@ impl<H: Host> Runtime<'_, H> {
         // A primitive class has no instances; `int.class.isInstance(1)` is
         // false on the JVM too. A host handle answers by its kind's row, an
         // unknown answer counted (`checkcast.rs`).
-        // A Gson tree value or a `LinkedTreeMap` in either form: decided from the class,
-        // whose whole hierarchy `gson_tree` lists, as the `checkcast` path decides it.
-        if let Some(class) = crate::runtime::jar_object::object_class(&value)
-            .filter(|class| {
-                crate::runtime::gson_tree::is_tree(&value) || *class == crate::runtime::gson_tree::TREE_MAP
-            })
-            .map(str::to_owned)
-        {
-            let instance = crate::runtime::gson_tree::class_instance_of(&class, &wanted);
-            if r.name == "isInstance" {
-                return Ok(Some(Value::Int(i32::from(instance))));
-            }
-            if instance || is_null {
-                return Ok(Some(value));
-            }
-            return Err(NativeError::UncaughtException {
-                class: "java/lang/ClassCastException".into(),
-                message: Some(format!(
-                    "Cannot cast {} to {}",
-                    class.replace('/', "."),
-                    wanted.replace('/', ".")
-                )),
-                frame: None,
-            });
-        }
         let instance = match &value {
             Value::Host(handle) if !crate::runtime::jar_object::is_object_handle(handle) => {
                 self.handle_instance_of(handle, &wanted)?

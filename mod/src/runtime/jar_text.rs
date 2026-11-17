@@ -211,6 +211,14 @@ impl<H: Host> Runtime<'_, H> {
                 crate::runtime::stream_pipeline::STREAM_TEXT.into(),
             ))));
         }
+        // A text holding a callback's key (a host collection's marker) is
+        // never printed: counted (`callback_marker.rs`).
+        if crate::runtime::callback_marker::holds_callback(marker) {
+            self.host.unknown_operand_call(&object_to_string())?;
+            return Ok(Some(Value::Ref(Some(
+                crate::runtime::callback_marker::CALLBACK_TEXT.into(),
+            ))));
+        }
         // A host map entry prints `key=value` (`host_entry.rs`).
         if let Some(text) = self.host_entry_text(value, class, method)? {
             return Ok(Some(text));

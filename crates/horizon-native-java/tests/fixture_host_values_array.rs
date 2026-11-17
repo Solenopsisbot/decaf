@@ -393,10 +393,6 @@ const EXACT: &[(&str, &str)] = &[
     // `Arrays.deepToString`/`deepHashCode` are modelled (#250, `object_methods.rs`).
     ("helperDeepToString", "[[1, 2], [3]]"),
     ("helperDeepHashCode", "31809"),
-    // `Arrays.toString` of primitives, and of an `Object[]` of Strings and nulls (#339).
-    ("helperToStringInts", "[1, 2, 3]"),
-    ("helperToStringStrings", "[x, null, z]"),
-    ("helperToStringDoubles", "[1.5, -0.0, NaN]"),
     // Strings spelled like the old markers (`array/...`), the handle text form (`harr:...`) and the new keys (`[I#0`, `color-collection#0`) are Strings: `instanceof String`, `getClass`, `equals`, `hashCode`, a type switch, a cast to `int[]`, `int[].class.isInstance`, list elements and `HashMap` keys.
     (
         "spelled",
@@ -474,6 +470,27 @@ const EXACT: &[(&str, &str)] = &[
 /// checked: it is no Java answer).
 #[allow(clippy::type_complexity)]
 const COUNTED: &[(&str, &str, &[(&str, usize)])] = &[
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperToStringInts",
+        "[1, 2, 3]",
+        &[("java/util/Arrays#toString([I)Ljava/lang/String;", 1)],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperToStringStrings",
+        "[x, null, z]",
+        &[(
+            "java/util/Arrays#toString([Ljava/lang/Object;)Ljava/lang/String;",
+            1,
+        )],
+    ),
+    // Unmodelled on main and here (content based, no identity involved).
+    (
+        "helperToStringDoubles",
+        "[1.5, -0.0, NaN]",
+        &[("java/util/Arrays#toString([D)Ljava/lang/String;", 1)],
+    ),
     // Unmodelled on main and here (content based, no identity involved).
     (
         "helperHashCodeInts",
