@@ -28797,6 +28797,15 @@ impl<H: Host> Runtime<'_, H> {
             .method(method, desc)
             .cloned()
             .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
+        if matches!(receiver.as_ref(), Some(Value::Host(handle)) if handle.kind() == HostKind::LiveGameObject)
+            && method == "isRemoved" && desc == "()Z"
+        {
+            return self.host.invoke_instance(
+                &MethodRef { owner: class.to_owned(), name: method.to_owned(), descriptor: desc.to_owned() },
+                receiver.as_ref().expect("live receiver"),
+                args,
+            );
+        }
         // A game-hook callback's Mixin members on a game object resolve
         // through the host first (`Host::redirect_jar_call`); every other host
         // answers `None` and the body below runs as before.
