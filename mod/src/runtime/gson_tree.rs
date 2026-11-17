@@ -189,6 +189,13 @@ pub(crate) fn instance_of(value: &Value, wanted: &str) -> bool {
     let Some(class) = value_kind(value).and_then(|_| crate::runtime::jar_object::object_class(value)) else {
         return false;
     };
+    class_instance_of(class, wanted)
+}
+
+/// Whether an object of the modelled `class` is a `wanted`: the class itself or one of its
+/// `SUPERTYPES`. For a caller that knows the class without holding a tree object: a
+/// `LinkedTreeMap` is also the map a `fromJson` read hands back, which is no tree marker.
+pub(crate) fn class_instance_of(class: &str, wanted: &str) -> bool {
     class == wanted
         || SUPERTYPES
             .iter()
