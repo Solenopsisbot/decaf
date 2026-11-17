@@ -245,3 +245,8 @@ fn every_string_constructor_is_counted_until_it_is_modelled() {
 }
 
 const JAVA25_CAPTURE: &str = include_str!("fixtures/string_constructors/java25.txt");
+
+#[test]
+fn captured_rows_are_the_java25_oracle() {
+    assert_eq!(JAVA25_CAPTURE, "5|true|true|true|true|true|ab|bc|é|é|sb|");
+}
