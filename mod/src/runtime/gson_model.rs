@@ -592,6 +592,9 @@ impl<H: Host> Runtime<'_, H> {
                     _ => {
                         if r.name == "registerTypeAdapter" {
                             self.check_gson_type_adapter(args)?;
+                            let mut style = self.gson_style(&marker);
+                            style.counted = true;
+                            self.set_gson_style(&marker, style);
                             let type_name = args
                                 .first()
                                 .and_then(crate::runtime::jar_object::object_class)
