@@ -148,6 +148,7 @@ mod host_registry_holder;
 mod host_service;
 mod host_services;
 mod host_type_token;
+mod host_url;
 mod host_watch;
 mod http_client;
 mod immutable_collections;
@@ -8130,6 +8131,9 @@ impl Host for StdHost {
             return value;
         }
         self.record(r, Some(receiver), args);
+        if let Some(v) = host_url::instance_call(r, receiver) {
+            return v;
+        }
         let mut render_objects = std::mem::take(&mut self.render_objects);
         let render_result = render_math::call(self, &mut render_objects, r, receiver, args);
         self.render_objects = render_objects;
@@ -8233,9 +8237,6 @@ impl Host for StdHost {
         if let Some(answer) = self.uuid_member(r, receiver, args) {
             return answer;
         }
-        // A jar's `new URI(text)` is a JDK object no model reads: building it from text
-        // `URI` accepts has no effect to answer, and every member is counted, never its
-        // key (`host_jdk_value.rs`; `URI.create` is the modelled handle).
         if r.owner == "java/net/URI" && jar_object::object_class(receiver) == Some("java/net/URI") {
             if let ("<init>", "(Ljava/lang/String;)V", [Value::Ref(Some(text))]) =
                 (r.name.as_str(), r.descriptor.as_str(), args)

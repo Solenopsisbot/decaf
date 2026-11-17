@@ -617,6 +617,7 @@ pub enum HostKind {
     ItemStackTemplate,
     /// Fabric's `BlockApiLookup`, one per (id, API class, context class) (`fabric_block_api.rs`).
     FabricBlockApiLookup,
+    Url,
 }
 
 /// How a kind's Java class follows from its key.
@@ -2663,6 +2664,13 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("net/fabricmc/fabric/api/lookup/v1/block/BlockApiLookup"),
         canonical: always_canonical,
         methods: &crate::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Url,
+        tag: "url",
+        class: ClassRule::Fixed("java/net/URL"),
+        canonical: never_canonical,
+        methods: &crate::host_url::URL_METHODS,
     },
 ];
 
