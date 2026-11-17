@@ -395,6 +395,16 @@ pub(crate) fn build<H: Host>(
         expect_int(r, StdHost::argument(r, args, index)?)
     };
     let text = match r.descriptor.as_str() {
+        "()V" => Some(String::new()),
+        "(Ljava/lang/String;)V" => match args.first() {
+            Some(Value::Ref(text)) => text.clone(),
+            Some(Value::Host(_)) => None,
+            _ => return Err(thrown("java/lang/NullPointerException", "Cannot invoke \"java.lang.String.length()\" because \"original\" is null".into())),
+        },
+        "(Ljava/lang/StringBuilder;)V" | "(Ljava/lang/StringBuffer;)V" => {
+            let Some(Value::Ref(Some(marker))) = args.first() else { return Ok(None) };
+            runtime.string_builders.get(marker).cloned()
+        }
         "([B)V" | "([BII)V" => {
             return decode_bytes(
                 runtime,
