@@ -402,6 +402,10 @@ pub(crate) fn build<H: Host>(
     }
     let text = match r.descriptor.as_str() {
         "()V" => Some(String::new()),
+        "(Ljava/lang/String;)V" => match args.first() {
+            Some(Value::Ref(Some(text))) => Some(text.clone()),
+            _ => None,
+        },
         "([B)V" | "([BII)V" => {
             return decode_bytes(
                 runtime,

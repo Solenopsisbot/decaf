@@ -156,6 +156,7 @@ fn modelled_constructors_answer_java_25() {
             "NullPointerException:Cannot read field \"value\" because \"original\" is null",
         ),
         ("empty", "0"),
+        ("supplier", "0"),
         ("copy", "xy"),
     ];
     for (name, expected) in cases {
@@ -215,8 +216,6 @@ fn every_string_constructor_is_counted_until_it_is_modelled() {
     let cases = [
         ("hibyte", "([BI)V"),
         ("hibyteRange", "([BIII)V"),
-        ("supplier", "()V"),
-        ("nullCopy", "(Ljava/lang/String;)V"),
         ("builder", "(Ljava/lang/StringBuilder;)V"),
         ("buffer", "(Ljava/lang/StringBuffer;)V"),
         // A `MethodHandle` constructor is counted for every overload
