@@ -1704,6 +1704,7 @@ mod tests {
             "imc",
             "entity_registration",
             "tool_material",
+            "fabric_block_api",
         ];
         const HOLDS_NO_OBJECT: &[&str] = &[
             "next_unmodifiable_collection",

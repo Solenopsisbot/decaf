@@ -615,6 +615,8 @@ pub enum HostKind {
     RegexMatcher,
     /// Vanilla's ItemStackTemplate built by `fromNonEmptyStack` (`host_item_stack_template.rs`).
     ItemStackTemplate,
+    /// Fabric's `BlockApiLookup`, one per (id, API class, context class) (`fabric_block_api.rs`).
+    FabricBlockApiLookup,
 }
 
 /// How a kind's Java class follows from its key.
@@ -2654,6 +2656,13 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("net/minecraft/world/item/ItemStackTemplate"),
         canonical: always_canonical,
         methods: &crate::runtime::host_item_stack_template::METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricBlockApiLookup,
+        tag: "fbal",
+        class: ClassRule::Fixed("net/fabricmc/fabric/api/lookup/v1/block/BlockApiLookup"),
+        canonical: always_canonical,
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
     },
 ];
 
