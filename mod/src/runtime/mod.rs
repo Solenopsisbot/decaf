@@ -10212,6 +10212,7 @@ impl Host for StdHost {
                 && self.iterator_sources.get(marker).is_some_and(|source| {
                     source.starts_with("java/util/Collections$Unmodifiable")
                         || source == "java/util/Collections$SingletonList"
+                        || source.starts_with("fabric/custom-value/")
                 })
             {
                 return Err(NativeError::UncaughtException {
@@ -26446,7 +26447,8 @@ impl<H: Host> Runtime<'_, H> {
             return None;
         }
         // A loader enum whose constants are host handles (`ModConfig.Type`).
-        if let Some(values) = crate::runtime::host_neoforge_loader::enum_values(&r.owner)
+        if let Some(values) = crate::runtime::fabric_mods::enum_values(&r.owner)
+            .or_else(|| crate::runtime::host_neoforge_loader::enum_values(&r.owner))
             .or_else(|| crate::runtime::host_fabric_runtime::enum_values(&r.owner))
             && r.descriptor == format!("()[L{};", r.owner)
         {
@@ -26483,7 +26485,9 @@ impl<H: Host> Runtime<'_, H> {
         if r.name != "valueOf" || r.descriptor != format!("(Ljava/lang/String;)L{};", r.owner) {
             return Ok(None);
         }
-        let Some(constants) = game_enum_constants(&r.owner) else {
+        let Some(constants) =
+            game_enum_constants(&r.owner).or_else(|| crate::runtime::fabric_mods::enum_constants(&r.owner))
+        else {
             return Ok(None);
         };
         let name = match args.first() {
