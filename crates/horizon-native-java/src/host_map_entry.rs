@@ -1159,10 +1159,7 @@ impl StdHost {
                 && let Some(state) = self.map_entries.states.get_mut(&entry_key)
             {
                 state.key = key.clone();
-                state.value = if entry_class(&match &state.handle {
-                    Value::Host(h) => h.key(),
-                    _ => String::new(),
-                }) == "java/util/Hashtable$Entry"
+                state.value = if matches!(&state.handle, Value::Host(h) if entry_class(h.key()) == "java/util/Hashtable$Entry")
                 {
                     Value::Ref(None)
                 } else {
