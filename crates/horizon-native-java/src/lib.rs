@@ -68,6 +68,7 @@ mod executors;
 mod fabric_api_slice2;
 mod fabric_biome_modifications;
 mod fabric_block_api;
+mod fabric_builtin_pack;
 mod fabric_creative_tab;
 mod fabric_mods;
 mod fabric_registry;
@@ -3380,6 +3381,9 @@ pub struct StdHost {
     /// classes, for class precedence (`class_precedence.rs`).
     run_loader: class_precedence::RunLoader,
     own_loader_classes: BTreeSet<String>,
+    /// The running jar's own mod id (its `fabric.mod.json`'s or `neoforge.mods.toml`'s): the one
+    /// container whose files the host holds exactly (`fabric_builtin_pack.rs`).
+    own_mod_id: Option<String>,
     /// Each Fabric jar's own `fabric.mod.json`, by mod id (`fabric_mods.rs`).
     fabric_metadata: BTreeMap<String, serde_json::Value>,
     /// Fabric Loader origin kind and argument for each loaded mod. Direct jars
@@ -3701,6 +3705,7 @@ impl StdHost {
             neoforge_mod_files: BTreeMap::new(),
             run_loader: class_precedence::RunLoader::default(),
             own_loader_classes: BTreeSet::new(),
+            own_mod_id: None,
             fabric_metadata: BTreeMap::new(),
             fabric_origins: BTreeMap::new(),
             environment_type: "CLIENT".into(),
@@ -6733,6 +6738,17 @@ impl Host for StdHost {
     fn invoke(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
         if let Some(value) = fabric_block_api::static_call(&mut self.fabric_block_api, r, args) {
             return value;
+        }
+        // Fabric's `ResourceLoader.registerBuiltinPack` (`fabric_builtin_pack.rs`).
+        match fabric_builtin_pack::register(
+            r,
+            args,
+            self.own_mod_id.as_deref(),
+            self.resources.keys().map(String::as_str),
+        ) {
+            fabric_builtin_pack::Call::Other => {}
+            fabric_builtin_pack::Call::Counted => return self.unknown_host_call(r),
+            fabric_builtin_pack::Call::Answer(made) => return Ok(Value::Int(i32::from(made))),
         }
         if let Some(value) =
             fabric_resource_conditions::static_call(&mut self.fabric_resource_conditions, r, args)
@@ -19694,6 +19710,7 @@ impl NativeJar {
         let _nested = nested_jars::link_nested_jars(&mut host, self);
         host = host.with_run_loader(self.run_loader());
         host.own_loader_classes = self.loader_namespace_classes();
+        host.own_mod_id = self.fabric_id.clone().or_else(|| self.neoforge_id.clone());
         if let Some(id) = self.fabric_id.as_deref().or(self.neoforge_id.as_deref()) {
             let version = self
                 .fabric_version

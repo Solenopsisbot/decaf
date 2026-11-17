@@ -127,6 +127,18 @@ impl Fixture {
         Self::build_packed(test, sources, &[], false, "demo", Some(mod_json), None)
     }
 
+    /// [`Self::build_with_mod_json`], with `extra` `(entry, bytes)` files written into the probe
+    /// jar (a mod's own resources).
+    #[allow(dead_code)]
+    pub fn build_with_mod_json_and_extra(
+        test: &str,
+        sources: &[(&str, &str)],
+        mod_json: &str,
+        extra: &[(&str, &[u8])],
+    ) -> Self {
+        Self::build_packed(test, sources, extra, false, "demo", Some(mod_json), None)
+    }
+
     fn build_jars(
         test: &str,
         sources: &[(&str, &str)],

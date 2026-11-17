@@ -1742,6 +1742,7 @@ mod tests {
             "neoforge_mod_files",
             "run_loader",
             "own_loader_classes",
+            "own_mod_id",
             "fabric_metadata",
             "fabric_origins",
             "environment_type",
