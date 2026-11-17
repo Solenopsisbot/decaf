@@ -8614,7 +8614,9 @@ impl Host for StdHost {
                 return Ok(self.resource_enumeration(name));
             }
         }
-        if r.owner == "java/io/InputStream" || r.owner == "java/io/ByteArrayInputStream" {
+        if (r.owner == "java/io/InputStream" || r.owner == "java/io/ByteArrayInputStream")
+            && expect_ref(receiver).is_some_and(|marker| self.resource_streams.contains_key(marker))
+        {
             let marker = expect_ref(receiver).ok_or_else(|| {
                 NativeError::Metadata("malformed java/io/InputStream marker".into())
             })?;
