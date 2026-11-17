@@ -320,6 +320,14 @@ impl StdHost {
         for held in self.fabric_resource_conditions.values() {
             value(held, out);
         }
+        // Fabric creative tab builders' and tabs' recorded arguments (`host_creative_tab.rs`).
+        for held in self.creative_tab.values() {
+            value(held, out);
+        }
+        // Fabric biome modifications' ids, selectors and modifiers (`fabric_biome_modifications.rs`).
+        for held in self.fabric_biome_modifications.values() {
+            value(held, out);
+        }
         // NeoForge attachment types and live values (`neoforge_attachments.rs`).
         self.neoforge_attachments.root_texts(out);
         // The objects the loader built and keeps (an entrypoint instance,
@@ -1712,6 +1720,8 @@ mod tests {
             "tool_material",
             "fabric_block_api",
             "fabric_resource_conditions",
+            "creative_tab",
+            "fabric_biome_modifications",
             "vec2",
         ];
         const HOLDS_NO_OBJECT: &[&str] = &[
@@ -1732,6 +1742,7 @@ mod tests {
             "neoforge_mod_files",
             "run_loader",
             "own_loader_classes",
+            "own_mod_id",
             "fabric_metadata",
             "fabric_origins",
             "environment_type",

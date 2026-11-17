@@ -400,6 +400,14 @@ impl StdHost {
                     "registerExtensionPoint",
                     "(Ljava/lang/Class;Lnet/neoforged/fml/IExtensionPoint;)V",
                 ) => None,
+                // FML 12.0.12 `ModContainer.registerExtensionPoint(point, supplier)` is
+                // `extensionPoints.put(point, supplier)` into an `IdentityHashMap`, which takes
+                // null keys and values: nothing throws, the supplier is never called, and only
+                // `getCustomExtension` could read it back, which this host counts. So `void` is
+                // the whole answer (`tests/fixtures/neoforge_extension_point/javap_facts.txt`).
+                ("registerExtensionPoint", "(Ljava/lang/Class;Ljava/util/function/Supplier;)V") => {
+                    Some(Value::Void)
+                }
                 _ => None,
             };
         }

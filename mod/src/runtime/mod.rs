@@ -69,7 +69,9 @@ mod enum_value_of;
 pub mod events;
 mod executors;
 mod fabric_api_slice2;
+mod fabric_biome_modifications;
 mod fabric_block_api;
+mod fabric_builtin_pack;
 mod fabric_creative_tab;
 mod fabric_mods;
 mod fabric_registry;
@@ -114,6 +116,7 @@ mod host_codec;
 mod host_collector;
 mod host_component;
 mod host_config;
+mod host_creative_tab;
 #[cfg(test)]
 mod host_defaults_tests;
 mod host_deferred_register;
@@ -3381,6 +3384,9 @@ pub struct StdHost {
     /// classes, for class precedence (`class_precedence.rs`).
     run_loader: class_precedence::RunLoader,
     own_loader_classes: BTreeSet<String>,
+    /// The running jar's own mod id (its `fabric.mod.json`'s or `neoforge.mods.toml`'s): the one
+    /// container whose files the host holds exactly (`fabric_builtin_pack.rs`).
+    own_mod_id: Option<String>,
     /// Each Fabric jar's own `fabric.mod.json`, by mod id (`fabric_mods.rs`).
     fabric_metadata: BTreeMap<String, serde_json::Value>,
     /// Fabric Loader origin kind and argument for each loaded mod. Direct jars
@@ -3643,6 +3649,9 @@ pub struct StdHost {
     fabric_block_api: fabric_block_api::State,
     /// Fabric resource condition types and their registry (`fabric_resource_conditions.rs`).
     fabric_resource_conditions: fabric_resource_conditions::State,
+    creative_tab: host_creative_tab::State,
+    /// Fabric biome modifications and their recorded modifiers (`fabric_biome_modifications.rs`).
+    fabric_biome_modifications: fabric_biome_modifications::State,
     vec2: vec2::State,
 }
 
@@ -3699,6 +3708,7 @@ impl StdHost {
             neoforge_mod_files: BTreeMap::new(),
             run_loader: class_precedence::RunLoader::default(),
             own_loader_classes: BTreeSet::new(),
+            own_mod_id: None,
             fabric_metadata: BTreeMap::new(),
             fabric_origins: BTreeMap::new(),
             environment_type: "CLIENT".into(),
@@ -3810,6 +3820,8 @@ impl StdHost {
             tool_material: tool_material::State::default(),
             fabric_block_api: fabric_block_api::State::default(),
             fabric_resource_conditions: fabric_resource_conditions::State::default(),
+            creative_tab: host_creative_tab::State::default(),
+            fabric_biome_modifications: fabric_biome_modifications::State::default(),
             vec2: vec2::State::default(),
         }
     }
@@ -6730,8 +6742,24 @@ impl Host for StdHost {
         if let Some(value) = fabric_block_api::static_call(&mut self.fabric_block_api, r, args) {
             return value;
         }
+        // Fabric's `ResourceLoader.registerBuiltinPack` (`fabric_builtin_pack.rs`).
+        match fabric_builtin_pack::register(
+            r,
+            args,
+            self.own_mod_id.as_deref(),
+            self.resources.keys().map(String::as_str),
+        ) {
+            fabric_builtin_pack::Call::Other => {}
+            fabric_builtin_pack::Call::Counted => return self.unknown_host_call(r),
+            fabric_builtin_pack::Call::Answer(made) => return Ok(Value::Int(i32::from(made))),
+        }
         if let Some(value) =
             fabric_resource_conditions::static_call(&mut self.fabric_resource_conditions, r, args)
+        {
+            return value;
+        }
+        if let Some(value) =
+            fabric_biome_modifications::static_call(&mut self.fabric_biome_modifications, r, args)
         {
             return value;
         }
@@ -6891,6 +6919,9 @@ impl Host for StdHost {
             return value;
         }
         if let Some(value) = fabric_registry::static_call(r, args) {
+            return value;
+        }
+        if let Some(value) = host_creative_tab::static_call(&mut self.creative_tab, r, args) {
             return value;
         }
         if let Some(value) = fabric_creative_tab::static_call(r, args) {
@@ -8078,6 +8109,11 @@ impl Host for StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Value, NativeError> {
+        if let Some(value) =
+            host_creative_tab::instance_call(&mut self.creative_tab, r, receiver, args)
+        {
+            return value;
+        }
         if let Some(value) = host_item_stack_template::instance_call(r, receiver) {
             return value;
         }
@@ -8228,6 +8264,14 @@ impl Host for StdHost {
         if let Some(value) =
             fabric_resource_conditions::instance_call(&self.fabric_resource_conditions, r, receiver)
         {
+            return value;
+        }
+        if let Some(value) = fabric_biome_modifications::instance_call(
+            &mut self.fabric_biome_modifications,
+            r,
+            receiver,
+            args,
+        ) {
             return value;
         }
         if let Some(value) = fabric_api_slice2::event_call(r, receiver, args) {
@@ -19669,6 +19713,7 @@ impl NativeJar {
         let _nested = nested_jars::link_nested_jars(&mut host, self);
         host = host.with_run_loader(self.run_loader());
         host.own_loader_classes = self.loader_namespace_classes();
+        host.own_mod_id = self.fabric_id.clone().or_else(|| self.neoforge_id.clone());
         if let Some(id) = self.fabric_id.as_deref().or(self.neoforge_id.as_deref()) {
             let version = self
                 .fabric_version
@@ -27597,9 +27642,7 @@ impl<H: Host> Runtime<'_, H> {
         let Value::Host(handle) = value else {
             return None;
         };
-        if handle.kind() != HostKind::Writer
-            || !modelled_writer_class(crate::runtime::jar_object::packaged_object_class(value)?)
-        {
+        if !modelled_writer_class(crate::runtime::jar_object::packaged_object_class(value)?) {
             return None;
         }
         let marker = handle.key_text();
@@ -28119,10 +28162,9 @@ impl<H: Host> Runtime<'_, H> {
                             && descriptor.ends_with(")V")
                             && descriptor.contains("Appendable") =>
                     {
-                        let Some(text) = self.gson_to_json(
+                        let Some(text) = self.gson_to_json_string(
                             args.first().unwrap_or(&Value::Ref(None)),
                             &style,
-                            0,
                         )?
                         else {
                             return self
@@ -28130,10 +28172,6 @@ impl<H: Host> Runtime<'_, H> {
                                 .invoke_instance(r, receiver.unwrap_or(&Value::Ref(None)), args)
                                 .map(Some);
                         };
-                        let text = format!(
-                            "{}{text}",
-                            gson_model::non_executable_prefix(&style).unwrap_or("")
-                        );
                         // The writer is the last argument in every overload:
                         // `toJson(src, writer)` and `toJson(src, typeOfSrc, writer)`.
                         let Some(target) = args

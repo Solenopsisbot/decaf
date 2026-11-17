@@ -22,6 +22,16 @@ static NEXT_CODEC: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Value> {
     let result = format!(")L{STREAM_CODEC};");
     if r.descriptor.ends_with(&result) {
+        if r.owner == "net/minecraft/network/codec/ByteBufCodecs"
+            && ((r.name == "map"
+                && r.descriptor
+                    == "(Ljava/util/function/IntFunction;Lnet/minecraft/network/codec/StreamCodec;Lnet/minecraft/network/codec/StreamCodec;)Lnet/minecraft/network/codec/StreamCodec;")
+                || (r.name == "collection"
+                    && r.descriptor
+                        == "(Ljava/util/function/IntFunction;Lnet/minecraft/network/codec/StreamCodec;)Lnet/minecraft/network/codec/StreamCodec;"))
+        {
+            return Some(codec(&format!("{STREAM_CODEC_PREFIX}4"), args));
+        }
         if r.owner == STREAM_CODEC
             && r.name == "composite"
             && args.len() >= 3

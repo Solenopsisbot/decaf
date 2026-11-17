@@ -1,0 +1,5 @@
+distinctMaps=true
+distinctCollections=true
+mapIsCodec=true
+collectionIsCodec=true
+nullFactory=ok

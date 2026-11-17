@@ -51,6 +51,16 @@ pub(crate) fn instance_call(host: &mut StdHost, r: &MethodRef, receiver: &Value)
                 .unwrap_or_else(|| "minecraft".to_owned());
             Some(host.neoforge_container(&id))
         }
+        // `ModLoadingContext.registerExtensionPoint(point, supplier)` is
+        // `getActiveContainer().registerExtensionPoint(point, supplier)` (the `minecraft` container
+        // when none is active), whose body is an `IdentityHashMap.put`: `void`, as the container's
+        // own call is (`neoforge_loader.rs`).
+        (
+            MOD_LOADING_CONTEXT,
+            MOD_LOADING_CONTEXT,
+            "registerExtensionPoint",
+            "(Ljava/lang/Class;Ljava/util/function/Supplier;)V",
+        ) => Some(Value::Void),
         (
             MOD_LOADING_CONTEXT,
             MOD_LOADING_CONTEXT,
