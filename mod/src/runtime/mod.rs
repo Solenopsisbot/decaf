@@ -28311,11 +28311,17 @@ impl<H: Host> Runtime<'_, H> {
                 // custom naming/exclusion strategy, an adapter, a date format,
                 // ...): every write and read is a counted unknown instead of
                 // text that ignores it.
+                let adapter_hit = args
+                    .first()
+                    .and_then(crate::runtime::jar_object::object_class)
+                    .is_some_and(|class| {
+                        receiver
+                            .and_then(expect_ref)
+                            .and_then(|marker| self.gson_type_adapters.get(marker))
+                            .is_some_and(|adapters| adapters.iter().any(|(ty, _)| ty == class))
+                    });
                 if style.is_counted()
-                    && receiver
-                        .and_then(expect_ref)
-                        .and_then(|marker| self.gson_type_adapters.get(marker))
-                        .is_none_or(|adapters| adapters.is_empty())
+                    && !adapter_hit
                     && matches!(r.name.as_str(), "toJson" | "toJsonTree" | "fromJson")
                 {
                     return self
