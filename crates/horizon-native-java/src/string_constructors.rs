@@ -401,6 +401,7 @@ pub(crate) fn build<H: Host>(
         ));
     }
     let text = match r.descriptor.as_str() {
+        "()V" => Some(String::new()),
         "([B)V" | "([BII)V" => {
             return decode_bytes(
                 runtime,
