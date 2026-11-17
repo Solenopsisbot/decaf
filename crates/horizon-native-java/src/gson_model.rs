@@ -592,20 +592,35 @@ impl<H: Host> Runtime<'_, H> {
                     _ => {
                         if r.name == "registerTypeAdapter" {
                             self.check_gson_type_adapter(args)?;
-                            let type_name = args.first().and_then(crate::jar_object::object_class).map(str::to_owned);
+                            let type_name = args
+                                .first()
+                                .and_then(crate::jar_object::object_class)
+                                .map(str::to_owned);
                             let adapter = args.get(1).cloned();
                             if let (Some(type_name), Some(adapter)) = (type_name, adapter) {
-                                if let Some(adapter_class) = crate::jar_object::object_class(&adapter) {
-                                    if self.class_is_instance(adapter_class, "com/google/gson/TypeAdapter") {
-                                        self.gson_type_adapters.entry(marker.clone()).or_default().push((type_name, adapter));
+                                if let Some(adapter_class) =
+                                    crate::jar_object::object_class(&adapter)
+                                {
+                                    if self.class_is_instance(
+                                        adapter_class,
+                                        "com/google/gson/TypeAdapter",
+                                    ) {
+                                        self.gson_type_adapters
+                                            .entry(marker.clone())
+                                            .or_default()
+                                            .push((type_name, adapter));
                                     }
-                        // Keep every registration counted until callback dispatch can prove an exact write.
-                        let mut style = self.gson_style(&marker);
-                        style.counted = true;
-                        self.set_gson_style(&marker, style);
+                                    // Keep every registration counted until callback dispatch can prove an exact write.
+                                    let mut style = self.gson_style(&marker);
+                                    style.counted = true;
+                                    self.set_gson_style(&marker, style);
                                 }
                             }
-                        } else { let mut style = self.gson_style(&marker); style.counted = true; self.set_gson_style(&marker, style); }
+                        } else {
+                            let mut style = self.gson_style(&marker);
+                            style.counted = true;
+                            self.set_gson_style(&marker, style);
+                        }
                     }
                 }
                 answer()
@@ -847,7 +862,14 @@ impl<H: Host> Runtime<'_, H> {
         let _level = crate::host_recursion::enter()?;
         // Exact registered TypeAdapter dispatch precedes reflective serialization.
         if let Some(class) = crate::jar_object::object_class(value) {
-            if let Some(adapter) = self.gson_type_adapters.values().flat_map(|v| v.iter()).rev().find(|(ty, _)| ty == class).map(|(_, adapter)| adapter.clone()) {
+            if let Some(adapter) = self
+                .gson_type_adapters
+                .values()
+                .flat_map(|v| v.iter())
+                .rev()
+                .find(|(ty, _)| ty == class)
+                .map(|(_, adapter)| adapter.clone())
+            {
                 let sink = format!("mem:gson-adapter-{depth}");
                 self.io_writers.insert(sink.clone(), String::new());
                 let writer = self.new_object("com/google/gson/stream/JsonWriter");
@@ -855,9 +877,19 @@ impl<H: Host> Runtime<'_, H> {
                     let mut state = gson_writer::State::new(sink.clone());
                     state.apply_tree_style(&style.tree_style());
                     self.gson_writers.insert(wm.clone(), state);
-                    let Some(ac) = crate::jar_object::object_class(&adapter) else { return Ok(None); };
-                    let result = self.invoke(ac, "write", "(Lcom/google/gson/stream/JsonWriter;Ljava/lang/Object;)V", Some(adapter.clone()), &[writer, value.clone()]);
-                    if result.is_err() { return Ok(None); }
+                    let Some(ac) = crate::jar_object::object_class(&adapter) else {
+                        return Ok(None);
+                    };
+                    let result = self.invoke(
+                        ac,
+                        "write",
+                        "(Lcom/google/gson/stream/JsonWriter;Ljava/lang/Object;)V",
+                        Some(adapter.clone()),
+                        &[writer, value.clone()],
+                    );
+                    if result.is_err() {
+                        return Ok(None);
+                    }
                     return Ok(self.io_writers.get(&sink).cloned());
                 }
                 return Ok(None);
