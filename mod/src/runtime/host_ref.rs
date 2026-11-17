@@ -615,6 +615,9 @@ pub enum HostKind {
     RegexMatcher,
     /// Vanilla's ItemStackTemplate built by `fromNonEmptyStack` (`host_item_stack_template.rs`).
     ItemStackTemplate,
+    /// Fabric CreativeModeTab builder and built tab handles.
+    CreativeModeTabBuilder,
+    CreativeModeTab,
     /// Fabric's `BlockApiLookup`, one per (id, API class, context class) (`fabric_block_api.rs`).
     FabricBlockApiLookup,
     Url,
@@ -2659,6 +2662,22 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Fixed("net/minecraft/world/item/ItemStackTemplate"),
         canonical: always_canonical,
         methods: &crate::runtime::host_item_stack_template::METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CreativeModeTabBuilder,
+        tag: "cmb",
+        class: ClassRule::Fixed("net/minecraft/world/item/CreativeModeTab$Builder"),
+        canonical: never_canonical,
+        // No overrides: identity `equals`, counted `hashCode`/`toString`.
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::CreativeModeTab,
+        tag: "cmt",
+        class: ClassRule::Fixed("net/minecraft/world/item/CreativeModeTab"),
+        canonical: never_canonical,
+        // No overrides: identity `equals`, counted `hashCode`/`toString`.
+        methods: &crate::runtime::host_events::DECLARED_TYPE_METHODS,
     },
     KindInfo {
         kind: HostKind::FabricBlockApiLookup,

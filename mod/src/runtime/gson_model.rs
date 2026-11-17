@@ -956,6 +956,11 @@ impl<H: Host> Runtime<'_, H> {
         let mut first = true;
         for pair in values.chunks(2) {
             let (key, value) = (pair[0].clone(), pair[1].clone());
+            // Gson's map adapter writes the name, then `JsonWriter.nullValue()` (and the tree
+            // writer's `put`) drops that deferred name unless `serializeNulls`: the entry is gone.
+            if !style.serialize_nulls() && matches!(value, Value::Ref(None)) {
+                continue;
+            }
             if !first {
                 out.push(',');
                 if style.formatting.space_after_separators && style.formatting.newline.is_empty() {
@@ -975,6 +980,11 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(None);
             };
             out.push_str(&text);
+        }
+        // Every entry dropped: `endObject` on an object with no name written is `{}`, with no
+        // line break even when pretty printing.
+        if first {
+            return Ok(Some("{}".into()));
         }
         out.push_str(&style.line(depth));
         out.push('}');
