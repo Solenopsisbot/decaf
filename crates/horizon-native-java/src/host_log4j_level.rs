@@ -46,8 +46,7 @@ fn level_value(name: &str, int_level: i32) -> Value {
     ))
 }
 
-pub(crate) fn level_parts(value: &Value) -> Option<(String, i32)> {
-
+fn level_parts(value: &Value) -> Option<(String, i32)> {
     let Value::Host(handle) = value else {
         return None;
     };
@@ -59,8 +58,6 @@ pub(crate) fn level_parts(value: &Value) -> Option<(String, i32)> {
         _ => None,
     }
 }
-
-pub(crate) fn level_int(value: &Value) -> Option<i32> { level_parts(value).map(|(_, int)| int) }
 
 fn standard(name: &str) -> Option<(&'static str, i32)> {
     let normalized = name.trim().to_uppercase();
