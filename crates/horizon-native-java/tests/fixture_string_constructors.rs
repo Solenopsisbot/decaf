@@ -54,6 +54,7 @@ public final class Ctors {
   public static String empty() { return "" + new String().length(); }
   // "xy"
   public static String copy() { return new String("xy"); }
+  public static String nullCopy() { return attempt(() -> new String((String) null)); }
   // "sb"
   public static String builder() { return new String(new StringBuilder("sb")); }
   // "bf"
@@ -150,6 +151,13 @@ fn modelled_constructors_answer_java_25() {
         ("bytesRangeCharset", "bc"),
         ("bytesName", "ab"),
         ("bytesRangeName", "ab"),
+        ("supplier", "0"),
+        (
+            "nullCopy",
+            "NullPointerException:Cannot read field \"value\" because \"original\" is null",
+        ),
+        ("empty", "0"),
+        ("copy", "xy"),
     ];
     for (name, expected) in cases {
         let mut host = StdHost::new();
@@ -207,9 +215,6 @@ fn every_string_constructor_is_counted_until_it_is_modelled() {
     // (method, the constructor descriptor it must be counted under)
     let cases = [
         ("hibyte", "([BI)V"),
-        ("empty", "()V"),
-        ("copy", "(Ljava/lang/String;)V"),
-        ("supplier", "()V"),
         ("hibyteRange", "([BIII)V"),
         ("builder", "(Ljava/lang/StringBuilder;)V"),
         ("buffer", "(Ljava/lang/StringBuffer;)V"),
