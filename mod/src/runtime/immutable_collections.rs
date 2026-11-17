@@ -781,6 +781,13 @@ impl<H: Host> Runtime<'_, H> {
     /// (`HostRef::same_object`). Where it is known, the host's equality
     /// answer is the identity answer: unequal values are different objects,
     /// and an equal handle that is the same object is a hit.
+    ///
+    /// Strings deliberately stay conservative here. Their text is all the
+    /// host retains, so an equal-text key may be the same interned literal or
+    /// a distinct object. We count the operation whenever an equal-text key
+    /// is present, including the known loss where two equal literals would be
+    /// the same object on Java. Step 2 can use provenance to recover that
+    /// case.
     fn identity_unknown(&self, a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Host(left), Value::Host(right)) => left.same_object(right).is_none(),
