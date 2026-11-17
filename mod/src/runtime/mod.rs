@@ -272,6 +272,7 @@ mod vanilla_block_items;
 mod vanilla_blocks;
 mod vanilla_holders;
 mod vanilla_holders_table;
+mod vanilla_items;
 mod vanilla_registries;
 mod vanilla_registry_keys;
 mod vanilla_values;
