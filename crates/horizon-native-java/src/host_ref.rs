@@ -2662,32 +2662,17 @@ const KINDS: &[KindInfo] = &[
 static LIVE_GAME_OBJECT_METHODS: Methods = Methods {
     to_string: |_, _| Ok(None),
     hash_code: |_, _| Ok(None),
-    equals: |handle, other, _| Ok(handle.same_object(other)),
-    instance_of: |handle, wanted, _| {
-        live_declared(handle.key_text())
-            .iter()
-            .any(|c| c == wanted)
-            .then_some(true)
-    },
+    equals: |handle, other, _| match other { Value::Host(other) => Ok(handle.same_object(other)), _ => Ok(Some(false)) },
+    instance_of: |handle, wanted, _| live_declared(handle.key_text()).iter().any(|c| *c == wanted).then_some(true),
     crosses_jars: |_, _| true,
     compare_to: None,
 };
 
-fn live_declared(key: &str) -> Vec<String> {
+fn live_declared(key: &str) -> &'static [&'static str] {
     match key.split(':').next().unwrap_or("") {
-        "ServerPlayer" => [
-            "net/minecraft/server/level/ServerPlayer",
-            "net/minecraft/world/entity/player/Player",
-            "net/minecraft/world/entity/LivingEntity",
-            "net/minecraft/world/entity/Entity",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect(),
-        "AbstractContainerMenu" => {
-            vec!["net/minecraft/world/inventory/AbstractContainerMenu".to_owned()]
-        }
-        _ => Vec::new(),
+        "ServerPlayer" => &["net/minecraft/server/level/ServerPlayer", "net/minecraft/world/entity/player/Player", "net/minecraft/world/entity/LivingEntity", "net/minecraft/world/entity/Entity"],
+        "AbstractContainerMenu" => &["net/minecraft/world/inventory/AbstractContainerMenu"],
+        _ => &[],
     }
 }
 
