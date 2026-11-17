@@ -395,23 +395,6 @@ pub(crate) fn build<H: Host>(
         expect_int(r, StdHost::argument(r, args, index)?)
     };
     let text = match r.descriptor.as_str() {
-        "()V" => Some(String::new()),
-        "(Ljava/lang/String;)V" => match args.first() {
-            Some(Value::Ref(Some(text))) => Some(text.clone()),
-            Some(Value::Ref(None)) => {
-                return Err(thrown(
-                    "java/lang/NullPointerException",
-                    r#"Cannot read field "value" because "original" is null"#.into(),
-                ));
-            }
-            Some(Value::Host(_)) => None,
-            _ => {
-                return Err(thrown(
-                    "java/lang/NullPointerException",
-                    r#"Cannot read field "value" because "original" is null"#.into(),
-                ));
-            }
-        },
         "([B)V" | "([BII)V" => {
             return decode_bytes(
                 runtime,
