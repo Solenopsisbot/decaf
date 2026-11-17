@@ -1,0 +1,9 @@
+CHEST=minecraft:chest
+TRAPPED_CHEST=minecraft:trapped_chest
+ENDER_CHEST=minecraft:ender_chest
+SIGN=minecraft:sign
+ENCHANTING_TABLE=minecraft:enchanting_table
+SHULKER_BOX=minecraft:shulker_box
+LECTERN=minecraft:lectern
+BELL=minecraft:bell
+DECORATED_POT=minecraft:decorated_pot

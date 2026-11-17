@@ -431,6 +431,12 @@ fn registry_call(
             let Some(value) = args.first() else {
                 return Some(host.unknown_host_call(r));
             };
+            if registry == "minecraft:block_entity_type"
+                && let Some(id) = crate::runtime::game_object::text(value)
+                && let Some(id) = id.strip_prefix("client/block-entity-type/")
+            {
+                return Some(Ok(host_ids::identifier_of_text(id)));
+            }
             let Some(entry) = host
                 .registrations()
                 .iter()
