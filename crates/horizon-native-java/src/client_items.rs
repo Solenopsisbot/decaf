@@ -238,8 +238,8 @@ fn effect_holder_id(value: &Value) -> Option<String> {
 
 /// `Items.DIAMOND_SWORD` → `minecraft:diamond_sword`: every vanilla item and
 /// block constant is its id's path in upper case.
-pub(super) fn constant_id(field: &str) -> String {
-    format!("minecraft:{}", field.to_ascii_lowercase())
+pub(super) fn constant_id(field: &str) -> Option<String> {
+    crate::vanilla_items::field_id(field)
 }
 
 /// `MobEffects.SPEED` → `minecraft:speed`; the constants whose 26.3 id is

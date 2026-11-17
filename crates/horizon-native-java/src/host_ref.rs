@@ -623,6 +623,9 @@ pub enum HostKind {
     Url,
     /// A Fabric `ResourceConditionType` that `create` made (`fabric_resource_conditions.rs`).
     FabricResourceConditionType,
+    /// A Fabric `BiomeModification` that `BiomeModifications.create` made
+    /// (`fabric_biome_modifications.rs`).
+    FabricBiomeModification,
 }
 
 /// How a kind's Java class follows from its key.
@@ -2704,6 +2707,15 @@ const KINDS: &[KindInfo] = &[
         canonical: never_canonical,
         // It overrides only `id()` and `codec()`: identity `equals`, `hashCode`/`toString`
         // counted (they print the identity hash).
+        methods: &crate::host_events::DECLARED_TYPE_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricBiomeModification,
+        tag: "fbm",
+        // `create` is `new BiomeModification(id)`, and its constructor is package-private.
+        class: ClassRule::Fixed(crate::fabric_biome_modifications::MODIFICATION),
+        canonical: never_canonical,
+        // It overrides nothing of `Object`: identity `equals`, `hashCode`/`toString` counted.
         methods: &crate::host_events::DECLARED_TYPE_METHODS,
     },
 ];
