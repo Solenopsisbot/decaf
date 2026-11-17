@@ -52,13 +52,6 @@ const COUNTED: &[(&str, &[&str])] = &[
     ),
     ("cmpHashCodeText", &["java/lang/Object#hashCode()I"]),
     (
-        "cmpArraysSort",
-        &[
-            "java/util/Arrays#sort([Ljava/lang/Object;Ljava/util/Comparator;)V",
-            "java/util/Arrays#toString([Ljava/lang/Object;)Ljava/lang/String;",
-        ],
-    ),
-    (
         "cmpMax",
         &[
             "java/util/Collections#max(Ljava/util/Collection;Ljava/util/Comparator;)Ljava/lang/Object;",
@@ -77,8 +70,6 @@ const DEPARTURES: &[(&str, &str)] = &[
     // A comparator's `hashCode` is its identity hash: counted, so two
     // answer alike.
     ("cmpHashCodeText", "true,false,false"),
-    // `Arrays.sort(T[], Comparator)` is not modelled: counted.
-    ("cmpArraysSort", "null|"),
     // `Collections.max(coll, Comparator)` is not modelled: counted.
     ("cmpMax", "null,ccc,a|"),
 ];
