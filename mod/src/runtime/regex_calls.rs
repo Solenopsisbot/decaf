@@ -95,6 +95,35 @@ impl<H: Host> Runtime<'_, H> {
                     Err(_) => Ok(None),
                 }
             }
+            // `pattern.matcher(input)` makes a new `Matcher` holding the pattern
+            // text and the input; of its methods only `matches()` is answered
+            // (JEI validates config names with
+            // `CONFIG_NAME_PATTERN.matcher(name).matches()`). Every other
+            // `Matcher` method, and a pattern or input the engine cannot run
+            // exactly, is counted.
+            (
+                "java/util/regex/Pattern",
+                "matcher",
+                "(Ljava/lang/CharSequence;)Ljava/util/regex/Matcher;",
+            ) => {
+                let (Some(pattern), Some(input)) = (
+                    receiver.and_then(crate::runtime::host_jdk_constant::pattern_text),
+                    args.first().and_then(|value| self.char_sequence(value)),
+                ) else {
+                    return Ok(None);
+                };
+                Ok(Some(crate::runtime::host_jdk_constant::matcher(&pattern, &input)))
+            }
+            ("java/util/regex/Matcher", "matches", "()Z") => {
+                let Some((pattern, input)) =
+                    receiver.and_then(crate::runtime::host_jdk_constant::matcher_parts)
+                else {
+                    return Ok(None);
+                };
+                Ok(java_regex::matches(&pattern, &input)
+                    .ok()
+                    .map(|matched| Value::Int(i32::from(matched))))
+            }
             ("java/util/regex/Pattern", "quote", "(Ljava/lang/String;)Ljava/lang/String;") => {
                 Ok(text(0).map(|value| Value::Ref(Some(java_regex::quote(&value)))))
             }
