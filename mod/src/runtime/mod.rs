@@ -14432,10 +14432,24 @@ fn iterated_kind(marker: &str) -> Option<String> {
 }
 
 fn host_collection_values(host: &StdHost, value: &Value) -> Result<Vec<Value>, NativeError> {
-    host.mutable_values(value).map_or_else(
+    let mut values = host.mutable_values(value).map_or_else(
         || not_a_collection(value).map_err(|error| host_call_context(host, error)),
         Ok,
-    )
+    )?;
+    // EnumMap iterates by enum ordinal, independently of insertion order. The
+    // host knows ordinals for jar enums and the game enums listed by
+    // `game_enum_constants`; unknown enum classes retain their host order.
+    if expect_ref(value)
+        .and_then(|marker| marker.split_once('#').map(|(class, _)| class))
+        == Some("java/util/EnumMap")
+    {
+        let mut pairs = values.as_chunks::<2>().0.to_vec();
+        if pairs.iter().all(|pair| host.enum_ordinal_of(&pair[0]).is_some()) {
+            pairs.sort_by_key(|pair| host.enum_ordinal_of(&pair[0]).unwrap_or_default());
+            values = pairs.into_iter().flatten().collect();
+        }
+    }
+    Ok(values)
 }
 
 /// The same read through the generic `Host` boundary, for interpreter helpers
