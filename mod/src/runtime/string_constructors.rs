@@ -402,7 +402,7 @@ pub(crate) fn build<H: Host>(
             _ => {
                 return Err(thrown(
                     "java/lang/NullPointerException",
-                    "Cannot invoke \"java.lang.String.length()\" because \"original\" is null"
+                    "Cannot read field "value" because "original" is null"
                         .into(),
                 ));
             }
