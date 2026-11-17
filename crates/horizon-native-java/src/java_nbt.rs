@@ -378,6 +378,19 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        if r.owner == "net/minecraft/nbt/NbtIo"
+            && r.name == "read"
+            && r.descriptor == "(Ljava/nio/file/Path;)Lnet/minecraft/nbt/CompoundTag;"
+        {
+            let Some(path) = args.first().and_then(expect_ref) else {
+                return Ok(None);
+            };
+            let display = path.strip_prefix("path:").unwrap_or(path);
+            let canonical = crate::host_path::sandbox_canonical(display);
+            let present = self.io_files.contains_key(&canonical)
+                || crate::library_dispatch::resource_text(self.host, canonical.trim_start_matches('/')).is_some();
+            return Ok((!present).then_some(Value::Ref(None)));
+        }
         if r.owner != COMPOUND_TAG && r.owner != TAG {
             return Ok(None);
         }
