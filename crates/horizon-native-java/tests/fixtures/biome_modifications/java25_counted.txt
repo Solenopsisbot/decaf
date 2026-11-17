@@ -1,0 +1,3 @@
+nullSelector=NullPointerException
+nullModifier=NullPointerException
+nullContextModifier=NullPointerException

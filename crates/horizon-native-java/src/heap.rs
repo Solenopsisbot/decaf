@@ -320,6 +320,10 @@ impl StdHost {
         for held in self.fabric_resource_conditions.values() {
             value(held, out);
         }
+        // Fabric biome modifications' ids, selectors and modifiers (`fabric_biome_modifications.rs`).
+        for held in self.fabric_biome_modifications.values() {
+            value(held, out);
+        }
         // Fabric creative tab builders' and tabs' recorded arguments (`host_creative_tab.rs`).
         for held in self.creative_tab.values() {
             value(held, out);
@@ -1716,6 +1720,7 @@ mod tests {
             "tool_material",
             "fabric_block_api",
             "fabric_resource_conditions",
+            "fabric_biome_modifications",
             "creative_tab",
             "vec2",
         ];
