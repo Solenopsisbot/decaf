@@ -938,6 +938,13 @@ impl StdHost {
                 Err(unsupported(Some("not supported")))
             }
             Life::Fixed | Life::Wrapped { .. } => Err(unsupported(None)),
+            Life::Detached if entry_class(handle.key()) == "java/util/Hashtable$Entry" && value == Value::Ref(None) => {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/NullPointerException".into(),
+                    message: None,
+                    frame: None,
+                });
+            }
             Life::Detached => {
                 let states = &mut self.map_entries.states;
                 let state = states.get_mut(handle.key()).expect("found above");
