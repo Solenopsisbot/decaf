@@ -1,10 +1,1 @@
-instanceof Player=true
-instanceof LivingEntity=true
-instanceof Entity=true
-player identity == true
-isRemoved before=false
-isRemoved after=true
-hashCode=unknown_host_call
-getClass=unknown_host_call
-getX=unknown_host_call
-write=unknown_host_call
+true|true|true|true|false|0|null||unknown_host_call|unknown_host_call
