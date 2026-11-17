@@ -1,0 +1,8 @@
+same=true
+id=demo:energy
+api=demo.Probe$Energy
+context=net.minecraft.core.Direction
+otherApi=java.lang.IllegalArgumentException:Lookup with id demo:energy is already registered with api class demo.Probe.Energy and context class net.minecraft.core.Direction. It can't be registered with api class demo.Probe.Fluid and context class net.minecraft.core.Direction.
+otherContext=java.lang.IllegalArgumentException:Lookup with id demo:energy is already registered with api class demo.Probe.Energy and context class net.minecraft.core.Direction. It can't be registered with api class demo.Probe.Energy and context class java.lang.Void.
+fallbackNull=java.lang.NullPointerException:BlockApiProvider may not be null.
+fallback=ok
