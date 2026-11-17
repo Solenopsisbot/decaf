@@ -390,7 +390,7 @@ impl GsonStyle {
     /// compact style.
     fn line(&self, depth: usize) -> String {
         if self.formatting.newline.is_empty() {
-            String::new()
+            self.formatting.indent.repeat(depth)
         } else {
             format!(
                 "{}{}",
@@ -922,6 +922,9 @@ impl<H: Host> Runtime<'_, H> {
         for (index, value) in values.iter().enumerate() {
             if index > 0 {
                 out.push(',');
+                if style.formatting.space_after_separators && style.formatting.newline.is_empty() {
+                    out.push(' ');
+                }
             }
             out.push_str(&style.line(depth + 1));
             let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode)? else {
@@ -955,6 +958,9 @@ impl<H: Host> Runtime<'_, H> {
             let (key, value) = (pair[0].clone(), pair[1].clone());
             if !first {
                 out.push(',');
+                if style.formatting.space_after_separators && style.formatting.newline.is_empty() {
+                    out.push(' ');
+                }
             }
             first = false;
             out.push_str(&style.line(depth + 1));
@@ -1025,6 +1031,9 @@ impl<H: Host> Runtime<'_, H> {
         for (index, (name, value)) in members.iter().enumerate() {
             if index > 0 {
                 out.push(',');
+                if style.formatting.space_after_separators && style.formatting.newline.is_empty() {
+                    out.push(' ');
+                }
             }
             out.push_str(&style.line(depth + 1));
             out.push('"');
