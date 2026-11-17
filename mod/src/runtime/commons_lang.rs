@@ -172,7 +172,7 @@ pub(crate) fn runtime_call<H: Host>(
         let Some(values) = args.get(2) else {
             return Ok(None);
         };
-        let Some(message) = runtime.java_format(None, format, values) else {
+        let Some(message) = runtime.java_format(None, format, values)? else {
             return Ok(None);
         };
         return Err(invalid(message));

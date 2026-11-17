@@ -61,40 +61,76 @@ pub(crate) enum Arg {
 ///
 /// `args` is `None` for a `null` `Object[]`, which Java formats as if every
 /// argument were `null`.
+#[cfg(test)]
 pub(crate) fn format(format: &str, args: Option<&[Arg]>) -> Option<String> {
-    let mut output = String::with_capacity(format.len());
+    format_with(format, args.is_some(), &mut |index, _| {
+        Ok::<_, ()>(args.and_then(|values| values.get(index).cloned()))
+    })
+    .ok()
+    .flatten()
+}
+
+pub(crate) fn format_with<E>(
+    format: &str,
+    has_args: bool,
+    resolve: &mut dyn FnMut(usize, char) -> Result<Option<Arg>, E>,
+) -> Result<Option<String>, E> {
+    enum Part<'a> {
+        Text(&'a str),
+        Spec(Spec),
+    }
+    let mut parts = Vec::new();
     let mut rest = format;
-    // The JDK's `last` (the argument `<` reuses) and `lasto` (the ordinary
-    // index), both zero-based; `None` before the first argument.
+    while let Some(percent) = rest.find('%') {
+        parts.push(Part::Text(&rest[..percent]));
+        let (spec, after) = match Spec::parse(&rest[percent + 1..]) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        parts.push(Part::Spec(spec));
+        rest = after;
+    }
+    parts.push(Part::Text(rest));
+    let mut output = String::with_capacity(format.len());
     let mut last: Option<usize> = None;
     let mut ordinary: Option<usize> = None;
-    while let Some(percent) = rest.find('%') {
-        output.push_str(&rest[..percent]);
-        let (spec, after) = Spec::parse(&rest[percent + 1..])?;
-        rest = after;
-        if matches!(spec.conversion, '%' | 'n') {
-            output.push_str(&spec.print_text()?);
-            continue;
-        }
-        let index = match spec.index {
-            Index::Ordinary => {
-                let next = ordinary.map_or(0, |index| index + 1);
-                ordinary = Some(next);
-                next
+    for part in parts {
+        match part {
+            Part::Text(text) => output.push_str(text),
+            Part::Spec(spec) if matches!(spec.conversion, '%' | 'n') => match spec.print_text() {
+                Some(text) => output.push_str(&text),
+                None => return Ok(None),
+            },
+            Part::Spec(spec) => {
+                let index = match spec.index {
+                    Index::Ordinary => {
+                        let next = ordinary.map_or(0, |i| i + 1);
+                        ordinary = Some(next);
+                        next
+                    }
+                    Index::Explicit(index) => index,
+                    Index::Previous => match last {
+                        Some(index) => index,
+                        None => return Ok(None),
+                    },
+                };
+                last = Some(index);
+                let arg = if has_args {
+                    match resolve(index, spec.conversion)? {
+                        Some(arg) => arg,
+                        None => return Ok(None),
+                    }
+                } else {
+                    Arg::Null
+                };
+                output.push_str(&match spec.print(&arg) {
+                    Some(text) => text,
+                    None => return Ok(None),
+                });
             }
-            Index::Explicit(index) => index,
-            Index::Previous => last?,
-        };
-        last = Some(index);
-        let null = Arg::Null;
-        let arg = match args {
-            Some(args) => args.get(index)?,
-            None => &null,
-        };
-        output.push_str(&spec.print(arg)?);
+        }
     }
-    output.push_str(rest);
-    Some(output)
+    Ok(Some(output))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
