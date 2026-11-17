@@ -288,6 +288,14 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
                 _ => None,
             }
         }
+        (
+            "org/apache/logging/log4j/LogManager",
+            "getLogger",
+            "(Ljava/lang/String;Lorg/apache/logging/log4j/message/MessageFactory;)Lorg/apache/logging/log4j/Logger;",
+        ) => match args.first() {
+            Some(Value::Ref(Some(name))) => Some(Ok(logger_value("log4j-factory", name))),
+            _ => None,
+        },
         ("org/apache/logging/log4j/LogManager", "getRootLogger", _) => {
             Some(Ok(logger_value("log4j", "")))
         }
