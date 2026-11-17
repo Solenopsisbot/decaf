@@ -215,6 +215,7 @@ mod owned_class;
 mod parked_threads;
 mod server_values;
 mod tool_material;
+mod vanilla_vec2;
 mod vanilla_entity_data_pool;
 /// A live callback token for tests that hand a host a listener without a jar
 /// (`callback_marker.rs`).
@@ -3629,6 +3630,7 @@ pub struct StdHost {
     imc: neoforge_imc::ImcHandle,
     entity_registration: entity_registration::State,
     tool_material: tool_material::State,
+    vanilla_vec2: vanilla_vec2::State,
 }
 
 impl Default for StdHost {
@@ -3793,6 +3795,7 @@ impl StdHost {
             imc: neoforge_imc::ImcHandle::default(),
             entity_registration: entity_registration::State::default(),
             tool_material: tool_material::State::default(),
+            vanilla_vec2: vanilla_vec2::State::default(),
         }
     }
 
@@ -6414,6 +6417,7 @@ impl Host for StdHost {
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
+        if let Some(value) = vanilla_vec2::static_field(&mut self.vanilla_vec2, r) { return value; }
         if let Some(value) = tool_material::static_field(&mut self.tool_material, r) {
             return value;
         }
