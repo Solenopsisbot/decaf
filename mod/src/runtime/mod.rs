@@ -24652,7 +24652,17 @@ impl<H: Host> Runtime<'_, H> {
                 )
             }
             ("getLength", "(Ljava/lang/Object;)I") => {
-                Value::Int(self.array(StdHost::argument(r, args, 0)?)?.len() as i32)
+                let value = StdHost::argument(r, args, 0)?;
+                if let Value::Ref(Some(text)) = value
+                    && value_class::is_plain_string(text)
+                {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/IllegalArgumentException".into(),
+                        message: Some("Argument is not an array".into()),
+                        frame: None,
+                    });
+                }
+                Value::Int(self.array(value)?.len() as i32)
             }
             ("get", "(Ljava/lang/Object;I)Ljava/lang/Object;")
             | ("getInt", "(Ljava/lang/Object;I)I") => {
