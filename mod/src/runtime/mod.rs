@@ -25943,6 +25943,9 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }
+        if let Some(values) = crate::runtime::entity_registration::enum_values(&r.owner) {
+            return Some(self.new_array_value(&format!("[L{};", r.owner), values));
+        }
         if let Some(values) = crate::runtime::vanilla_values::enum_values(r) {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }

@@ -91,6 +91,24 @@ fn arg_string(v: &Value) -> Option<String> {
         .map(str::to_owned)
         .or_else(|| expect_ref(v).cloned())
 }
+pub(crate) fn enum_values(owner: &str) -> Option<Vec<Value>> {
+    (owner == "net/minecraft/world/entity/MobCategory").then(|| {
+        [
+            "MONSTER",
+            "CREATURE",
+            "AMBIENT",
+            "AXOLOTLS",
+            "UNDERGROUND_WATER_CREATURE",
+            "WATER_CREATURE",
+            "WATER_AMBIENT",
+            "MISC",
+        ]
+        .into_iter()
+        .filter_map(category_constant)
+        .collect()
+    })
+}
+
 pub(crate) fn category_constant(name: &str) -> Option<Value> {
     let names = [
         "MONSTER",
@@ -381,6 +399,7 @@ pub(crate) fn instance_call(
             _ => return None,
         };
         return Some(Ok(match r.name.as_str() {
+            "name" => Value::Ref(Some(name.to_owned())),
             "getName" | "getSerializedName" => Value::Ref(Some(name.to_ascii_lowercase())),
             "toString" => Value::Ref(Some(name.to_owned())),
             "getDebugAbbreviation" => Value::Ref(Some(
@@ -467,7 +486,10 @@ pub(crate) fn define_id(state: &mut State, class_name: &str) -> Option<Result<Va
             if current.starts_with("net/minecraft/") {
                 return None;
             }
-            current = state.supers.get(&current)?.clone();
+            let Some(parent) = state.supers.get(&current) else {
+                break 0;
+            };
+            current = parent.clone();
         }
     };
     if id > 254 {
