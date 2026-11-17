@@ -29,12 +29,17 @@ use zip::write::SimpleFileOptions;
 const LOG4J_MANAGER: &str = r#"package org.apache.logging.log4j;
 public class LogManager {
     public static Logger getLogger(Class<?> type) { return null; }
+    public static Logger getLogger(String name, MessageFactory factory) { return null; }
 }
+"#;
+
+const LOG4J_MESSAGE_FACTORY: &str = r#"package org.apache.logging.log4j.message; public interface MessageFactory {}
 "#;
 
 const LOG4J_LOGGER: &str = r#"package org.apache.logging.log4j;
 public interface Logger {
     String getName();
+    boolean isEnabled(org.apache.logging.log4j.Level level);
     boolean isDebugEnabled();
     void info(String message, Object argument);
 }
