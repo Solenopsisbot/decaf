@@ -104,7 +104,7 @@ fn map_entries_answer_as_java_25_or_count() {
         (
             "holder",
             Exact(
-                r#"a=b|java.util.KeyValueHolder|3,3|truetruefalsefalse|java.lang.UnsupportedOperationException: not supported|java.lang.NullPointerException: null|java.lang.NullPointerException: null|trueab"#,
+                r#"a=b|java.util.KeyValueHolder|3,3|truetruefalsefalse|java.lang.UnsupportedOperationException: not supported|java.lang.NullPointerException: null|java.lang.NullPointerException: Cannot invoke "Object.toString()" because "this.value" is null|trueab"#,
             ),
         ),
         // Two `Map.entry` calls are two objects; `copyOf` of a holder is itself.
@@ -190,6 +190,8 @@ fn map_entries_answer_as_java_25_or_count() {
                 r#"java.util.AbstractMap$SimpleImmutableEntry,a=1,java.lang.UnsupportedOperationException: null,false"#,
             ),
         ),
+        // `Hashtable` removal nulls the detached node value; re-put makes a new node.
+        ("hashtableDetached", Exact(r#"null|java.lang.NullPointerException: Cannot invoke "Object.toString()" because "this.value" is null"#)),
         // `WeakHashMap`: its nodes.
         (
             "weakEntries",

@@ -255,6 +255,16 @@ public final class HostMapEntries {
     return entryRules(m, "a", "b");
   }
 
+  /** Hashtable nulls a removed node value; re-put creates a new node. */
+  public static String hashtableDetached() {
+    Map<String, Integer> m = new Hashtable<>();
+    m.put("a", 1);
+    Map.Entry<String, Integer> e = m.entrySet().iterator().next();
+    m.remove("a");
+    m.put("a", 5);
+    return e.getValue() + "|" + attempt(() -> e.toString());
+  }
+
   /** `WeakHashMap`: its nodes. */
   public static String weakEntries() {
     Map<String, Integer> m = new WeakHashMap<>();

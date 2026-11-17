@@ -1079,7 +1079,11 @@ impl StdHost {
                 {
                     if let Some(state) = self.map_entries.states.get_mut(&entry_key) {
                         state.key = key.clone();
-                        state.value = value;
+                        state.value = if matches!(state.life, Life::Live { nulls: false, .. }) {
+                            Value::Ref(None)
+                        } else {
+                            value
+                        };
                     }
                     self.map_entries.set_life(&entry_key, Life::Detached);
                     // Never handed out again: a later reading of its key is a new node.
@@ -1154,7 +1158,7 @@ impl StdHost {
                 && let Some(state) = self.map_entries.states.get_mut(&entry_key)
             {
                 state.key = key.clone();
-                state.value = value.clone();
+                state.value = if !nulls { Value::Ref(None) } else { value.clone() };
             }
             self.map_entries.set_life(&entry_key, life);
         }
