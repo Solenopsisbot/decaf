@@ -445,6 +445,23 @@ impl<H: Host> Runtime<'_, H> {
         if self.host_collection_class(receiver).as_deref() == Some(IDENTITY_MAP) {
             return self.identity_map_member(r, receiver, args);
         }
+        // Gson's `LinkedTreeMap` (a `fromJson` read's map) keeps `Map`'s
+        // default `compute`/`merge` bodies too, which the host's map model
+        // cannot run over a jar function (#337). With a plain `String` key its
+        // `compareTo` lookup is the `equals` one, so the stored key equal to
+        // `key` is found as `identity_compute` finds it. Any other key is left
+        // to the host, which counts it (#253 re-check B5).
+        if self.host_collection_class(receiver).as_deref() == Some(gson_tree::TREE_MAP)
+            && matches!(args.first(), Some(Value::Ref(Some(key))) if value_class::is_plain_string(key))
+        {
+            let entries = match self.host.mutable_collection_entries(receiver) {
+                Some(entries) => entries,
+                None => self.collection_elements(receiver)?,
+            };
+            if let Some(answer) = self.identity_compute(r, receiver, &entries, args)? {
+                return Ok(Some(answer));
+            }
+        }
         if self.host_collection_class(receiver).as_deref() == Some(IDENTITY_SET)
             && !self.host.is_set_from_map(receiver)
         {
@@ -775,7 +792,8 @@ impl<H: Host> Runtime<'_, H> {
     /// `IdentityHashMap`, whose stored key equal to `key` (if any) is `key`
     /// itself: `IdentityHashMap` keeps `Map`'s default bodies (`get`, the
     /// function run through the interpreter, then `put` or `remove`), which
-    /// the host's own models could not run over a jar function. `Ok(None)`
+    /// the host's own models could not run over a jar function. Gson's
+    /// `LinkedTreeMap` with a `String` key runs here too (#337). `Ok(None)`
     /// for every other member.
     fn identity_compute(
         &mut self,
