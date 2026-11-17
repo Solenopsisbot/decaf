@@ -404,5 +404,7 @@ fn reads_java25_capture() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gson_type_adapter/java25.txt");
     let text = fs::read_to_string(path).expect("java25 capture");
+    let oracle = include_str!("fixtures/gson_type_adapter/oracle/java25.txt");
+    assert_eq!(text, oracle);
     assert!(text.contains("COUNTED"));
 }
