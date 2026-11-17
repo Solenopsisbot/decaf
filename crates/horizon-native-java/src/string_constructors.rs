@@ -394,6 +394,12 @@ pub(crate) fn build<H: Host>(
     let int = |index: usize| -> Result<i32, NativeError> {
         expect_int(r, StdHost::argument(r, args, index)?)
     };
+    if r.descriptor == "(Ljava/lang/String;)V" && matches!(args.first(), Some(Value::Ref(None))) {
+        return Err(thrown(
+            "java/lang/NullPointerException",
+            "Cannot read field \"value\" because \"original\" is null".into(),
+        ));
+    }
     let text = match r.descriptor.as_str() {
         "([B)V" | "([BII)V" => {
             return decode_bytes(
