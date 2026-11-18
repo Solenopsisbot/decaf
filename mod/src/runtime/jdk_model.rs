@@ -755,7 +755,19 @@ impl crate::runtime::StdHost {
             });
         }
         let range = values[from as usize..to as usize].to_vec();
-        Ok(self.new_collection(super::stand_in_class("list"), range))
+        let made = self.new_collection(super::stand_in_class("list"), range);
+        // A detached copy: remember it, so `Collections.reverse` on it is counted
+        // (a write through it would not reach the parent, #496).
+        match &made {
+            Value::Host(handle) => {
+                self.detached_sub_lists.insert(handle.key().to_owned());
+            }
+            Value::Ref(Some(marker)) => {
+                self.detached_sub_lists.insert(marker.clone());
+            }
+            _ => {}
+        }
+        Ok(made)
     }
 }
 
@@ -979,6 +991,9 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_list_sort(r, receiver, args)? {
+            return Ok(Some(value));
+        }
+        if let Some(value) = self.invoke_list_reverse(r, args)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_identifier_runtime(r, receiver, args)? {

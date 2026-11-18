@@ -2769,6 +2769,13 @@ pub trait Host {
         None
     }
 
+    /// Whether `marker` is a detached `subList` copy (`jdk_model.rs::sub_list`): a
+    /// write through it does not reach its parent list, so `Collections.reverse`
+    /// on it is counted rather than answered.
+    fn is_detached_sub_list(&self, _marker: &str) -> bool {
+        false
+    }
+
     fn store_sub_list_link(&mut self, _marker: &str, _link: Option<mod_count::SubListLink>) {}
 
     /// The `subList` copies taken from `parent`.
@@ -3495,6 +3502,8 @@ pub struct StdHost {
     /// Every mutable collection's list, by marker, each with a generation
     /// (`collection_store.rs`).
     mutable_collections: collection_store::CollectionStore,
+    /// Keys of detached `subList` copies (`jdk_model.rs::sub_list`, #496).
+    detached_sub_lists: BTreeSet<String>,
     /// Live SetFromMap marker -> backing map marker.
     set_from_map_views: BTreeMap<String, String>,
     next_set_from_map: u64,
@@ -3762,6 +3771,7 @@ impl StdHost {
             holder_rows: Vec::new(),
             holder_binding: host_registry::Binding::Construct,
             mutable_collections: collection_store::CollectionStore::default(),
+            detached_sub_lists: BTreeSet::new(),
             set_from_map_views: BTreeMap::new(),
             next_set_from_map: 0,
             component_states: BTreeMap::new(),
@@ -6113,6 +6123,10 @@ impl Host for StdHost {
             return None;
         }
         self.sub_lists.get(marker).cloned()
+    }
+
+    fn is_detached_sub_list(&self, marker: &str) -> bool {
+        self.detached_sub_lists.contains(marker)
     }
 
     fn store_sub_list_link(&mut self, marker: &str, link: Option<mod_count::SubListLink>) {
@@ -10170,6 +10184,10 @@ impl Host for StdHost {
             if let Some(source) = expect_ref(receiver).and_then(|source| iterated_kind(source)) {
                 self.iterator_sources.insert(marker.clone(), source);
             }
+            if r.owner == "java/util/stream/Stream" {
+                self.iterator_sources
+                    .insert(marker.clone(), "java/util/stream/Stream".into());
+            }
             // An `Arrays.asList` view's iterator reads its array live.
             if let Some(view) = expect_ref(receiver) {
                 let view = view.clone();
@@ -10213,19 +10231,22 @@ impl Host for StdHost {
                 .iterators
                 .get_mut(marker)
                 .ok_or_else(|| NativeError::Metadata("unknown java/util/Iterator marker".into()))?;
-            if r.name == "remove"
-                && r.descriptor == "()V"
-                && self.iterator_sources.get(marker).is_some_and(|source| {
+            if r.name == "remove" && r.descriptor == "()V" {
+                let source = self.iterator_sources.get(marker).map(String::as_str);
+                if source.is_some_and(|source| {
                     source.starts_with("java/util/Collections$Unmodifiable")
                         || source == "java/util/Collections$SingletonList"
+                        || source.starts_with("java/util/stream/")
                         || source.starts_with("fabric/custom-value/")
-                })
-            {
-                return Err(NativeError::UncaughtException {
-                    class: "java/lang/UnsupportedOperationException".into(),
-                    message: None,
-                    frame: None,
-                });
+                }) {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/UnsupportedOperationException".into(),
+                        message: source
+                            .filter(|source| source.starts_with("java/util/stream/"))
+                            .map(|_| "remove".into()),
+                        frame: None,
+                    });
+                }
             }
             match (r.name.as_str(), r.descriptor.as_str()) {
                 ("hasNext", "()Z") => return Ok(Value::Int((*index < values.len()) as i32)),

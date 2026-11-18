@@ -1263,6 +1263,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.sub_list_link(marker)
     }
 
+    fn is_detached_sub_list(&self, marker: &str) -> bool {
+        self.inner.is_detached_sub_list(marker)
+    }
+
     fn store_sub_list_link(&mut self, marker: &str, link: Option<mod_count::SubListLink>) {
         self.inner.store_sub_list_link(marker, link)
     }

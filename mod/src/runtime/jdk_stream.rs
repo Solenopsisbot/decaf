@@ -535,6 +535,97 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         Ok(Some(Value::Void))
     }
 
+    /// `Collections.reverse(list)` reverses a mutable host list in place.
+    pub(crate) fn invoke_list_reverse(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if !(r.owner == "java/util/Collections"
+            && r.name == "reverse"
+            && r.descriptor == "(Ljava/util/List;)V")
+        {
+            return Ok(None);
+        }
+        let Some(list) = args.first() else {
+            return Ok(None);
+        };
+        if matches!(list, Value::Ref(None)) {
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/NullPointerException".into(),
+                message: Some(
+                    "Cannot invoke \"java.util.List.size()\" because \"list\" is null".into(),
+                ),
+                frame: None,
+            });
+        }
+        // A list is a host handle (`Value::Host`, keyed `list/…`, `sublist/…`) or an older `Ref`
+        // marker: the view checks below need its key either way. (`expect_ref` alone missed every
+        // handle, so a subList view was reversed as a detached copy, silently.)
+        let key: Option<String> = match list {
+            Value::Host(handle) => Some(handle.key().to_owned()),
+            Value::Ref(Some(marker)) => Some(marker.clone()),
+            _ => None,
+        };
+        let immutable = self
+            .host_collection_class(list)
+            .is_some_and(|class| class.starts_with("java/util/ImmutableCollections$"))
+            || key
+                .as_deref()
+                .is_some_and(|marker| self.host.is_jdk_list_of(marker))
+            || key
+                .as_deref()
+                .is_some_and(|marker| self.host.unmodifiable_view_source(marker).is_some());
+        if immutable {
+            let size = crate::runtime::runtime_collection_values(self.host, list)?.len();
+            if size >= 2 {
+                return Err(NativeError::UncaughtException {
+                    class: "java/lang/UnsupportedOperationException".into(),
+                    message: None,
+                    frame: None,
+                });
+            }
+            return Ok(Some(Value::Void));
+        }
+        if key
+            .as_deref()
+            .is_some_and(|marker| self.host.is_detached_sub_list(marker))
+        {
+            // Counted once, and answered as a no-op: returning `None` here would
+            // let the fallback count the same call a second time.
+            self.host.unknown_operand_call(r)?;
+            return Ok(Some(Value::Void));
+        }
+        let Some(mut values) = self.host.mutable_collection_values(list) else {
+            self.host.unknown_operand_call(r)?;
+            return Ok(None);
+        };
+        if key
+            .as_deref()
+            .is_some_and(|marker| self.host.sub_list_link(marker).is_some())
+        {
+            let set = MethodRef {
+                owner: "java/util/List".into(),
+                name: "set".into(),
+                descriptor: "(ILjava/lang/Object;)Ljava/lang/Object;".into(),
+            };
+            let n = values.len();
+            for i in 0..n / 2 {
+                let j = n - 1 - i;
+                let a = values[i].clone();
+                let b = values[j].clone();
+                self.host
+                    .invoke_instance(&set, list, &[Value::Int(i as i32), b])?;
+                self.host
+                    .invoke_instance(&set, list, &[Value::Int(j as i32), a])?;
+            }
+            return Ok(Some(Value::Void));
+        }
+        values.reverse();
+        self.host.replace_mutable_collection(list, values);
+        Ok(Some(Value::Void))
+    }
+
     /// `Arrays.sort(values, comparator)`: TimSort (`tim_sort.rs`), which makes
     /// the JDK's comparisons in the JDK's order. `null` is natural order.
     pub(crate) fn sort_values(
@@ -635,7 +726,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                     values.to_vec(),
                     (&r.owner, &r.name, &r.descriptor),
                 )?;
-                self.host.invoke_instance(
+                let iterator = self.host.invoke_instance(
                     &MethodRef {
                         owner: "java/util/List".into(),
                         name: "iterator".into(),
@@ -643,7 +734,19 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                     },
                     &list,
                     &[],
-                )?
+                )?;
+                // The list's iterator is a host handle (`iterator/N`), not a `Ref` marker:
+                // tag it by its key, so its `remove()` throws as `Stream.iterator()`'s does.
+                let key = match &iterator {
+                    Value::Host(handle) => Some(handle.key().to_owned()),
+                    Value::Ref(Some(marker)) => Some(marker.clone()),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    self.host
+                        .set_host_iterator_source(&key, "java/util/stream/Stream".into());
+                }
+                iterator
             }
             ("sum", "()I") => Value::Int(
                 values
