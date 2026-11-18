@@ -18,9 +18,8 @@ fn oracle_row(name: &str) -> &'static str {
     let oracle = JAVA25_ORACLE.get_or_init(|| {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
         let path = [
-            manifest.join("tests/fixtures/host_codecs/oracle/java25.txt"),
-            manifest
-                .join("../crates/horizon-native-java/tests/fixtures/host_codecs/oracle/java25.txt"),
+            manifest.join("tests/fixtures/host_codecs/java25.txt"),
+            manifest.join("../crates/horizon-native-java/tests/fixtures/host_codecs/java25.txt"),
         ]
         .into_iter()
         .find(|path| path.is_file())
@@ -132,6 +131,13 @@ fn pairs_and_codecs_answer_as_java_25_or_count() {
         ),
         ("pairMaps", Exact("(2, b)|(3, B)|3B|true")),
         (
+            "recordConstruction",
+            Exact(
+                "true|true|true|true|true|Field[required: Int]|OptionalFieldCodec[optional: Int]|OptionalFieldCodec[defaulted: Int][xmapped]|ListCodec[Int]|Int[xmapped]|true|true|Stable|Experimental",
+            ),
+        ),
+        ("identifierCodec", Exact(oracle_row("identifierCodec"))),
+        (
             "pairSubclass",
             Exact("demo.HostCodecs$SubPair|1|sub|7|own7|true"),
         ),
@@ -182,13 +188,26 @@ fn pairs_and_codecs_answer_as_java_25_or_count() {
         ),
         (
             "dfuConstruction",
-            CountedAs("true|false|true|false|true|true|false|true"),
+            Exact("true|false|true|false|true|true|false|true"),
         ),
         (
             "countedOperations",
             CountedAs(oracle_row("countedOperations")),
         ),
         ("dfuText", Exact(oracle_row("dfuText"))),
+        ("textFlatXmap", Exact(oracle_row("textFlatXmap"))),
+        ("textComapFlatMap", Exact(oracle_row("textComapFlatMap"))),
+        ("textMapXmap", Exact(oracle_row("textMapXmap"))),
+        ("textMapFlatXmap", Exact(oracle_row("textMapFlatXmap"))),
+        ("textList", Exact(oracle_row("textList"))),
+        // A record codec's text holds a lambda's identity hash: counted, never answered.
+        ("textRecord", Counted),
+        ("createCounter", Exact(oracle_row("createCounter"))),
+        // Counted (the callback's result is no product), but still run exactly once.
+        ("createCounterNull", Exact(oracle_row("createCounterNull"))),
+        ("createThrows", Exact(oracle_row("createThrows"))),
+        ("encodeUnknown", CountedAs(oracle_row("encodeUnknown"))),
+        ("parseUnknown", CountedAs(oracle_row("parseUnknown"))),
         (
             "forgedDfuReceiver",
             CountedAs(oracle_row("forgedDfuReceiver")),
@@ -261,7 +280,6 @@ fn each_dfu_operation_is_counted_individually() {
         })
         .collect();
     for name in [
-        "listOf",
         "dispatch",
         "orElse",
         "validate",

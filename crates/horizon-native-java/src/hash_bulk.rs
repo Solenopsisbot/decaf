@@ -876,7 +876,7 @@ impl<H: Host> Runtime<'_, H> {
         );
         let key = self.apply_callback(&state.key_fn, std::slice::from_ref(element))?;
         let value = self.apply_callback(&state.value_fn, std::slice::from_ref(element))?;
-        if value == Value::Ref(None) {
+        if key == Value::Ref(None) || value == Value::Ref(None) {
             return Err(null_pointer());
         }
         let Some(merge) = state.merge_fn.as_ref() else {

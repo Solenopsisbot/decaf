@@ -571,6 +571,7 @@ pub(crate) struct ToMap {
     pub(crate) value_fn: Value,
     pub(crate) merge_fn: Option<Value>,
     guava: bool,
+    unmodifiable: bool,
     entries: Vec<(Value, Value)>,
     map: Option<Value>,
     /// The 4-argument form's map supplier (`TreeMap::new`, ...).
@@ -580,8 +581,11 @@ pub(crate) struct ToMap {
 impl ToMap {
     /// The state for a built-in `toMap` collector (`host_collector.rs`), `None` for any other.
     pub(crate) fn begin(collector: &Value) -> Result<Option<Self>, NativeError> {
-        let Some(crate::runtime::host_collector::Builtin::ToMap { guava, functions }) =
-            crate::runtime::host_collector::builtin(collector)
+        let Some(crate::runtime::host_collector::Builtin::ToMap {
+            guava,
+            unmodifiable,
+            functions,
+        }) = crate::runtime::host_collector::builtin(collector)
         else {
             return Ok(None);
         };
@@ -601,6 +605,7 @@ impl ToMap {
             value_fn,
             merge_fn,
             guava,
+            unmodifiable,
             entries: Vec::new(),
             map: None,
             supplier,
@@ -626,10 +631,11 @@ pub(crate) fn to_map_collector(r: &MethodRef, args: &[Value]) -> Option<Value> {
     // Guava's immutable-map collectors (`ImmutableMap.toImmutableMap`,
     // `Maps.toImmutableEnumMap`, WorldEdit's platform table) collect the same
     // way; only a repeated key raises Guava's `IllegalArgumentException`.
-    let guava = match (r.owner.as_str(), r.name.as_str()) {
-        ("java/util/stream/Collectors", "toMap") => false,
+    let (guava, unmodifiable) = match (r.owner.as_str(), r.name.as_str()) {
+        ("java/util/stream/Collectors", "toMap") => (false, false),
+        ("java/util/stream/Collectors", "toUnmodifiableMap") => (false, true),
         ("com/google/common/collect/ImmutableMap", "toImmutableMap")
-        | ("com/google/common/collect/Maps", "toImmutableEnumMap") => true,
+        | ("com/google/common/collect/Maps", "toImmutableEnumMap") => (true, false),
         _ => return None,
     };
     let functions = match r.descriptor.as_str() {
@@ -654,6 +660,7 @@ pub(crate) fn to_map_collector(r: &MethodRef, args: &[Value]) -> Option<Value> {
     Some(crate::runtime::host_collector::collector(
         crate::runtime::host_collector::Builtin::ToMap {
             guava,
+            unmodifiable,
             functions: args.iter().take(functions).cloned().collect(),
         },
     ))
@@ -1233,12 +1240,19 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     /// (`Host::factory_collection`, #156 P14d2), counted on a host that makes
     /// none.
     pub(crate) fn finish_to_map(&mut self, state: ToMap) -> Result<Value, NativeError> {
+        let unmodifiable = state.unmodifiable;
         match state.finish() {
+            Ok(map) if unmodifiable => {
+                let entries = self.host.mutable_collection_values(&map).ok_or_else(|| NativeError::UncaughtException { class: "java/lang/IllegalStateException".into(), message: None, frame: None })?;
+                let made = self.host.factory_collection("java/util/stream/Collectors", "toUnmodifiableMap", "map", entries).ok_or_else(|| NativeError::UncaughtException { class: "java/lang/IllegalStateException".into(), message: None, frame: None })?;
+                self.host.mark_nondeterministic("java-random-immutable-iteration");
+                Ok(made)
+            }
             Ok(map) => Ok(map),
             Err(entries) => self.factory_or_count(
                 &crate::runtime::stream_pipeline::wanted(
-                    "com/google/common/collect/ImmutableMap",
-                    "toImmutableMap",
+                    if unmodifiable { "java/util/stream/Collectors" } else { "com/google/common/collect/ImmutableMap" },
+                    if unmodifiable { "toUnmodifiableMap" } else { "toImmutableMap" },
                     "(Ljava/util/function/Function;Ljava/util/function/Function;)Ljava/util/stream/Collector;",
                 ),
                 "map",
