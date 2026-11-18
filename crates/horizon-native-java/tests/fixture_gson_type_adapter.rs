@@ -163,7 +163,7 @@ fn oracle(name: &str) -> &'static str {
 #[test]
 fn modeled_type_adapter_rows_match_real_gson() {
     let fixture = Fixture::new();
-    for name in ["normal", "exact", "nested", "isolation"] {
+    for name in ["normal", "exact", "nested", "isolation", "exactVsHierarchy"] {
         let (actual, unknown) = fixture.call(name);
         assert_eq!(actual, oracle(name), "{name}");
         assert!(
@@ -178,7 +178,6 @@ fn unsupported_type_adapter_rows_stay_counted() {
     let fixture = Fixture::new();
     for name in [
         "nullSafe",
-        "exactVsHierarchy",
         "hierarchyVsExact",
         "factoryAB",
         "factoryBA",
@@ -210,7 +209,6 @@ fn java25_capture_has_all_probe_rows() {
         "nested",
         "isolation",
         "nullSafe",
-        "exactVsHierarchy",
         "hierarchyVsExact",
         "factoryAB",
         "factoryBA",
