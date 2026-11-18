@@ -6,6 +6,6 @@ CP=$HOME/ava/minecraft-26.3-server-game.jar:$(find $HOME/ava/scratch/vanilla-val
 O=$HOME/ava/scratch/entity-type-lookup-classes
 mkdir -p "$O"
 $J/javac -cp "$CP" -d "$O" demo/Probe.java oracle/OracleMain.java
-$J/java -cp "$O:$CP" oracle.OracleMain > java25.txt
+$J/java -cp "$O:$CP" oracle.OracleMain | sed 's/^\[[^]]*\] \[main/INFO\]: \[STDOUT\]: //' > java25.txt
 # 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' logs/latest.log > java25.txt
 ```
