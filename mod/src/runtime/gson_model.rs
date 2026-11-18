@@ -597,7 +597,7 @@ impl<H: Host> Runtime<'_, H> {
                             self.set_gson_style(&marker, style);
                             let type_name = args
                                 .first()
-                                .and_then(crate::runtime::jar_object::object_class)
+                                .and_then(crate::runtime::host_class::class_name)
                                 .map(str::to_owned);
                             let adapter = args.get(1).cloned();
                             if let (Some(type_name), Some(adapter)) = (type_name, adapter)
