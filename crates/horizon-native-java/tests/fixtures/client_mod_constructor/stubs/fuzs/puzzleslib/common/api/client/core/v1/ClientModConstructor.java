@@ -1,0 +1,1 @@
+package fuzs.puzzleslib.common.api.client.core.v1; import java.util.function.Supplier; public interface ClientModConstructor { static void construct(String id, Supplier<ClientModConstructor> s) { ClientModConstructor c=s.get(); c.onConstructMod(); c.onClientSetup(); } void onConstructMod(); void onClientSetup(); }
