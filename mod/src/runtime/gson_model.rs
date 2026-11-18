@@ -880,7 +880,7 @@ impl<H: Host> Runtime<'_, H> {
         // `StackOverflowError`, and so does this writer.
         let _level = crate::runtime::host_recursion::enter()?;
         // Exact registered TypeAdapter dispatch precedes reflective serialization.
-        if let Some(class) = crate::runtime::jar_object::object_class(value)
+        if let Some(class) = class_of_value(value)
             && {
                 eprintln!(
                     "GSON_DEBUG dispatch value={value:?} class={class} marker={gson_marker:?} adapters={:?}",
