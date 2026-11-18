@@ -630,6 +630,9 @@ impl<H: Host> Runtime<'_, H> {
                                 self.set_gson_style(&marker, style);
                             }
                         } else {
+                            if r.name == "registerTypeHierarchyAdapter" {
+                                self.gson_type_adapters.remove(&marker);
+                            }
                             let mut style = self.gson_style(&marker);
                             style.counted = true;
                             self.set_gson_style(&marker, style);
