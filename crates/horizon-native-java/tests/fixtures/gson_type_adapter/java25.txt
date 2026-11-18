@@ -1,0 +1,11 @@
+normal={"value":"x"}
+exact="FOO:x"
+nested={"value":"FOO:x"}
+isolation="FOO:x"|{"value":"x"}
+nullSafe="FOO:x"|null
+exactVsHierarchy="FOO:x"
+hierarchyVsExact="HIERx"
+factoryAB="B:x"
+factoryBA="A:x"
+lambdaSerializer="SER:x"
+lambdaDeserializer=DES:x
