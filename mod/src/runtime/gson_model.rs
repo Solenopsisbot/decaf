@@ -894,7 +894,7 @@ impl<H: Host> Runtime<'_, H> {
                 .into_iter()
                 .flat_map(|v| v.iter())
                 .rev()
-                .find(|(ty, _)| ty == class)
+                .find(|(ty, _)| ty == class.as_str())
                 .map(|(_, adapter)| adapter.clone())
         {
             let sink = format!("gson-adapter-{depth}");
