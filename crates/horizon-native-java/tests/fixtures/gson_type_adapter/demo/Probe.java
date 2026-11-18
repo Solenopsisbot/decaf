@@ -56,6 +56,10 @@ public final class Probe {
       return "COUNTED";
     }
   }
+  static String countedNullSafe() {
+    TypeAdapter<P> adapter = new Prefix().nullSafe();
+    return new GsonBuilder().registerTypeAdapter(P.class, adapter).create().toJson(new P("x"));
+  }
   static String exactVsHierarchy() {
     Gson gson = new GsonBuilder()
         .registerTypeHierarchyAdapter(Object.class, new Hierarchy())

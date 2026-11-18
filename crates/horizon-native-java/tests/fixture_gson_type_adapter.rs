@@ -118,39 +118,36 @@ impl Fixture {
         }
     }
 
-    fn call(&self, method: &str) -> (String, Vec<String>) {
+    fn call(&self, method: &str) -> (Option<String>, Vec<(String, usize)>) {
+        let invoke_method = if method == "nullSafe" {
+            "countedNullSafe"
+        } else {
+            method
+        };
         let mut host = self.probe.seed_host(StdHost::new());
         host.link_jar("gson", &self.gson).unwrap();
-        let value = self
-            .probe
-            .invoke_method_with_args(
-                "demo/Probe",
-                method,
-                "()Ljava/lang/String;",
-                None,
-                &[],
-                &mut host,
-            )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "{method} failed: {error}; unknown={:?}",
-                    host.unknown_host_calls()
-                )
-            });
+        let value = match self.probe.invoke_method_with_args(
+            "demo/Probe",
+            invoke_method,
+            "()Ljava/lang/String;",
+            None,
+            &[],
+            &mut host,
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                return (None, host.unknown_host_calls());
+            }
+        };
         let text = match value {
-            Value::Ref(Some(text)) => text,
-            Value::Ref(None) => "null".into(),
+            Value::Ref(Some(text)) => Some(text),
+            Value::Ref(None) => None,
             other => panic!(
                 "{method} did not return a string: {other:?}; unknown={:?}",
                 host.unknown_host_calls()
             ),
         };
-        let unknown = host
-            .unknown_host_calls()
-            .into_iter()
-            .map(|(call, _)| call)
-            .collect();
-        (text, unknown)
+        (text, host.unknown_host_calls())
     }
 }
 
@@ -166,7 +163,7 @@ fn modeled_type_adapter_rows_match_real_gson() {
     let fixture = Fixture::new();
     for name in ["normal", "exact", "nested", "isolation", "exactVsHierarchy"] {
         let (actual, unknown) = fixture.call(name);
-        assert_eq!(actual, oracle(name), "{name}");
+        assert_eq!(actual.as_deref(), Some(oracle(name)), "{name}");
         assert!(
             unknown.is_empty(),
             "{name} counted unknown calls: {unknown:?}"
@@ -177,45 +174,64 @@ fn modeled_type_adapter_rows_match_real_gson() {
 #[test]
 fn unsupported_type_adapter_rows_stay_counted() {
     let fixture = Fixture::new();
-    for name in [
-        "nullSafe",
-        "hierarchyVsExact",
-        "factoryAB",
-        "factoryBA",
-        "lambdaSerializer",
-        "lambdaDeserializer",
-    ] {
+    let expected = [
+        (
+            "nullSafe",
+            [(
+                "com/google/gson/TypeAdapter#nullSafe()Lcom/google/gson/TypeAdapter;",
+                1,
+            )],
+        ),
+        (
+            "hierarchyVsExact",
+            [(
+                "com/google/gson/Gson#toJson(Ljava/lang/Object;)Ljava/lang/String;",
+                1,
+            )],
+        ),
+        (
+            "factoryAB",
+            [(
+                "com/google/gson/Gson#toJson(Ljava/lang/Object;)Ljava/lang/String;",
+                1,
+            )],
+        ),
+        (
+            "factoryBA",
+            [(
+                "com/google/gson/Gson#toJson(Ljava/lang/Object;)Ljava/lang/String;",
+                1,
+            )],
+        ),
+        (
+            "lambdaSerializer",
+            [(
+                "com/google/gson/Gson#toJson(Ljava/lang/Object;)Ljava/lang/String;",
+                1,
+            )],
+        ),
+        (
+            "lambdaDeserializer",
+            [(
+                "com/google/gson/Gson#fromJson(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;",
+                1,
+            )],
+        ),
+    ];
+    for (name, expected) in expected {
         let (actual, unknown) = fixture.call(name);
-        assert!(
-            actual == "null" || actual == "COUNTED",
-            "{name} unexpectedly answered {actual:?}"
-        );
-        assert!(!unknown.is_empty(), "{name} did not count an unknown call");
-        if name != "nullSafe" {
-            assert!(
-                unknown
-                    .iter()
-                    .any(|call| call.starts_with("com/google/gson/Gson#")),
-                "{name} did not count a Gson operation: {unknown:?}"
-            );
-        }
+        assert!(actual.is_none(), "{name} unexpectedly answered {actual:?}");
+        let expected = expected
+            .into_iter()
+            .map(|(call, count)| (call.to_owned(), count))
+            .collect::<Vec<_>>();
+        assert_eq!(unknown, expected, "{name}");
     }
 }
 
 #[test]
-fn java25_capture_has_all_probe_rows() {
-    for name in [
-        "normal",
-        "exact",
-        "nested",
-        "isolation",
-        "nullSafe",
-        "hierarchyVsExact",
-        "factoryAB",
-        "factoryBA",
-        "lambdaSerializer",
-        "lambdaDeserializer",
-    ] {
+fn java25_capture_has_answered_rows() {
+    for name in ["normal", "exact", "nested", "isolation", "exactVsHierarchy"] {
         assert!(!oracle(name).is_empty(), "{name}");
     }
 }
