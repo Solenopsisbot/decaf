@@ -29781,12 +29781,10 @@ impl<H: Host> Runtime<'_, H> {
                 .get(&class)
                 .and_then(|file| file.method(name, descriptor))
                 .is_some()
-            {
-                if let Err(error) =
+                && let Err(error) =
                     self.invoke(&class, name, descriptor, Some(instance.clone()), &[])
-                {
-                    return Some(Err(error));
-                }
+            {
+                return Some(Err(error));
             }
         }
         Some(Ok(Value::Void))
