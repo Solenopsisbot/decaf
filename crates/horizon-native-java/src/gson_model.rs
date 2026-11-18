@@ -619,6 +619,9 @@ impl<H: Host> Runtime<'_, H> {
                                     );
                                 }
                                 if is_type_adapter {
+                                    eprintln!(
+                                        "GSON_DEBUG register marker={marker} type={type_name} adapter={adapter_class}"
+                                    );
                                     self.gson_type_adapters
                                         .entry(marker.clone())
                                         .or_default()
@@ -878,6 +881,13 @@ impl<H: Host> Runtime<'_, H> {
         let _level = crate::host_recursion::enter()?;
         // Exact registered TypeAdapter dispatch precedes reflective serialization.
         if let Some(class) = crate::jar_object::object_class(value)
+            && {
+                eprintln!(
+                    "GSON_DEBUG dispatch value={value:?} class={class} marker={gson_marker:?} adapters={:?}",
+                    self.gson_type_adapters
+                );
+                true
+            }
             && let Some(adapter) = self
                 .gson_type_adapters
                 .get(gson_marker.unwrap_or_default())
@@ -888,7 +898,8 @@ impl<H: Host> Runtime<'_, H> {
                 .map(|(_, adapter)| adapter.clone())
         {
             let sink = format!("gson-adapter-{depth}");
-            self.io_writers.insert(sink.clone(), String::new());
+            let sink_key = format!("mem:{sink}");
+            self.io_writers.insert(sink_key.clone(), String::new());
             let writer = self.new_object("com/google/gson/stream/JsonWriter");
             if let Some(wm) = expect_ref(&writer) {
                 let mut state = gson_writer::State::new(sink.clone());
@@ -904,10 +915,11 @@ impl<H: Host> Runtime<'_, H> {
                     Some(adapter.clone()),
                     &[writer, value.clone()],
                 );
-                if result.is_err() {
+                if let Err(error) = &result {
+                    eprintln!("GSON_DEBUG adapter invoke error={error}");
                     return Ok(None);
                 }
-                return Ok(self.io_writers.get(&sink).cloned());
+                return Ok(self.io_writers.get(&sink_key).cloned());
             }
             return Ok(None);
         }
