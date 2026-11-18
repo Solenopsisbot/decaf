@@ -474,9 +474,10 @@ fn registry_call(
                 return Some(Ok(Value::Int(1)));
             }
             if registry == "minecraft:entity_type" {
-                return Some(Ok(Value::Int(i32::from(
-                    crate::runtime::vanilla_entity_types::handle(&id).is_some(),
-                ))));
+                if let Some(value) = crate::runtime::vanilla_entity_types::handle(&id) {
+                    return Some(Ok(Value::Int(1)));
+                }
+                return Some(host.unknown_host_call(r));
             }
             if crate::runtime::vanilla_registries::is_built_in(&registry) {
                 return Some(host.unknown_host_call(r));
