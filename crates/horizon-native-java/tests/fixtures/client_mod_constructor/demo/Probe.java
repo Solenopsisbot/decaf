@@ -12,6 +12,7 @@ public final class Probe {
     ClientModConstructor.construct("demo", Demo::new);
     return "constructed=" + Demo.constructed + ",setup=" + Demo.setup;
   }
+  public static void main(String[] args) { System.out.println(normal()); }
   public static String counted() {
     ModConstructor.construct("demo", Demo::new);
     return "ok";
