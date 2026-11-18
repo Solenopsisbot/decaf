@@ -21,6 +21,13 @@ pub(crate) fn field_id(field: &str) -> Option<String> {
     Some(format!("minecraft:{path}"))
 }
 
+pub(crate) fn handle(id: &str) -> Option<crate::Value> {
+    FIELDS
+        .iter()
+        .any(|field| field_id(field).as_deref() == Some(id))
+        .then(|| crate::game_object::server_value(format!("game/block/{id}")))
+}
+
 /// Every `public static final Block` of 26.3's `Blocks`, sorted (bytewise) for
 /// the binary search.
 #[rustfmt::skip]

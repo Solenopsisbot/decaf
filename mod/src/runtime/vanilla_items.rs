@@ -16,6 +16,13 @@ pub(crate) fn field_id(field: &str) -> Option<String> {
     Some(format!("minecraft:{path}"))
 }
 
+pub(crate) fn handle(id: &str) -> Option<crate::runtime::Value> {
+    FIELDS
+        .iter()
+        .any(|field| field_id(field).as_deref() == Some(id))
+        .then(|| crate::runtime::game_object::server_value(format!("game/item/{id}")))
+}
+
 #[rustfmt::skip]
 const FIELDS: &[&str] = &[
     "ABANDONED_CAMP_MAP",

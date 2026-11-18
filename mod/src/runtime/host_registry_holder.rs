@@ -358,6 +358,32 @@ fn id_argument(registry: &str, value: &Value) -> Option<String> {
     (key_registry == registry).then_some(id)
 }
 
+fn vanilla_value(registry: &str, id: &str) -> Option<Value> {
+    match registry {
+        "minecraft:block" => crate::runtime::vanilla_blocks::handle(id),
+        "minecraft:item" => crate::runtime::vanilla_items::handle(id),
+        "minecraft:entity_type" => crate::runtime::vanilla_entity_types::handle(id),
+        _ => None,
+    }
+}
+
+fn vanilla_value_id<'a>(registry: &str, value: &'a Value) -> Option<&'a str> {
+    let marker = crate::runtime::game_object::handle_key(value)?;
+    let prefix = match registry {
+        "minecraft:block" => "game/block/",
+        "minecraft:item" => "game/item/",
+        "minecraft:entity_type" => "game/entity_type/",
+        _ => return None,
+    };
+    let id = marker.strip_prefix(prefix)?;
+    vanilla_value(registry, id).as_ref()?;
+    Some(id)
+}
+
+fn vanilla_default(registry: &str) -> Option<Value> {
+    vanilla_value(registry, "minecraft:air")
+}
+
 fn registry_call(
     host: &mut StdHost,
     r: &MethodRef,
@@ -372,6 +398,15 @@ fn registry_call(
             let Some(id) = args.first().and_then(|value| id_argument(&registry, value)) else {
                 return Some(host.unknown_host_call(r));
             };
+            if matches!(registry.as_str(), "minecraft:block" | "minecraft:item") {
+                if let Some(value) = vanilla_value(&registry, &id) {
+                    return Some(Ok(crate::runtime::host_optional::optional_wrap(value)));
+                }
+                if id.starts_with("minecraft:") {
+                    return Some(Ok(crate::runtime::host_optional::empty_optional()));
+                }
+                return Some(host.unknown_host_call(r));
+            }
             if registry == "minecraft:entity_type" {
                 if let Some(value) = crate::runtime::vanilla_entity_types::handle(&id) {
                     return Some(Ok(crate::runtime::host_optional::optional_wrap(value)));
@@ -414,6 +449,18 @@ fn registry_call(
             if let Some(entry) = host.observed_registry_entry(&registry, &id) {
                 return Some(Ok(entry.value.clone()));
             }
+            if matches!(registry.as_str(), "minecraft:block" | "minecraft:item") {
+                if let Some(value) = vanilla_value(&registry, &id) {
+                    return Some(Ok(value));
+                }
+                if id.starts_with("minecraft:") {
+                    return Some(
+                        vanilla_default(&registry)
+                            .map_or_else(|| host.unknown_host_call(r), |value| Ok(value)),
+                    );
+                }
+                return Some(host.unknown_host_call(r));
+            }
             if registry == "minecraft:entity_type" {
                 if let Some(value) = crate::runtime::vanilla_entity_types::handle(&id) {
                     return Some(Ok(value));
@@ -449,6 +496,9 @@ fn registry_call(
             let Some(value) = args.first() else {
                 return Some(host.unknown_host_call(r));
             };
+            if let Some(id) = vanilla_value_id(&registry, value) {
+                return Some(Ok(host_ids::identifier_of_text(id)));
+            }
             if registry == "minecraft:block_entity_type"
                 && let Some(id) = crate::runtime::game_object::text(value)
                 && let Some(id) = id.strip_prefix("client/block-entity-type/")
@@ -472,6 +522,15 @@ fn registry_call(
             };
             if host.observed_registry_entry(&registry, &id).is_some() {
                 return Some(Ok(Value::Int(1)));
+            }
+            if matches!(registry.as_str(), "minecraft:block" | "minecraft:item") {
+                if vanilla_value(&registry, &id).is_some() {
+                    return Some(Ok(Value::Int(1)));
+                }
+                if id.starts_with("minecraft:") {
+                    return Some(Ok(Value::Int(0)));
+                }
+                return Some(host.unknown_host_call(r));
             }
             if registry == "minecraft:entity_type" {
                 return Some(Ok(Value::Int(i32::from(
