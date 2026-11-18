@@ -31,6 +31,16 @@ const MAP_XMAP: &str = "dfu-map-xmap";
 const GETTER: &str = "dfu-builder-getter";
 const UNIT: &str = "dfu-unit";
 const UNIT_CODEC: &str = "dfu-unit-codec";
+const LIST: &str = "dfu-list";
+const FLAT_XMAP: &str = "dfu-flat-xmap";
+const COMAP_FLAT_MAP: &str = "dfu-comap-flat-map";
+const RECORD: &str = "dfu-record";
+const RECORD_MAP: &str = "dfu-record-map";
+const INSTANCE: &str = "dfu-builder-instance";
+const PRODUCT: &str = "dfu-product";
+const APPLIED: &str = "dfu-applied";
+const POINT: &str = "dfu-point";
+const LIFECYCLE: &str = "dfu-lifecycle";
 
 const CODEC_TYPES: &[&str] = &[
     CODEC,
@@ -46,6 +56,12 @@ const MAP_TYPES: &[&str] = &[
     "com/mojang/serialization/Keyable",
 ];
 const BUILDER_TYPES: &[&str] = &[RECORD_BUILDER, APP];
+const INSTANCE_TYPES: &[&str] = &[
+    "com/mojang/serialization/codecs/RecordCodecBuilder$Instance",
+    APP,
+];
+const PRODUCT_TYPES: &[&str] = &["com/mojang/datafixers/Products", APP];
+const LIFECYCLE_TYPES: &[&str] = &["com/mojang/serialization/Lifecycle"];
 
 fn held_values(value: &Value) -> Option<Vec<Value>> {
     let Value::Host(handle) = value else {
@@ -80,23 +96,39 @@ fn is_callback(value: &Value) -> bool {
 }
 
 fn map_codec(value: &Value) -> bool {
+    if crate::host_codec::opaque_codec_type(value).is_some_and(|t| t == MAP_CODEC) {
+        return true;
+    }
     let Some(tag) = tag(value) else {
         return false;
     };
-    if matches!(tag.as_str(), FIELD | OPTIONAL | MAP_XMAP | GETTER | UNIT) {
+    if matches!(
+        tag.as_str(),
+        FIELD | OPTIONAL | MAP_XMAP | GETTER | UNIT | RECORD_MAP
+    ) {
         return tag != GETTER;
     }
     constant_info(value).is_some_and(|(declared, name)| declared == MAP_CODEC || name == "EMPTY")
 }
 
 fn codec_receiver(value: &Value) -> bool {
+    if crate::host_codec::opaque_codec_type(value).is_some_and(|t| t == CODEC || t == PRIMITIVE) {
+        return true;
+    }
     let Some(tag) = tag(value) else {
         return false;
     };
-    matches!(tag.as_str(), CONSTANT | XMAP | UNIT_CODEC) && !map_codec(value)
+    (matches!(
+        tag.as_str(),
+        CONSTANT | XMAP | FLAT_XMAP | COMAP_FLAT_MAP | UNIT_CODEC | LIST | RECORD
+    ) || crate::host_codec::opaque_codec_type(value).is_some_and(|t| t == CODEC || t == PRIMITIVE))
+        && !map_codec(value)
 }
 
 fn map_receiver(value: &Value) -> bool {
+    if crate::host_codec::opaque_codec_type(value).is_some_and(|t| t == MAP_CODEC) {
+        return true;
+    }
     map_codec(value) && !matches!(tag(value).as_deref(), Some(GETTER))
 }
 
@@ -165,6 +197,16 @@ fn constant(declared: &str, owner: &str, name: &str) -> Value {
             Value::Ref(Some(CONSTANT.to_owned())),
             Value::Ref(Some(declared.to_owned())),
             Value::Ref(Some(owner.to_owned())),
+            Value::Ref(Some(name.to_owned())),
+        ],
+    ))
+}
+
+fn lifecycle(name: &str) -> Value {
+    Value::Host(HostRef::of_values(
+        HostKind::DfuCodec,
+        &[
+            Value::Ref(Some(LIFECYCLE.to_owned())),
             Value::Ref(Some(name.to_owned())),
         ],
     ))
@@ -244,11 +286,41 @@ fn text(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<String>, Nat
             };
             Ok(nested.text(value)?.map(|text| format!("Unit[{text}]")))
         }
+        LIST => {
+            let Some(inner) = values.get(2) else {
+                return Ok(None);
+            };
+            Ok(nested.text(inner)?.map(|text| format!("ListCodec[{text}]")))
+        }
         XMAP | MAP_XMAP => {
             let Some(inner) = values.get(2) else {
                 return Ok(None);
             };
             Ok(nested.text(inner)?.map(|text| format!("{text}[xmapped]")))
+        }
+        FLAT_XMAP | COMAP_FLAT_MAP => {
+            let Some(inner) = values.get(2) else {
+                return Ok(None);
+            };
+            let suffix = if kind == FLAT_XMAP {
+                "flatXmapped"
+            } else {
+                "comapFlatMapped"
+            };
+            Ok(nested.text(inner)?.map(|text| format!("{text}[{suffix}]")))
+        }
+        LIFECYCLE => {
+            let Some(Value::Ref(Some(name))) = values.get(1) else {
+                return Ok(None);
+            };
+            Ok(Some(
+                match name.as_str() {
+                    "stable" => "Stable",
+                    "experimental" => "Experimental",
+                    _ => return Ok(None),
+                }
+                .to_owned(),
+            ))
         }
         _ => Ok(None),
     }
@@ -278,12 +350,18 @@ pub(crate) fn dfu_codec_types(key: &str) -> &'static [&'static str] {
         .split(',')
         .nth(1)
         .and_then(|part| part.strip_prefix('r'));
-    if matches!(tag, FIELD | OPTIONAL | MAP_XMAP | UNIT)
+    if matches!(tag, FIELD | OPTIONAL | MAP_XMAP | UNIT | RECORD_MAP)
         || (tag == CONSTANT && declared == Some(MAP_CODEC))
     {
         MAP_TYPES
     } else if tag == GETTER {
         BUILDER_TYPES
+    } else if tag == INSTANCE {
+        INSTANCE_TYPES
+    } else if tag == PRODUCT || tag == APPLIED || tag == POINT {
+        PRODUCT_TYPES
+    } else if tag == LIFECYCLE {
+        LIFECYCLE_TYPES
     } else {
         CODEC_TYPES
     }
@@ -297,6 +375,16 @@ pub(crate) fn codec_type(value: &Value) -> Option<&'static str> {
 }
 
 pub(crate) fn static_field(r: &MethodRef) -> Option<Value> {
+    if r.owner == "net/minecraft/resources/Identifier"
+        && r.name == "CODEC"
+        && r.descriptor == "Lcom/mojang/serialization/Codec;"
+    {
+        return Some(constant(
+            &r.descriptor[1..r.descriptor.len() - 1],
+            &r.owner,
+            &r.name,
+        ));
+    }
     if r.owner != CODEC
         || !matches!(
             r.descriptor.as_str(),
@@ -450,6 +538,17 @@ fn runtime_text<H: Host>(
             };
             Ok(runtime_text(runtime, inner)?.map(|text| format!("{text}[xmapped]")))
         }
+        FLAT_XMAP | COMAP_FLAT_MAP => {
+            let Some(inner) = values.get(2) else {
+                return Ok(None);
+            };
+            let suffix = if kind == FLAT_XMAP {
+                "flatXmapped"
+            } else {
+                "comapFlatMapped"
+            };
+            Ok(runtime_text(runtime, inner)?.map(|text| format!("{text}[{suffix}]")))
+        }
         CONSTANT => {
             let Some(Value::Ref(Some(name))) = values.get(3) else {
                 return Ok(None);
@@ -457,6 +556,64 @@ fn runtime_text<H: Host>(
             Ok(primitive_text(name).map(str::to_owned))
         }
         _ => Ok(None),
+    }
+}
+
+fn product_arity_from_descriptor(descriptor: &str) -> Option<usize> {
+    descriptor
+        .rsplit_once("$P")?
+        .1
+        .strip_suffix(';')?
+        .parse()
+        .ok()
+}
+
+fn runtime_refuse<H: Host>(
+    runtime: &mut Runtime<'_, H>,
+    r: &MethodRef,
+    reason: String,
+) -> Result<Option<Value>, NativeError> {
+    Ok(refuse(runtime.host, r, reason))
+}
+
+fn runtime_record_builder<H: Host>(
+    runtime: &mut Runtime<'_, H>,
+    r: &MethodRef,
+    args: &[Value],
+    output_tag: &str,
+) -> Result<Option<Value>, NativeError> {
+    let Some(callback) = args.first().filter(|value| is_callback(value)) else {
+        return Ok(None);
+    };
+    let instance = match node(runtime.host, INSTANCE, Vec::new()) {
+        Ok(value) => value,
+        Err(reason) => return runtime_refuse(runtime, r, reason),
+    };
+    let Some(app) = runtime.invoke_callback(callback, &[instance])? else {
+        runtime_refuse(
+            runtime,
+            r,
+            "RecordCodecBuilder callback returned null".into(),
+        )?;
+        return Ok(Some(crate::host_codec::opaque_codec(CODEC)));
+    };
+    if matches!(app, Value::Ref(None) | Value::Void) {
+        runtime.host.dfu_codec_refused(format!(
+            "{}#{}{}: RecordCodecBuilder callback returned null",
+            r.owner, r.name, r.descriptor
+        ));
+        return Ok(Some(crate::host_codec::opaque_codec(CODEC)));
+    }
+    if !matches!(tag(&app).as_deref(), Some(APPLIED) | Some(POINT)) {
+        return runtime_refuse(
+            runtime,
+            r,
+            "RecordCodecBuilder callback did not return an App node".into(),
+        );
+    }
+    match node(runtime.host, output_tag, vec![app]) {
+        Ok(value) => Ok(Some(value)),
+        Err(reason) => runtime_refuse(runtime, r, reason),
     }
 }
 
@@ -468,6 +625,53 @@ pub(crate) fn runtime_instance_call<H: Host>(
     receiver: Option<&Value>,
     args: &[Value],
 ) -> Result<Option<Value>, NativeError> {
+    if receiver.is_none() {
+        if r.owner == "com/mojang/serialization/Lifecycle"
+            && r.descriptor == "()Lcom/mojang/serialization/Lifecycle;"
+        {
+            return Ok(match r.name.as_str() {
+                "stable" => Some(lifecycle("stable")),
+                "experimental" => Some(lifecycle("experimental")),
+                _ => None,
+            });
+        }
+        if r.owner == RECORD_BUILDER {
+            if r.name == "instance"
+                && r.descriptor == "()Lcom/mojang/serialization/codecs/RecordCodecBuilder$Instance;"
+            {
+                return Ok(Some(match node(runtime.host, INSTANCE, Vec::new()) {
+                    Ok(value) => value,
+                    Err(reason) => {
+                        return runtime_refuse(runtime, r, reason);
+                    }
+                }));
+            }
+            if r.name == "create"
+                && r.descriptor == "(Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;"
+            {
+                return runtime_record_builder(runtime, r, args, RECORD);
+            }
+            if r.name == "mapCodec"
+                && r.descriptor
+                    == "(Ljava/util/function/Function;)Lcom/mojang/serialization/MapCodec;"
+            {
+                return runtime_record_builder(runtime, r, args, RECORD_MAP);
+            }
+            if matches!(r.name.as_str(), "stable" | "point")
+                && r.descriptor.starts_with("(Ljava/lang/Object;")
+            {
+                let Some(value) = args.first().cloned() else {
+                    return Ok(None);
+                };
+                let mut values = vec![value];
+                values.push(args.get(1).cloned().unwrap_or(Value::Void));
+                return match node(runtime.host, POINT, values) {
+                    Ok(value) => Ok(Some(value)),
+                    Err(reason) => runtime_refuse(runtime, r, reason),
+                };
+            }
+        }
+    }
     if r.owner == DATA_RESULT && r.name == "result" && r.descriptor == "()Ljava/util/Optional;" {
         let Some(receiver) = receiver else {
             return Ok(None);
@@ -489,6 +693,58 @@ pub(crate) fn runtime_instance_call<H: Host>(
     let Some(receiver) = receiver else {
         return Ok(None);
     };
+    let receiver_tag = tag(receiver);
+    if receiver_tag.as_deref() == Some(INSTANCE)
+        && r.owner == "com/mojang/serialization/codecs/RecordCodecBuilder$Instance"
+    {
+        if matches!(r.name.as_str(), "stable" | "point")
+            && r.descriptor.starts_with("(Ljava/lang/Object;")
+        {
+            let Some(value) = args.first().cloned() else {
+                return Ok(None);
+            };
+            let mut values = vec![value];
+            values.push(args.get(1).cloned().unwrap_or(Value::Void));
+            return match node(runtime.host, POINT, values) {
+                Ok(value) => Ok(Some(value)),
+                Err(reason) => runtime_refuse(runtime, r, reason),
+            };
+        }
+        if r.name == "group" {
+            let Some(arity) = product_arity_from_descriptor(&r.descriptor) else {
+                return Ok(None);
+            };
+            if !(1..=16).contains(&arity) || args.len() != arity {
+                return runtime_refuse(
+                    runtime,
+                    r,
+                    format!("RecordCodecBuilder group arity {} is outside 1..16", arity),
+                );
+            }
+            let mut values = vec![Value::Int(arity as i32)];
+            values.extend_from_slice(args);
+            return match node(runtime.host, PRODUCT, values) {
+                Ok(value) => Ok(Some(value)),
+                Err(reason) => runtime_refuse(runtime, r, reason),
+            };
+        }
+    }
+    if receiver_tag.as_deref() == Some(PRODUCT)
+        && r.owner.starts_with("com/mojang/datafixers/Products$P")
+        && r.name == "apply"
+    {
+        let Some(constructor) = args.get(1).filter(|value| is_callback(value)) else {
+            return Ok(None);
+        };
+        return match node(
+            runtime.host,
+            APPLIED,
+            vec![receiver.clone(), args[0].clone(), constructor.clone()],
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(reason) => runtime_refuse(runtime, r, reason),
+        };
+    }
     if r.name == "toString" && r.descriptor == "()Ljava/lang/String;" {
         return Ok(runtime_text(runtime, receiver)?.map(|text| Value::Ref(Some(text))));
     }
@@ -604,6 +860,49 @@ pub(crate) fn invoke(
             let receiver = receiver.filter(|value| map_receiver(value))?;
             (tag(receiver).as_deref() == Some(UNIT))
                 .then(|| build(host, r, UNIT_CODEC, vec![receiver_held_value(receiver)?]))?
+        }
+        (CODEC | PRIMITIVE, "listOf", descriptor)
+            if (descriptor == "()Lcom/mojang/serialization/Codec;"
+                || descriptor == "(II)Lcom/mojang/serialization/Codec;") =>
+        {
+            let inner = receiver.filter(|value| codec_receiver(value))?.clone();
+            build(host, r, LIST, vec![inner])
+        }
+        (
+            CODEC | PRIMITIVE | MAP_CODEC,
+            "flatXmap",
+            "(Ljava/util/function/Function;Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;",
+        )
+        | (
+            CODEC | PRIMITIVE | MAP_CODEC,
+            "comapFlatMap",
+            "(Ljava/util/function/Function;Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;",
+        )
+        | (
+            MAP_CODEC,
+            "flatXmap",
+            "(Ljava/util/function/Function;Ljava/util/function/Function;)Lcom/mojang/serialization/MapCodec;",
+        ) => {
+            let inner = receiver?;
+            let is_map = map_codec(inner);
+            if (r.owner == MAP_CODEC && !is_map) || (r.owner != MAP_CODEC && is_map) {
+                return None;
+            }
+            if !is_map && !codec_receiver(inner) || is_map && !map_receiver(inner) {
+                return None;
+            }
+            let to = args.first().filter(|value| is_callback(value))?.clone();
+            let from = args.get(1).filter(|value| is_callback(value))?.clone();
+            build(
+                host,
+                r,
+                if r.name == "flatXmap" {
+                    FLAT_XMAP
+                } else {
+                    COMAP_FLAT_MAP
+                },
+                vec![inner.clone(), to, from],
+            )
         }
         (
             CODEC | PRIMITIVE | MAP_CODEC,
