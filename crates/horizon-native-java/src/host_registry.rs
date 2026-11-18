@@ -121,6 +121,7 @@ const NOT_MAPPED_REGISTRY: &[&str] = &[
     "net/minecraft/core/Holder$Reference",
     "net/neoforged/neoforge/registries/DeferredHolder",
     "net/minecraftforge/registries/RegistryObject",
+    "net/minecraft/world/entity/EntityType",
 ];
 
 /// Game classes no `DeferredHolder` is (`Holder.Reference`'s line).
