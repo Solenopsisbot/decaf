@@ -38,6 +38,16 @@ fn rows_match_java25() {
 }
 
 #[test]
+fn entity_othermod_contains_key_is_counted() {
+    let mut sources = STUBS.to_vec();
+    sources.push(("demo/Probe.java", PROBE));
+    let fixture = Fixture::build("entity-type-lookup-entity-othermod", &sources);
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    assert_eq!(fixture.text_on(&mut host, "entityOthermod"), "false");
+    assert_eq!(host.unknown_host_calls(), &[("net/minecraft/core/DefaultedRegistry#containsKey(Lnet/minecraft/resources/Identifier;)Z".into(), 1)]);
+}
+
+#[test]
 fn block_contains_key_is_counted() {
     let mut sources = STUBS.to_vec();
     sources.push(("demo/Probe.java", PROBE));
