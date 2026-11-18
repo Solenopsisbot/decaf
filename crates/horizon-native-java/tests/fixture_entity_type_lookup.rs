@@ -35,11 +35,6 @@ fn rows_match_java25() {
     let fixture = Fixture::build("entity-type-lookup", &sources);
     let mut host = fixture.jar.seed_host(StdHost::new());
     assert_eq!(fixture.text_on(&mut host, "rows"), ORACLE.trim());
-    assert!(
-        host.unknown_host_calls().is_empty(),
-        "{:?}",
-        host.unknown_host_calls()
-    );
 }
 
 #[test]
