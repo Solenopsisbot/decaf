@@ -15,6 +15,10 @@ const STUBS: &[(&str, &str)] = &[
         "package net.minecraft.world.entity; public class EntityType<T>{ public static class Builder {} }",
     ),
     (
+        "net/minecraft/world/level/block/Block.java",
+        "package net.minecraft.world.level.block; public class Block {}",
+    ),
+    (
         "net/minecraft/core/Registry.java",
         "package net.minecraft.core; import net.minecraft.resources.Identifier; import java.util.Optional; public interface Registry<T>{ Optional<T> getOptional(Identifier i); Optional<T> get(Identifier i); T getValue(Identifier i); boolean containsKey(Identifier i); }",
     ),
@@ -38,7 +42,29 @@ fn rows_match_java25() {
     sources.push(("demo/Probe.java", PROBE));
     let fixture = Fixture::build("entity-type-lookup", &sources);
     let mut host = fixture.jar.seed_host(StdHost::new());
-    assert_eq!(fixture.text_on(&mut host, "rows"), ORACLE.trim());
+    let captured = format!(
+        "{}\n{}",
+        fixture.text_on(&mut host, "rows"),
+        fixture.text_on(&mut host, "rejected")
+    );
+    assert_eq!(captured, ORACLE.trim());
+    assert!(
+        host.unknown_host_calls().is_empty(),
+        "{:?}",
+        host.unknown_host_calls()
+    );
+}
+
+#[test]
+fn decidable_rejected_cast_throws() {
+    let mut sources = STUBS.to_vec();
+    sources.push(("demo/Probe.java", PROBE));
+    let fixture = Fixture::build("entity-type-checkcast-rejected", &sources);
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    assert_eq!(
+        fixture.text_on(&mut host, "rejected"),
+        "java.lang.ClassCastException"
+    );
     assert!(
         host.unknown_host_calls().is_empty(),
         "{:?}",

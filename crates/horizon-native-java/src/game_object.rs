@@ -501,9 +501,18 @@ fn identity_instance_of(
         if wanted == "java/lang/Object" || wanted == "net/minecraft/world/entity/EntityType" {
             return Some(true);
         }
+        if wanted == "net/minecraft/world/level/block/Block" {
+            return Some(false);
+        }
         return hierarchy.is_instance("net/minecraft/world/entity/EntityType", wanted);
     }
     instance_of_class(handle, wanted, hierarchy)
+}
+
+/// The exact runtime class of a game handle whose producer gives us that fact.
+pub(crate) fn known_class(key: &str) -> Option<&'static str> {
+    key.starts_with("game/entity_type/")
+        .then_some("net/minecraft/world/entity/EntityType")
 }
 
 pub(crate) const IDENTITY_METHODS: Methods = Methods {

@@ -431,7 +431,10 @@ impl<H: Host> Runtime<'_, H> {
             return Some(match handle.instance_of(target, self) {
                 Some(true) => HostCast::Fits,
                 // The exception names the exact class: unknown, counted.
-                Some(false) => match handle.class() {
+                Some(false) => match handle
+                    .class()
+                    .or_else(|| crate::runtime::game_object::known_class(handle.key()))
+                {
                     Some(class) => HostCast::Throws(class.to_owned()),
                     None => HostCast::FailsCounted,
                 },
