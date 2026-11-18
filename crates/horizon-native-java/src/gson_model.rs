@@ -880,22 +880,25 @@ impl<H: Host> Runtime<'_, H> {
         // `StackOverflowError`, and so does this writer.
         let _level = crate::host_recursion::enter()?;
         // Exact registered TypeAdapter dispatch precedes reflective serialization.
-        if let Some(class) = class_of_value(value)
-            && {
-                eprintln!(
-                    "GSON_DEBUG dispatch value={value:?} class={class} marker={gson_marker:?} adapters={:?}",
-                    self.gson_type_adapters
-                );
-                true
+        if let Some(class) = class_of_value(value).or_else(|| match value {
+            Value::Ref(Some(marker)) if value_class::is_plain_string(marker) => {
+                Some("java/lang/String".to_owned())
             }
-            && let Some(adapter) = self
-                .gson_type_adapters
-                .get(gson_marker.unwrap_or_default())
-                .into_iter()
-                .flat_map(|v| v.iter())
-                .rev()
-                .find(|(ty, _)| ty == class.as_str())
-                .map(|(_, adapter)| adapter.clone())
+            _ => None,
+        }) && {
+            eprintln!(
+                "GSON_DEBUG dispatch value={value:?} class={class} marker={gson_marker:?} adapters={:?}",
+                self.gson_type_adapters
+            );
+            true
+        } && let Some(adapter) = self
+            .gson_type_adapters
+            .get(gson_marker.unwrap_or_default())
+            .into_iter()
+            .flat_map(|v| v.iter())
+            .rev()
+            .find(|(ty, _)| ty == class.as_str())
+            .map(|(_, adapter)| adapter.clone())
         {
             let sink = format!("gson-adapter-{depth}");
             let sink_key = format!("mem:{sink}");
