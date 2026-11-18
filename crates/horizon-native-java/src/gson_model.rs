@@ -923,7 +923,7 @@ impl<H: Host> Runtime<'_, H> {
                 // `array` borrows the runtime (a `Cow` over the backing since #338),
                 // so own the elements before the writer takes `&mut self`.
                 let values = self.array(value)?.into_owned();
-                self.gson_array_text(&values, style, depth, tree_mode)?
+                self.gson_array_text(&values, style, depth, tree_mode, gson_marker)?
             }
             // A host model's object (`Optional`): Gson reflects its private
             // fields, which JDK 25's module system refuses; not answered.
@@ -969,14 +969,14 @@ impl<H: Host> Runtime<'_, H> {
                 } else if let Some(kind) = gson_marker_kind(self.host, value, tree_mode) {
                     let values = runtime_collection_values(self.host, value)?;
                     if kind == "map" {
-                        self.gson_object_text(&values, style, depth, tree_mode)?
+                        self.gson_object_text(&values, style, depth, tree_mode, gson_marker)?
                     } else {
-                        self.gson_array_text(&values, style, depth, tree_mode)?
+                        self.gson_array_text(&values, style, depth, tree_mode, gson_marker)?
                     }
                 } else if let Some(class) = crate::jar_object::object_class(value)
                     && self.class(class).is_some()
                 {
-                    self.gson_fields_text(class, marker, style, depth, tree_mode)?
+                    self.gson_fields_text(class, marker, style, depth, tree_mode, gson_marker)?
                 } else {
                     // A plain `String` value (and a marker the runtime only
                     // models as text) is a JSON string.
@@ -993,6 +993,7 @@ impl<H: Host> Runtime<'_, H> {
         style: &GsonStyle,
         depth: usize,
         tree_mode: bool,
+        gson_marker: Option<&str>,
     ) -> Result<Option<String>, NativeError> {
         if values.is_empty() {
             return Ok(Some("[]".into()));
@@ -1006,7 +1007,8 @@ impl<H: Host> Runtime<'_, H> {
                 }
             }
             out.push_str(&style.line(depth + 1));
-            let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode, None)?
+            let Some(text) =
+                self.gson_to_json_mode(value, style, depth + 1, tree_mode, gson_marker)?
             else {
                 eprintln!("GSON_DEBUG recursive value={:?}", value);
                 return Ok(None);
@@ -1024,6 +1026,7 @@ impl<H: Host> Runtime<'_, H> {
         style: &GsonStyle,
         depth: usize,
         tree_mode: bool,
+        gson_marker: Option<&str>,
     ) -> Result<Option<String>, NativeError> {
         if !values.len().is_multiple_of(2) {
             return Err(NativeError::Metadata(
@@ -1057,7 +1060,8 @@ impl<H: Host> Runtime<'_, H> {
             out.push_str(&style.escape(&key_text));
             out.push('"');
             out.push_str(style.colon());
-            let Some(text) = self.gson_to_json_mode(&value, style, depth + 1, tree_mode, None)?
+            let Some(text) =
+                self.gson_to_json_mode(&value, style, depth + 1, tree_mode, gson_marker)?
             else {
                 return Ok(None);
             };
@@ -1084,6 +1088,7 @@ impl<H: Host> Runtime<'_, H> {
         style: &GsonStyle,
         depth: usize,
         tree_mode: bool,
+        gson_marker: Option<&str>,
     ) -> Result<Option<String>, NativeError> {
         if tree_mode && self.class(class).is_some_and(ClassFile::is_record) {
             return Ok(None);
@@ -1132,7 +1137,8 @@ impl<H: Host> Runtime<'_, H> {
             out.push_str(&style.escape(name));
             out.push('"');
             out.push_str(style.colon());
-            let Some(text) = self.gson_to_json_mode(value, style, depth + 1, tree_mode, None)?
+            let Some(text) =
+                self.gson_to_json_mode(value, style, depth + 1, tree_mode, gson_marker)?
             else {
                 eprintln!("GSON_DEBUG recursive value={:?}", value);
                 return Ok(None);
