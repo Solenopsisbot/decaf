@@ -139,6 +139,7 @@ impl Fixture {
             });
         let text = match value {
             Value::Ref(Some(text)) => text,
+            Value::Ref(None) => "null".into(),
             other => panic!(
                 "{method} did not return a string: {other:?}; unknown={:?}",
                 host.unknown_host_calls()
