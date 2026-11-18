@@ -362,7 +362,6 @@ fn vanilla_value(registry: &str, id: &str) -> Option<Value> {
     match registry {
         "minecraft:block" => crate::runtime::vanilla_blocks::handle(id),
         "minecraft:item" => crate::runtime::vanilla_items::handle(id),
-        "minecraft:entity_type" => crate::runtime::vanilla_entity_types::handle(id),
         _ => None,
     }
 }
@@ -372,7 +371,6 @@ fn vanilla_value_id<'a>(registry: &str, value: &'a Value) -> Option<&'a str> {
     let prefix = match registry {
         "minecraft:block" => "game/block/",
         "minecraft:item" => "game/item/",
-        "minecraft:entity_type" => "game/entity_type/",
         _ => return None,
     };
     let id = marker.strip_prefix(prefix)?;
@@ -401,6 +399,9 @@ fn registry_call(
             if matches!(registry.as_str(), "minecraft:block" | "minecraft:item") {
                 if let Some(value) = vanilla_value(&registry, &id) {
                     return Some(Ok(crate::runtime::host_optional::optional_wrap(value)));
+                }
+                if let Some(holder) = observed_holder(host, receiver, &id) {
+                    return Some(Ok(crate::runtime::host_optional::optional_wrap(holder)));
                 }
                 if id.starts_with("minecraft:") {
                     return Some(Ok(crate::runtime::host_optional::empty_optional()));
