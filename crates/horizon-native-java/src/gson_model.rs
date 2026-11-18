@@ -619,9 +619,6 @@ impl<H: Host> Runtime<'_, H> {
                                     );
                                 }
                                 if is_type_adapter {
-                                    eprintln!(
-                                        "GSON_DEBUG register marker={marker} type={type_name} adapter={adapter_class}"
-                                    );
                                     self.gson_type_adapters
                                         .entry(marker.clone())
                                         .or_default()
@@ -885,13 +882,7 @@ impl<H: Host> Runtime<'_, H> {
                 Some("java/lang/String".to_owned())
             }
             _ => None,
-        }) && {
-            eprintln!(
-                "GSON_DEBUG dispatch value={value:?} class={class} marker={gson_marker:?} adapters={:?}",
-                self.gson_type_adapters
-            );
-            true
-        } && let Some(adapter) = self
+        }) && let Some(adapter) = self
             .gson_type_adapters
             .get(gson_marker.unwrap_or_default())
             .into_iter()
@@ -918,8 +909,7 @@ impl<H: Host> Runtime<'_, H> {
                     Some(adapter.clone()),
                     &[writer, value.clone()],
                 );
-                if let Err(error) = &result {
-                    eprintln!("GSON_DEBUG adapter invoke error={error}");
+                if result.is_err() {
                     return Ok(None);
                 }
                 return Ok(self.io_writers.get(&sink_key).cloned());
