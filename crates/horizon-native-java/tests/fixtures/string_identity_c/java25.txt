@@ -1,0 +1,4 @@
+normal=ok:2
+directIdentity=false
+identityMap=null
+literalLookup=1
