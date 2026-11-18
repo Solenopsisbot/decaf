@@ -267,13 +267,22 @@ impl StdHost {
             // host answers the version it was seeded with, and nothing when
             // the caller did not supply one.
             (
+                "net/minecraft/SharedConstants",
+                "getCurrentVersion",
+                "()Lnet/minecraft/WorldVersion;",
+            ) => Some(
+                self.game_version
+                    .as_deref()
+                    .map_or(Value::Ref(None), loader::world_version),
+            ),
+            (
                 "net/minecraft/DetectedVersion",
                 "tryDetectVersion",
                 "()Lnet/minecraft/WorldVersion;",
             ) => Some(
                 self.game_version
                     .as_deref()
-                    .map_or(Value::Ref(None), loader::world_version),
+                    .map_or(Value::Ref(None), loader::world_version_fresh),
             ),
             _ => None,
         }
@@ -293,7 +302,7 @@ impl StdHost {
             let name = crate::host_path::fml_path_name(receiver)?;
             return fml_path_root(name).map(crate::path_value);
         }
-        if let Some(value) = self.neoforge_loader_handle(r, receiver) {
+        if let Some(value) = self.neoforge_loader_handle(r, receiver, args) {
             return Some(value);
         }
         let marker = match receiver {
@@ -371,7 +380,12 @@ impl StdHost {
     /// container's bus, info and extension points, a mod info's id and
     /// version, a file info's version, a config type's name and ordinal, a
     /// world version's name.
-    fn neoforge_loader_handle(&mut self, r: &MethodRef, receiver: &Value) -> Option<Value> {
+    fn neoforge_loader_handle(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        _args: &[Value],
+    ) -> Option<Value> {
         if let Some(id) = loader::container_id(receiver) {
             return match (r.name.as_str(), r.descriptor.as_str()) {
                 // A `javafml` mod's container is an `FMLModContainer`, whose
@@ -447,11 +461,14 @@ impl StdHost {
             };
         }
         if let Some(name) = loader::world_version_name(receiver) {
-            return matches!(
-                (r.name.as_str(), r.descriptor.as_str()),
-                ("name" | "getName", "()Ljava/lang/String;")
-            )
-            .then(|| Value::Ref(Some(name)));
+            return match (r.name.as_str(), r.descriptor.as_str()) {
+                ("name" | "getName", "()Ljava/lang/String;") => Some(Value::Ref(Some(name))),
+                ("id", "()Ljava/lang/String;") => Some(Value::Ref(Some(name))),
+                ("protocolVersion", "()I") => Some(Value::Int(777)),
+                ("stable", "()Z") => Some(Value::Int(1)),
+                ("dataVersion", "()Lnet/minecraft/world/level/storage/DataVersion;") => None,
+                _ => None,
+            };
         }
         None
     }

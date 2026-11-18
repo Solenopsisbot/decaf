@@ -1870,8 +1870,8 @@ const KINDS: &[KindInfo] = &[
         class: ClassRule::Unknown {
             declared: crate::runtime::host_neoforge_loader::world_version_types,
         },
-        // A new record per detection.
-        canonical: never_canonical,
+        // Version records are stored singletons in SharedConstants.
+        canonical: always_canonical,
         methods: &crate::runtime::host_neoforge_loader::WORLD_VERSION_METHODS,
     },
     // The command surface (`host_brigadier.rs`). An exact `getClass()` would

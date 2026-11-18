@@ -48,6 +48,9 @@
 //!
 //! [`ClassRule::Unknown`]: crate::runtime::host_ref::ClassRule
 
+use std::sync::atomic::{AtomicU64, Ordering};
+static NEXT_VERSION: AtomicU64 = AtomicU64::new(1);
+
 use crate::runtime::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, Nested, instance_of_class};
 use crate::runtime::{NativeError, Value};
 
@@ -81,8 +84,8 @@ fn values_of(value: &Value, kind: HostKind) -> Option<Vec<Value>> {
 
 /// The one text a one-value handle of `kind` holds.
 fn held_text(value: &Value, kind: HostKind) -> Option<String> {
-    match values_of(value, kind)?.as_slice() {
-        [Value::Ref(Some(held))] => Some(held.clone()),
+    match values_of(value, kind)?.first() {
+        Some(Value::Ref(Some(held))) => Some(held.clone()),
         _ => None,
     }
 }
@@ -260,10 +263,17 @@ pub(crate) fn world_version(name: &str) -> Value {
 }
 
 /// A world version handle's name.
-pub(crate) fn world_version_name(value: &Value) -> Option<String> {
-    held_text(value, HostKind::WorldVersion)
+pub(crate) fn world_version_fresh(name: &str) -> Value {
+    let n = NEXT_VERSION.fetch_add(1, Ordering::Relaxed);
+    Value::Host(HostRef::of_values(
+        HostKind::WorldVersion,
+        &[text(name), text(&n.to_string())],
+    ))
 }
 
+pub(crate) fn world_version_name(value: &Value) -> Option<String> {
+    held_text(value, HostKind::WorldVersion).filter(|s| !s.starts_with("pack:"))
+}
 pub(crate) fn world_version_types(_: &str) -> &'static [&'static str] {
     &["net/minecraft/WorldVersion"]
 }
@@ -320,8 +330,11 @@ pub(crate) const CONFIG_TYPE_METHODS: Methods = Methods {
 /// a different record.
 pub(crate) const WORLD_VERSION_METHODS: Methods = Methods {
     equals: |handle, other, _| {
+        let left = world_version_name(&Value::Host(handle.clone()));
         Ok(Some(match other {
-            Value::Host(other) => other.kind() == HostKind::WorldVersion && other == handle,
+            Value::Host(other) if other.kind() == HostKind::WorldVersion => {
+                left.is_some() && left == world_version_name(&Value::Host(other.clone()))
+            }
             _ => false,
         }))
     },
