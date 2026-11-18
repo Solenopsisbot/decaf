@@ -13,15 +13,15 @@ public final class Probe {
 
   /** A fresh String compared with an interned literal has unknown identity. */
   public static String directIdentity() {
-    String value = new String("same");
+    String value = new String(new char[] {'s', 'a', 'm', 'e'});
     return String.valueOf(value == "same");
   }
 
   /** Equal-text IdentityHashMap keys remain counted rather than guessed. */
   public static String identityMap() {
     Map<String, Integer> map = new IdentityHashMap<>();
-    map.put(new String("key"), 1);
-    return String.valueOf(map.get(new String("key")));
+    map.put(new String(new char[] {'k', 'e', 'y'}), 1);
+    return String.valueOf(map.get(new String(new char[] {'k', 'e', 'y'})));
   }
 
   /** A literal lookup is also counted because the model has no String provenance. */

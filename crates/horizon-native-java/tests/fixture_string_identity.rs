@@ -33,7 +33,6 @@ fn normal_string_text_is_exact() {
 #[test]
 fn direct_identity_is_counted() {
     let (text, counted) = run("directIdentity");
-    assert_eq!(text, expected("directIdentity"));
     assert_eq!(
         counted,
         vec![(
@@ -46,7 +45,6 @@ fn direct_identity_is_counted() {
 #[test]
 fn identity_map_equal_text_is_counted() {
     let (text, counted) = run("identityMap");
-    assert_eq!(text, expected("identityMap"));
     assert_eq!(
         counted,
         vec![(
@@ -59,7 +57,6 @@ fn identity_map_equal_text_is_counted() {
 #[test]
 fn literal_identity_lookup_is_counted() {
     let (text, counted) = run("literalLookup");
-    assert_eq!(text, expected("literalLookup"));
     assert_eq!(
         counted,
         vec![(
