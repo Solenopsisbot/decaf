@@ -11,8 +11,6 @@ use std::{
 };
 use zip::write::SimpleFileOptions;
 
-const GSON_RELATIVE: &str = "ava/scratch/vanilla-values/oracle/libraries/server/com/google/code/gson/gson/2.14.0/gson-2.14.0.jar";
-
 fn javac() -> PathBuf {
     std::env::var_os("JAVA_HOME")
         .map(|home| PathBuf::from(home).join("bin/javac"))
@@ -22,9 +20,7 @@ fn javac() -> PathBuf {
 fn gson_path() -> PathBuf {
     std::env::var_os("HORIZON_GSON_JAR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(GSON_RELATIVE)
-        })
+        .unwrap_or_else(|| panic!("HORIZON_GSON_JAR must name the real Gson 2.14.0 jar"))
 }
 
 fn files_under(root: &Path) -> Vec<PathBuf> {
