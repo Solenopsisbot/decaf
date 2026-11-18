@@ -28318,8 +28318,13 @@ impl<H: Host> Runtime<'_, H> {
                             .and_then(|marker| self.gson_type_adapters.get(marker))
                             .is_some_and(|adapters| adapters.iter().any(|(ty, _)| ty == class))
                     });
+                let has_type_adapter = receiver
+                    .and_then(expect_ref)
+                    .and_then(|marker| self.gson_type_adapters.get(marker))
+                    .is_some_and(|adapters| !adapters.is_empty());
                 if style.is_counted()
                     && !adapter_hit
+                    && !has_type_adapter
                     && matches!(r.name.as_str(), "toJson" | "toJsonTree" | "fromJson")
                 {
                     return self
