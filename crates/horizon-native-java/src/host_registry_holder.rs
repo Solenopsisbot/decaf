@@ -378,10 +378,6 @@ fn vanilla_value_id<'a>(registry: &str, value: &'a Value) -> Option<&'a str> {
     Some(id)
 }
 
-fn vanilla_default(registry: &str) -> Option<Value> {
-    vanilla_value(registry, "minecraft:air")
-}
-
 fn registry_call(
     host: &mut StdHost,
     r: &MethodRef,
@@ -402,9 +398,6 @@ fn registry_call(
                 }
                 if let Some(holder) = observed_holder(host, receiver, &id) {
                     return Some(Ok(crate::host_optional::optional_wrap(holder)));
-                }
-                if id.starts_with("minecraft:") {
-                    return Some(Ok(crate::host_optional::empty_optional()));
                 }
                 return Some(host.unknown_host_call(r));
             }
@@ -453,12 +446,6 @@ fn registry_call(
             if matches!(registry.as_str(), "minecraft:block" | "minecraft:item") {
                 if let Some(value) = vanilla_value(&registry, &id) {
                     return Some(Ok(value));
-                }
-                if id.starts_with("minecraft:") {
-                    return Some(
-                        vanilla_default(&registry)
-                            .map_or_else(|| host.unknown_host_call(r), |value| Ok(value)),
-                    );
                 }
                 return Some(host.unknown_host_call(r));
             }
@@ -527,9 +514,6 @@ fn registry_call(
             if matches!(registry.as_str(), "minecraft:block" | "minecraft:item") {
                 if vanilla_value(&registry, &id).is_some() {
                     return Some(Ok(Value::Int(1)));
-                }
-                if id.starts_with("minecraft:") {
-                    return Some(Ok(Value::Int(0)));
                 }
                 return Some(host.unknown_host_call(r));
             }

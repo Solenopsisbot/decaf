@@ -12,15 +12,10 @@ public final class Probe {
 
     static String row(Registry registry, String present) {
         Identifier presentId = id(present);
-        Identifier missingId = id("minecraft:nope");
         Object value = registry.getValue(presentId);
-        Object fallback = registry.getValue(missingId);
         return Boolean.toString(registry.containsKey(presentId))
             + "|" + Boolean.toString(registry.get(presentId).isPresent())
-            + "|" + registry.getKey(value)
-            + "|" + Boolean.toString(registry.containsKey(missingId))
-            + "|" + Boolean.toString(registry.get(missingId).isPresent())
-            + "|" + registry.getKey(fallback);
+            + "|" + registry.getKey(value);
     }
 
     public static String rows() {
@@ -28,11 +23,17 @@ public final class Probe {
             + "\n" + row(BuiltInRegistries.ITEM, "minecraft:stone");
     }
 
-    public static String modded() {
-        Identifier id = id("demo:thing");
-        return BuiltInRegistries.BLOCK.containsKey(id) + "|"
-            + BuiltInRegistries.BLOCK.get(id).isPresent() + "|"
-            + BuiltInRegistries.ITEM.containsKey(id) + "|"
-            + BuiltInRegistries.ITEM.get(id).isPresent();
+    static void unknown(Registry registry, Identifier id) {
+        registry.containsKey(id);
+        registry.get(id);
+        registry.getValue(id);
+    }
+
+    public static String unknown() {
+        unknown(BuiltInRegistries.BLOCK, id("minecraft:nope"));
+        unknown(BuiltInRegistries.BLOCK, id("othermod:thing"));
+        unknown(BuiltInRegistries.ITEM, id("minecraft:nope"));
+        unknown(BuiltInRegistries.ITEM, id("othermod:thing"));
+        return "counted";
     }
 }

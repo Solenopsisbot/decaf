@@ -45,16 +45,16 @@ fn vanilla_rows_match_java25() {
 }
 
 #[test]
-fn unseen_modded_ids_stay_counted() {
-    let fixture = fixture("vanilla-registry-modded");
+fn unknown_ids_are_counted_for_all_registry_operations() {
+    let fixture = fixture("vanilla-registry-unknown");
     let mut host = fixture.jar.seed_host(StdHost::new());
-    let text = fixture.text_on(&mut host, "modded");
-    assert_eq!(text, "false|false|false|false");
+    let _ = fixture.text_on(&mut host, "unknown");
     assert_eq!(
         host.unknown_host_calls(),
         &[
-            ("net/minecraft/core/DefaultedRegistry#containsKey(Lnet/minecraft/resources/Identifier;)Z".into(), 2),
-            ("net/minecraft/core/DefaultedRegistry#get(Lnet/minecraft/resources/Identifier;)Ljava/util/Optional;".into(), 2),
+            ("net/minecraft/core/Registry#containsKey(Lnet/minecraft/resources/Identifier;)Z".into(), 4),
+            ("net/minecraft/core/Registry#get(Lnet/minecraft/resources/Identifier;)Ljava/util/Optional;".into(), 4),
+            ("net/minecraft/core/Registry#getValue(Lnet/minecraft/resources/Identifier;)Ljava/lang/Object;".into(), 4),
         ]
     );
 }
