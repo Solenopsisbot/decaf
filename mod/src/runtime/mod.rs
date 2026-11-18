@@ -6857,6 +6857,13 @@ impl Host for StdHost {
     }
 
     fn invoke(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
+        if r.owner == "fuzs/puzzleslib/common/api/client/core/v1/ClientModConstructor"
+            && r.name == "construct"
+            && r.descriptor == "(Ljava/lang/String;Ljava/util/function/Supplier;)V"
+        {
+            let _ = args;
+            return Ok(Value::Void);
+        }
         if let Some(value) = fabric_block_api::static_call(&mut self.fabric_block_api, r, args) {
             return value;
         }
@@ -29677,6 +29684,114 @@ impl<H: Host> Runtime<'_, H> {
     /// inside the callee's frame counted one extra frame per lazily initialized
     /// class on the chain (two of the 12 that refused
     /// `structure_layout_optimizer`).
+    fn puzzleslib_client_construct(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+    ) -> Option<Result<Value, NativeError>> {
+        const OWNER: &str = "fuzs/puzzleslib/common/api/client/core/v1/ClientModConstructor";
+        const DESCRIPTOR: &str = "(Ljava/lang/String;Ljava/util/function/Supplier;)V";
+        if r.owner != OWNER || r.name != "construct" || r.descriptor != DESCRIPTOR {
+            return None;
+        }
+        let supplier = args.get(1)?;
+        let instance = match self.invoke_callback(supplier, &[]) {
+            Ok(Some(value)) => value,
+            Ok(None) => return Some(self.host.unknown_operand_call(r)),
+            Err(error) => return Some(Err(error)),
+        };
+        let Some(class) = jar_object::object_class(&instance).map(str::to_owned) else {
+            return Some(Ok(Value::Void));
+        };
+        const METHODS: &[(&str, &str)] = &[
+            ("onConstructMod", "()V"),
+            ("onClientSetup", "()V"),
+            (
+                "onRegisterEntityRenderers",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/EntityRenderersContext;)V",
+            ),
+            (
+                "onRegisterBlockEntityRenderers",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/BlockEntityRenderersContext;)V",
+            ),
+            (
+                "onRegisterClientTooltipComponents",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/ClientTooltipComponentsContext;)V",
+            ),
+            (
+                "onRegisterParticleProviders",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/ParticleProvidersContext;)V",
+            ),
+            (
+                "onRegisterMenuScreens",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/MenuScreensContext;)V",
+            ),
+            (
+                "onRegisterLayerDefinitions",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/LayerDefinitionsContext;)V",
+            ),
+            (
+                "onRegisterEntitySpectatorShaders",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/EntitySpectatorShadersContext;)V",
+            ),
+            (
+                "onRegisterItemModels",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/ItemModelsContext;)V",
+            ),
+            (
+                "onRegisterBuiltInBlockModels",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/BuiltInBlockModelsContext;)V",
+            ),
+            (
+                "onRegisterSkullRenderers",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/SkullRenderersContext;)V",
+            ),
+            (
+                "onRegisterKeyMappings",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/KeyMappingsContext;)V",
+            ),
+            (
+                "onRegisterBlockColorProviders",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/BlockColorsContext;)V",
+            ),
+            (
+                "onAddResourcePackFinders",
+                "(Lfuzs/puzzleslib/common/api/core/v1/context/PackRepositorySourcesContext;)V",
+            ),
+            (
+                "onRegisterRenderPipelines",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/RenderPipelinesContext;)V",
+            ),
+            (
+                "onRegisterGuiLayers",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/GuiLayersContext;)V",
+            ),
+            (
+                "onRegisterPictureInPictureRenderers",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/PictureInPictureRenderersContext;)V",
+            ),
+            (
+                "onAddResourcePackReloadListeners",
+                "(Lfuzs/puzzleslib/common/api/client/core/v1/context/ResourcePackReloadListenersContext;)V",
+            ),
+        ];
+        for &(name, descriptor) in METHODS {
+            if self
+                .classes
+                .get(&class)
+                .and_then(|file| file.method(name, descriptor))
+                .is_some()
+            {
+                if let Err(error) =
+                    self.invoke(&class, name, descriptor, Some(instance.clone()), &[])
+                {
+                    return Some(Err(error));
+                }
+            }
+        }
+        Some(Ok(Value::Void))
+    }
+
     pub(crate) fn invoke(
         &mut self,
         class: &str,
@@ -29943,6 +30058,11 @@ impl<H: Host> Runtime<'_, H> {
             };
             if let Some(receiver) = receiver.as_ref()
                 && let Some(value) = client_reload::runtime_instance_call(self, &r, receiver, args)
+            {
+                return value;
+            }
+            if receiver.is_none()
+                && let Some(value) = self.puzzleslib_client_construct(&r, args)
             {
                 return value;
             }
@@ -31888,7 +32008,13 @@ impl<H: Host> Runtime<'_, H> {
                                         {
                                             self.prepare_entity_data_hierarchy(&args);
                                         }
-                                        self.host.invoke(&resolved, &args)
+                                        if let Some(value) =
+                                            self.puzzleslib_client_construct(&resolved, &args)
+                                        {
+                                            value
+                                        } else {
+                                            self.host.invoke(&resolved, &args)
+                                        }
                                     })
                                 }
                             } else if let Some(receiver) = receiver.as_ref() {
@@ -31949,7 +32075,13 @@ impl<H: Host> Runtime<'_, H> {
                                     {
                                         self.prepare_entity_data_hierarchy(&args);
                                     }
-                                    self.host.invoke(&resolved, &args)
+                                    if let Some(value) =
+                                        self.puzzleslib_client_construct(&resolved, &args)
+                                    {
+                                        value
+                                    } else {
+                                        self.host.invoke(&resolved, &args)
+                                    }
                                 })
                             }
                         }
