@@ -234,6 +234,15 @@ impl<H: Host> Runtime<'_, H> {
             }
             return Err(class_cast_exception(class, target));
         }
+        // A fastutil primitive entry is a host map-entry handle. Its exact map family
+        // determines whether the jar entry interface cast passes.
+        if let Some(instance) = self.host.map_entry_is_instance_of(value, target) {
+            if instance {
+                return Ok(());
+            }
+            self.count_cast(value, target)?;
+            return Err(cast_failed_counted(target));
+        }
         // A host handle is its kind's class, and only a handle is one of a
         // handle kind's classes (`host_ref.rs`): `(String) Optional.empty()`
         // and `(Optional<?>) "text"` throw.

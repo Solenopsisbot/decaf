@@ -188,6 +188,32 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         const SIMPLE: &str = "java/util/AbstractMap$SimpleEntry";
         const IMMUTABLE: &str = "java/util/AbstractMap$SimpleImmutableEntry";
+        if r.owner
+            .starts_with("it/unimi/dsi/fastutil/objects/Object2Boolean")
+            && matches!(r.name.as_str(), "getKey" | "getValue" | "getBooleanValue")
+        {
+            let method = if r.name == "getKey" {
+                "getKey"
+            } else {
+                "getValue"
+            };
+            let entry_receiver = receiver.expect("entry receiver");
+            let value = self.host.invoke_instance(
+                &MethodRef {
+                    owner: "java/util/Map$Entry".into(),
+                    name: method.into(),
+                    descriptor: "()Ljava/lang/Object;".into(),
+                },
+                entry_receiver,
+                args,
+            )?;
+            let answer = if r.name == "getBooleanValue" {
+                unbox_primitive("Z", &value)
+            } else {
+                value.clone()
+            };
+            return Ok(Some(answer));
+        }
         let Some(marker) = receiver
             .and_then(crate::runtime::jar_object::instance_key)
             .map(str::to_owned)
@@ -276,8 +302,28 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver.cloned() else {
             return Ok(None);
         };
+        if r.name == "<init>" {
+            if kind == "map" && crate::runtime::expect_ref(&receiver).is_some() {
+                self.host.register_mutable_collection(&receiver, kind);
+            }
+            return Ok(Some(Value::Void));
+        }
+        if kind == "map" && !self.host.holds_collection(&receiver) {
+            self.host.register_mutable_collection(&receiver, kind);
+        }
         let parameters = descriptor_arguments(&r.descriptor);
         let result = return_desc(&r.descriptor).to_owned();
+        if kind == "map"
+            && r.name == "object2BooleanEntrySet"
+            && (r.descriptor
+                == "()Lit/unimi/dsi/fastutil/objects/Object2BooleanSortedMap$FastSortedEntrySet;"
+                || r.descriptor == "()Ljava/lang/Iterable;")
+        {
+            return self
+                .host
+                .invoke_instance(&java_map_entry_set(), &receiver, &[])
+                .map(Some);
+        }
         let primitive = |descriptor: &str| descriptor.len() == 1 && descriptor != "V";
         if !parameters.iter().any(|parameter| primitive(parameter)) && !primitive(&result) {
             return Ok(None);
@@ -325,14 +371,21 @@ impl<H: Host> Runtime<'_, H> {
         let answer = match (kind, base, parameters.len()) {
             ("map", "put", 2) => {
                 let call = boxed(self, false)?;
-                self.host.invoke_instance(
-                    &java(
-                        "put",
-                        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
-                    ),
-                    &receiver,
-                    &call,
-                )?
+                if let Some(mut entries) = self.host.mutable_collection_entries(&receiver) {
+                    let old = entries.chunks(2).position(|p| p.first() == call.first());
+                    let previous = old
+                        .and_then(|i| entries.get(i * 2 + 1).cloned())
+                        .unwrap_or(Value::Ref(None));
+                    if let Some(i) = old {
+                        entries[i * 2 + 1] = call[1].clone();
+                    } else {
+                        entries.extend(call.clone());
+                    }
+                    self.host.replace_mutable_collection(&receiver, entries);
+                    previous
+                } else {
+                    return Ok(None);
+                }
             }
             ("map", "get" | "remove" | "containsKey" | "containsValue", 1) => {
                 let call = boxed(self, false)?;
@@ -499,6 +552,9 @@ impl<H: Host> Runtime<'_, H> {
         // A handle answers by its kind's row; an object's "yes" is its
         // class's chain (a Mixin-added interface, a JDK supertype), and any
         // other answer goes on to the object paths below.
+        if let Some(instance) = self.host.map_entry_is_instance_of(value, wanted) {
+            return instance;
+        }
         if let Value::Host(handle) = value {
             let row = handle.instance_of(wanted, self) == Some(true);
             if row || !crate::runtime::jar_object::is_object_handle(handle) {
@@ -1606,6 +1662,14 @@ fn unboxed_to_string(r: &MethodRef, receiver: Option<&Value>) -> Option<Value> {
         Value::Int(number) => number.to_string(),
         _ => return None,
     })))
+}
+
+fn java_map_entry_set() -> MethodRef {
+    MethodRef {
+        owner: "java/util/Map".into(),
+        name: "entrySet".into(),
+        descriptor: "()Ljava/util/Set;".into(),
+    }
 }
 
 /// One boxed answer unboxed to `descriptor`, with fastutil's default return

@@ -858,6 +858,27 @@ impl StdHost {
         }
     }
 
+    /// Whether an entry made by a fastutil map implements that map family's primitive entry interface.
+    pub(crate) fn fastutil_entry_instance_of(&self, entry: &Value, wanted: &str) -> Option<bool> {
+        let Value::Host(handle) = entry else {
+            return None;
+        };
+        let state = self.entry_state(handle)?;
+        let map = match &state.life {
+            Life::Opaque { map, .. } | Life::Live { map, .. } | Life::Concurrent { map } => map,
+            Life::Wrapped { inner } => return self.fastutil_entry_instance_of(inner, wanted),
+            Life::Fixed | Life::Detached | Life::Lost => return None,
+        };
+        let map_class = class_of_marker(map);
+        let map_simple = map_class.rsplit('/').next()?;
+        let target = wanted
+            .strip_prefix("it/unimi/dsi/fastutil/")?
+            .strip_suffix("$Entry")?;
+        let target_simple = target.rsplit('/').next()?.strip_suffix("Map")?;
+        let map_family = map_simple.strip_suffix("Map")?;
+        Some(map_family.starts_with(target_simple))
+    }
+
     /// The key and value `entry` holds now; `None` for any other value, or when unknown.
     pub(crate) fn map_entry_now(&self, entry: &Value) -> Option<(Value, Value)> {
         let Value::Host(handle) = entry else {

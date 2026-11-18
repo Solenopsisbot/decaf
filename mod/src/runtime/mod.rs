@@ -2548,6 +2548,11 @@ pub trait Host {
         None
     }
 
+    /// Whether a host map entry implements a fastutil primitive entry interface.
+    fn map_entry_is_instance_of(&self, _value: &Value, _wanted: &str) -> Option<bool> {
+        None
+    }
+
     /// A host `Map.Entry`: a new holder or snapshot, or `map`'s node of `key`
     /// (`host_map_entry.rs`). A host that keeps no entries answers one whose contents are
     /// unknown.
@@ -2634,6 +2639,7 @@ pub trait Host {
     /// is the only place a collection the interpreter mutated lasts, so a host
     /// that keeps no collection state has nothing to replace.
     fn replace_mutable_collection(&mut self, _value: &Value, _values: Vec<Value>) {}
+    fn register_mutable_collection(&mut self, _value: &Value, _kind: &str) {}
 
     /// The collection an unmodifiable view (`Collections.unmodifiableList`)
     /// reads, by the view's marker.
@@ -5974,11 +5980,17 @@ impl Host for StdHost {
     }
 
     fn mutable_collection_entries(&self, value: &Value) -> Option<Vec<Value>> {
-        if jar_object::spells_key(value) {
+        let marker = self.synchronized_target(expect_ref(value)?);
+        if jar_object::spells_key(value) && !self.mutable_collections.contains_key(marker) {
             return None;
         }
-        let marker = self.synchronized_target(expect_ref(value)?);
         self.mutable_collections.get(marker).cloned()
+    }
+
+    fn register_mutable_collection(&mut self, value: &Value, _kind: &str) {
+        if let Some(marker) = expect_ref(value) {
+            self.mutable_collections.insert(marker.clone(), Vec::new());
+        }
     }
 
     fn replace_mutable_collection(&mut self, value: &Value, values: Vec<Value>) {
@@ -6434,6 +6446,10 @@ impl Host for StdHost {
 
     fn map_entry_parts(&self, value: &Value) -> Option<(Value, Value)> {
         self.map_entry_now(value)
+    }
+
+    fn map_entry_is_instance_of(&self, value: &Value, wanted: &str) -> Option<bool> {
+        self.fastutil_entry_instance_of(value, wanted)
     }
 
     fn mint_map_entry(

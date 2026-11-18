@@ -1,0 +1,1 @@
+k0=true;k1=false;k2=true;k3=true;k5=false;k6=true;k7=false;k8=true;k9=false;k10=true;k11=false;k4=false;

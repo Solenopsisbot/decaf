@@ -1404,6 +1404,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.map_entry_parts(value)
     }
 
+    fn map_entry_is_instance_of(&self, value: &Value, wanted: &str) -> Option<bool> {
+        self.inner.map_entry_is_instance_of(value, wanted)
+    }
+
     fn mint_map_entry(
         &mut self,
         map: Option<&Value>,
