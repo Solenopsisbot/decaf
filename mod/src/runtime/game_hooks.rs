@@ -2029,6 +2029,7 @@ impl NativeJar {
 
             string_readers: BTreeMap::new(),
             reader_positions_unknown: Default::default(),
+            io_reader_errors: BTreeMap::new(),
             scanners: BTreeMap::new(),
             io_stream_paths: BTreeMap::new(),
             io_writers: BTreeMap::new(),
