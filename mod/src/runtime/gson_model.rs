@@ -887,7 +887,7 @@ impl<H: Host> Runtime<'_, H> {
                 .find(|(ty, _)| ty == class)
                 .map(|(_, adapter)| adapter.clone())
         {
-            let sink = format!("mem:gson-adapter-{depth}");
+            let sink = format!("gson-adapter-{depth}");
             self.io_writers.insert(sink.clone(), String::new());
             let writer = self.new_object("com/google/gson/stream/JsonWriter");
             if let Some(wm) = expect_ref(&writer) {
