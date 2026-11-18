@@ -1,0 +1,13 @@
+# Vanilla BLOCK and ITEM registry lookup capture
+
+The probe uses raw Registry and Object values, so the rows exercise the real registry API without typed literals.
+
+```sh
+J=$HOME/ava/jdk/jdk-25.0.5+8/Contents/Home/bin
+CP=$HOME/ava/minecraft-26.3-server-game.jar:$(find $HOME/ava/scratch/vanilla-values/oracle/libraries/server -name '*.jar' | paste -sd: -)
+O=$HOME/ava/scratch/vanilla-registry-classes
+mkdir -p "$O"
+$J/javac -cp "$CP" -d "$O" demo/Probe.java oracle/OracleMain.java
+$J/java -cp "$O:$CP" oracle.OracleMain >/dev/null 2>&1
+sed 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' logs/latest.log > java25.txt
+```

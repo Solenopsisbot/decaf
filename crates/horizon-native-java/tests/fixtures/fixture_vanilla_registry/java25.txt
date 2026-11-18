@@ -1,0 +1,2 @@
+true|true|minecraft:stone|false|false|minecraft:air
+true|true|minecraft:stone|false|false|minecraft:air
