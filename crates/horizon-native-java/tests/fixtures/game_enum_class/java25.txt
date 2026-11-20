@@ -1,0 +1,8 @@
+rarity=true
+plane=true
+mobCategory=true
+dyeColor=true
+difficulty=true
+values=4
+valueOf=COMMON
+constants=4
