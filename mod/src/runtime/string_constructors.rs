@@ -438,6 +438,15 @@ pub(crate) fn build<H: Host>(
             }
             Some(text)
         }
+        "(Ljava/lang/String;)V" => match args.first() {
+            Some(Value::Ref(Some(text))) if value_class::is_plain_string(text) => {
+                Some(text.clone())
+            }
+            _ => None,
+        },
+        "(Ljava/lang/StringBuilder;)V" | "(Ljava/lang/StringBuffer;)V" => args
+            .first()
+            .and_then(|value| runtime.builder_text(value).cloned()),
         _ => None,
     };
     Ok(text)

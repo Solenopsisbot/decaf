@@ -310,6 +310,9 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     pub(crate) fn java_hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
+        if let Some(text) = self.host.constructed_string_text(value) {
+            return Ok(Some(hash_map_order::java_string_hash(&text)));
+        }
         // A stream's marker is an internal capability, not a Java String. Its
         // Object.hashCode is an identity hash no run can reproduce, so any
         // collection/table path must stay unknown and be counted by its caller.
@@ -514,6 +517,20 @@ impl<H: Host> Runtime<'_, H> {
     pub(crate) fn java_equals(&mut self, a: &Value, b: &Value) -> Result<bool, NativeError> {
         // One level of a nested `equals` (#250).
         let _level = crate::host_recursion::enter()?;
+        if let Some(text) = self.host.constructed_string_text(a) {
+            return Ok(self
+                .host
+                .constructed_string_text(b)
+                .is_some_and(|other| other == text)
+                || matches!(b, Value::Ref(Some(other)) if value_class::is_plain_string(other) && other == &text));
+        }
+        if let Some(text) = self.host.constructed_string_text(b) {
+            return Ok(self
+                .host
+                .constructed_string_text(a)
+                .is_some_and(|other| other == text)
+                || matches!(a, Value::Ref(Some(other)) if value_class::is_plain_string(other) && other == &text));
+        }
         // A stream is an identity object. Its marker is an internal capability,
         // never a String whose text can participate in Java equality.
         if expect_ref(a).is_some_and(|text| crate::stream_pipeline::is_stream_marker(text))
@@ -1554,6 +1571,9 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         // One level of a nested `String.valueOf` (#250): a cycle ends in a `StackOverflowError`.
         let _level = crate::host_recursion::enter()?;
+        if let Some(text) = self.runtime.host.constructed_string_text(value) {
+            return Ok(Some(text));
+        }
         // A `Class`'s row asks here (`host_class.rs`): the runtime holds the
         // class file that says whether it is an interface.
         if let Some(name) = crate::host_class::handle_name(value) {

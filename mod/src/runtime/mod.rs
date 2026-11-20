@@ -2560,6 +2560,12 @@ pub trait Host {
         None
     }
 
+    /// Text retained for a distinct `new String(String|StringBuilder)` object.
+    fn constructed_string_text(&self, _value: &Value) -> Option<String> {
+        None
+    }
+    fn record_constructed_string(&mut self, _value: &Value, _text: String) {}
+
     /// The key and value of a host `Map.Entry` now (`host_map_entry.rs`); `None` for any
     /// other value, or when the entry's contents are unknown.
     fn map_entry_parts(&self, _value: &Value) -> Option<(Value, Value)> {
@@ -3608,6 +3614,8 @@ pub struct StdHost {
     /// The two halves of every `new UUID(msb, lsb)` a jar constructed, keyed
     /// by its object key (`host_jdk_value.rs`).
     constructed_uuids: BTreeMap<String, (i64, i64)>,
+    /// Text of modeled `String` objects whose identity must remain distinct.
+    constructed_strings: BTreeMap<String, String>,
     /// The server levels this invocation has heard about, in the order the
     /// firings named them ([`events::StdHost::note_firing_levels`]).
     levels: Vec<events::FacadeLevel>,
@@ -3845,6 +3853,7 @@ impl StdHost {
             locales: BTreeMap::new(),
             map_entries: host_map_entry::Entries::default(),
             constructed_uuids: BTreeMap::new(),
+            constructed_strings: BTreeMap::new(),
             levels: Vec::new(),
             references: BTreeMap::new(),
             iterators: BTreeMap::new(),
@@ -6734,6 +6743,9 @@ impl Host for StdHost {
     }
 
     fn modelled_to_string(&mut self, value: &Value) -> Option<String> {
+        if let Some(text) = self.constructed_string_text(value) {
+            return Some(text);
+        }
         crate::runtime::java_tostring::modelled(self, value)
     }
 
@@ -6752,6 +6764,18 @@ impl Host for StdHost {
         self.constructed_uuids
             .get(jar_object::object_key(value)?)
             .copied()
+    }
+
+    fn constructed_string_text(&self, value: &Value) -> Option<String> {
+        self.constructed_strings
+            .get(jar_object::object_key(value)?)
+            .cloned()
+    }
+
+    fn record_constructed_string(&mut self, value: &Value, text: String) {
+        if let Some(key) = jar_object::object_key(value) {
+            self.constructed_strings.insert(key.to_owned(), text);
+        }
     }
 
     fn map_entry_parts(&self, value: &Value) -> Option<(Value, Value)> {
@@ -14156,6 +14180,11 @@ struct HostNested<'a>(Option<&'a mut StdHost>);
 impl host_ref::Nested for HostNested<'_> {
     fn hash(&mut self, value: &Value) -> Result<Option<i32>, NativeError> {
         let _level = host_recursion::enter()?;
+        if let Some(host) = self.0.as_deref()
+            && let Some(text) = host.constructed_string_text(value)
+        {
+            return Ok(Some(hash_map_order::java_string_hash(&text)));
+        }
         Ok(match value {
             // An object's own `hashCode` is jar code (or an identity hash).
             Value::Host(handle) if jar_object::is_object_handle(handle) => None,
@@ -14169,6 +14198,22 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn equals(&mut self, a: &Value, b: &Value) -> Result<Option<bool>, NativeError> {
         let _level = host_recursion::enter()?;
+        if let Some(host) = self.0.as_deref()
+            && let Some(text) = host.constructed_string_text(a)
+        {
+            return Ok(Some(
+                host.constructed_string_text(b)
+                    .is_some_and(|other| other == text)
+                    || matches!(b, Value::Ref(Some(other)) if value_class::is_plain_string(other) && other == &text),
+            ));
+        }
+        if let Some(host) = self.0.as_deref()
+            && let Some(text) = host.constructed_string_text(b)
+        {
+            return Ok(Some(
+                matches!(a, Value::Ref(Some(other)) if value_class::is_plain_string(other) && other == &text),
+            ));
+        }
         Ok(match a {
             // `a == b` answers for any object; its own `equals` is jar code.
             Value::Host(handle) if jar_object::is_object_handle(handle) => (a == b).then_some(true),
@@ -14188,6 +14233,11 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn text(&mut self, value: &Value) -> Result<Option<String>, NativeError> {
         let _level = host_recursion::enter()?;
+        if let Some(host) = self.0.as_deref()
+            && let Some(text) = host.constructed_string_text(value)
+        {
+            return Ok(Some(text));
+        }
         Ok(match (value, self.0.as_deref_mut()) {
             // An object prints what its class's model prints, if one does.
             (Value::Host(handle), Some(host)) if jar_object::is_object_handle(handle) => {
@@ -14237,6 +14287,22 @@ impl StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Value, NativeError> {
+        if let Some(text) = self.constructed_string_text(receiver) {
+            return match (r.name.as_str(), r.descriptor.as_str()) {
+                ("length", "()I") => Ok(Value::Int(text.encode_utf16().count() as i32)),
+                ("toString", "()Ljava/lang/String;") => Ok(Value::Ref(Some(text))),
+                ("hashCode", "()I") => Ok(Value::Int(hash_map_order::java_string_hash(&text))),
+                ("equals", "(Ljava/lang/Object;)Z") => {
+                    let other = Self::argument(r, args, 0)?;
+                    let equal = self
+                        .constructed_string_text(other)
+                        .is_some_and(|v| v == text)
+                        || matches!(other, Value::Ref(Some(v)) if value_class::is_plain_string(v) && v == &text);
+                    Ok(Value::Int(i32::from(equal)))
+                }
+                _ => self.unknown_host_call(r),
+            };
+        }
         let handle = match receiver {
             Value::Host(handle) => handle.clone(),
             Value::Ref(None) => match HostKind::of_class(&r.owner) {
@@ -31759,6 +31825,57 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/lang/String"
+                        && r.name == "equals"
+                        && r.descriptor == "(Ljava/lang/Object;)Z"
+                        && (receiver
+                            .as_ref()
+                            .and_then(|v| self.host.constructed_string_text(v))
+                            .is_some()
+                            || receiver
+                                .as_ref()
+                                .and_then(expect_ref)
+                                .is_some_and(|v| value_class::is_plain_string(v)))
+                    {
+                        let own = receiver
+                            .as_ref()
+                            .and_then(|v| self.host.constructed_string_text(v))
+                            .or_else(|| {
+                                receiver
+                                    .as_ref()
+                                    .and_then(expect_ref)
+                                    .filter(|v| value_class::is_plain_string(v))
+                                    .cloned()
+                            });
+                        let other = args.first();
+                        let equal = own.is_some_and(|text| {
+                            other.and_then(|v| self.host.constructed_string_text(v)).is_some_and(|value| value == text)
+                                || matches!(other, Some(Value::Ref(Some(value))) if value_class::is_plain_string(value) && value == &text)
+                        });
+                        dispatched = Some(Value::Int(i32::from(equal)));
+                    } else if dispatched.is_none()
+                        && r.owner == "java/lang/String"
+                        && let Some(receiver) = receiver.as_ref()
+                        && let Some(text) = self.host.constructed_string_text(receiver)
+                    {
+                        dispatched = Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                            ("length", "()I") => Value::Int(text.encode_utf16().count() as i32),
+                            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(text)),
+                            ("hashCode", "()I") => {
+                                Value::Int(hash_map_order::java_string_hash(&text))
+                            }
+                            ("equals", "(Ljava/lang/Object;)Z") => {
+                                let other = args.first();
+                                let equal = other
+                                    .and_then(|value| self.host.constructed_string_text(value))
+                                    .is_some_and(|value| value == text)
+                                    || matches!(other, Some(Value::Ref(Some(value))) if value_class::is_plain_string(value) && value == &text);
+                                Value::Int(i32::from(equal))
+                            }
+                            _ => Value::Void,
+                        });
+                    }
+                    if dispatched.is_none()
                         && (r.owner == "java/lang/String"
                             && r.name == "format"
                             && (r.descriptor
@@ -32040,9 +32157,22 @@ impl<H: Host> Runtime<'_, H> {
                                 .filter(|value| jar_object::is_object(value))
                             {
                                 let built = Value::Ref(Some(text));
-                                for slot in stack.iter_mut().chain(locals.iter_mut()) {
-                                    if slot == marker {
-                                        *slot = built.clone();
+                                let preserves_identity = matches!(
+                                    r.descriptor.as_str(),
+                                    "(Ljava/lang/String;)V"
+                                        | "(Ljava/lang/StringBuilder;)V"
+                                        | "(Ljava/lang/StringBuffer;)V"
+                                );
+                                if preserves_identity {
+                                    self.host.record_constructed_string(
+                                        marker,
+                                        expect_ref(&built).unwrap().to_owned(),
+                                    );
+                                } else {
+                                    for slot in stack.iter_mut().chain(locals.iter_mut()) {
+                                        if slot == marker {
+                                            *slot = built.clone();
+                                        }
                                     }
                                 }
                             }

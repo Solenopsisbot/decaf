@@ -260,6 +260,9 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<String, NativeError> {
+        if let Some(text) = self.host.constructed_string_text(value) {
+            return Ok(text);
+        }
         if let Value::Host(handle) = value
             && !crate::runtime::jar_object::is_object_handle(handle)
         {
