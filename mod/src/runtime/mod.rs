@@ -2610,6 +2610,10 @@ pub trait Host {
         false
     }
 
+    fn is_chm_set(&self, _value: &Value) -> bool {
+        false
+    }
+
     fn set_from_map_source(&self, _value: &Value) -> Option<Value> {
         None
     }
@@ -5937,6 +5941,17 @@ impl Host for StdHost {
         }
     }
 
+    fn is_chm_set(&self, value: &Value) -> bool {
+        let Some(marker) = crate::runtime::jar_object::object_key(value) else {
+            return false;
+        };
+        let Some(map) = self.set_from_map_views.get(marker) else {
+            return false;
+        };
+        map.split_once('#')
+            .is_some_and(|(class, _)| class == "java/util/concurrent/ConcurrentHashMap")
+    }
+
     fn is_set_from_map(&self, value: &Value) -> bool {
         let Value::Host(handle) = value else {
             return false;
@@ -8294,6 +8309,20 @@ impl Host for StdHost {
             return value;
         }
         self.record(r, Some(receiver), args);
+        if self.is_set_from_map(receiver) {
+            if self.jdk_new_set_from_map_ordered_read(r, receiver) {
+                return self.unknown_host_call(r);
+            }
+            if let Some(answer) = self.set_from_map_remove_if(r, receiver, args) {
+                return answer;
+            }
+            if let Some(answer) = self.set_from_map_retain_all(r, receiver, args) {
+                return answer;
+            }
+            if let Some(answer) = self.set_from_map_member(r, receiver, args) {
+                return answer;
+            }
+        }
         if let Some(v) = host_url::instance_call(r, receiver) {
             return v;
         }
@@ -10508,7 +10537,17 @@ impl Host for StdHost {
                 host_collection_values(self, receiver)?.is_empty() as i32,
             )),
             (owner, "contains", "(Ljava/lang/Object;)Z") if is_collection_owner(owner) => {
-                let needle = collection_item_marker(Self::argument(r, args, 0)?);
+                let argument = Self::argument(r, args, 0)?;
+                if self.is_chm_set(receiver) && matches!(argument, Value::Ref(None)) {
+                    return Err(NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: Some(
+                            "Cannot invoke \"Object.hashCode()\" because \"key\" is null".into(),
+                        ),
+                        frame: None,
+                    });
+                }
+                let needle = collection_item_marker(argument);
                 Ok(Value::Int(
                     host_collection_values(self, receiver)?
                         .iter()
@@ -13869,6 +13908,13 @@ impl host_ref::Nested for HostNested<'_> {
 }
 
 impl StdHost {
+    fn jdk_new_set_from_map_ordered_read(&self, r: &MethodRef, receiver: &Value) -> bool {
+        if !self.is_chm_set(receiver) {
+            return false;
+        }
+        crate::runtime::jdk_new_set_from_map::chm_set_ordered_read(&r.name, &r.descriptor)
+    }
+
     /// A handle's `toString`/`hashCode`/`equals` through its kind's row
     /// (`host_ref.rs`). One a held value leaves unknown (a held jar object's
     /// `hashCode`, which only the runtime can run) is counted.
@@ -31278,6 +31324,16 @@ impl<H: Host> Runtime<'_, H> {
                                 == "(Ljava/util/Locale;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;")
                     {
                         invoke_or_catch!(at, format_java_string_call(self, &r, &args))
+                    } else if let Some(set) = receiver.as_ref()
+                        && self.host.is_chm_set(set)
+                        && jdk_new_set_from_map::chm_set_ordered_read(&r.name, &r.descriptor)
+                    {
+                        // A `ConcurrentHashMap`-backed set's iteration order is
+                        // the JVM's hash table layout: every read exposing it,
+                        // the default methods `forEach`/`toArray(IntFunction)`
+                        // too, is counted before any collection model could
+                        // answer it in some other order (#548 review).
+                        invoke_or_catch!(at, self.host.unknown_operand_call(&r))
                     } else if let Some(value) = invoke_or_catch!(
                         at,
                         self.invoke_properties_reader(&r, receiver.as_ref(), &args)

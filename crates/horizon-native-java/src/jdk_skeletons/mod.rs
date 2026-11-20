@@ -318,6 +318,20 @@ impl<H: Host> Runtime<'_, H> {
         let Some(this) = receiver else {
             return Ok(None);
         };
+        if self.host.is_chm_set(this)
+            && matches!(
+                (r.name.as_str(), r.descriptor.as_str()),
+                ("iterator", "()Ljava/util/Iterator;")
+                    | ("toArray", "()[Ljava/lang/Object;")
+                    | ("toArray", "([Ljava/lang/Object;)[Ljava/lang/Object;")
+                    | ("stream", "()Ljava/util/stream/Stream;")
+                    | ("parallelStream", "()Ljava/util/stream/Stream;")
+                    | ("spliterator", "()Ljava/util/Spliterator;")
+                    | ("toString", "()Ljava/lang/String;")
+            )
+        {
+            return self.host.unknown_operand_call(r).map(Some);
+        }
         if let Some(value) = crate::thread_local::call(self, r, receiver, args) {
             return value.map(Some);
         }

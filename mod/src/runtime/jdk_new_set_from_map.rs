@@ -41,7 +41,12 @@ impl StdHost {
         // `SetFromMap` delegates every operation to the map. The bounded host
         // can prove the exact order/equality/mod-count contract only for these
         // two map implementations; every other Map stays counted (#316).
-        if !matches!(class, "java/util/HashMap" | "java/util/LinkedHashMap") {
+        if !matches!(
+            class,
+            "java/util/HashMap"
+                | "java/util/LinkedHashMap"
+                | "java/util/concurrent/ConcurrentHashMap"
+        ) {
             return None;
         }
         let marker = crate::runtime::jar_object::collection_key_for(
@@ -159,6 +164,7 @@ impl StdHost {
             return None;
         }
         let map = self.set_from_map_views.get(handle.key())?.clone();
+        let chm = self.is_chm_set(receiver);
         let values = self.mutable_collections.get_mut(&map)?;
         let position = |values: &[Value], key: &Value| -> Option<Option<usize>> {
             Some(
@@ -172,6 +178,13 @@ impl StdHost {
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("add", "(Ljava/lang/Object;)Z") => {
                 let key = args.first()?.clone();
+                if chm && matches!(key, Value::Ref(None)) {
+                    return Some(Err(NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: Some("null".into()),
+                        frame: None,
+                    }));
+                }
                 let Some(position) = position(values, &key) else {
                     return Some(self.unknown_host_call(r));
                 };
@@ -183,6 +196,15 @@ impl StdHost {
             }
             ("remove", "(Ljava/lang/Object;)Z") => {
                 let key = args.first()?;
+                if chm && matches!(key, Value::Ref(None)) {
+                    return Some(Err(NativeError::UncaughtException {
+                        class: "java/lang/NullPointerException".into(),
+                        message: Some(
+                            "Cannot invoke \"Object.hashCode()\" because \"key\" is null".into(),
+                        ),
+                        frame: None,
+                    }));
+                }
                 let Some(position) = position(values, key) else {
                     return Some(self.unknown_host_call(r));
                 };
@@ -195,6 +217,44 @@ impl StdHost {
             ("clear", "()V") => {
                 values.clear();
                 Some(Ok(Value::Void))
+            }
+            // `AbstractCollection.addAll` / `AbstractSet.removeAll` on a
+            // `ConcurrentHashMap`-backed set: the result and the set after it
+            // do not depend on either collection's order. A null element
+            // throws part-way, at a point that does, so it stays counted;
+            // so does an argument the host holds no elements for.
+            ("addAll" | "removeAll", "(Ljava/util/Collection;)Z") if chm => {
+                let source = args.first()?.clone();
+                let Ok(others) = crate::runtime::runtime_collection_values(self, &source) else {
+                    return Some(self.unknown_host_call(r));
+                };
+                if matches!(source, Value::Ref(None))
+                    || others.iter().any(|value| matches!(value, Value::Ref(None)))
+                {
+                    return Some(self.unknown_host_call(r));
+                }
+                let values = self.mutable_collections.get_mut(&map)?;
+                let mut changed = false;
+                if r.name == "addAll" {
+                    for key in others {
+                        let present = values.as_chunks::<2>().0.iter().any(|pair| pair[0] == key);
+                        if !present {
+                            values.extend([key, Value::Boxed(Boxed::Boolean(true))]);
+                            changed = true;
+                        }
+                    }
+                } else {
+                    let mut kept = Vec::with_capacity(values.len());
+                    for pair in values.as_chunks::<2>().0 {
+                        let drop = others.iter().any(|value| value == &pair[0]);
+                        changed |= drop;
+                        if !drop {
+                            kept.extend(pair.iter().cloned());
+                        }
+                    }
+                    *values = kept;
+                }
+                Some(Ok(Value::Int(i32::from(changed))))
             }
             _ => None,
         }
@@ -222,6 +282,29 @@ pub(crate) fn is_set_value(value: &Value) -> bool {
         .split_once('#')
         .map_or(marker.as_str(), |(class, _)| class);
     class == "set" || crate::runtime::is_set_owner(class)
+}
+
+/// The calls on a `ConcurrentHashMap`-backed set whose answer depends on the
+/// map's iteration order, which only a JVM's hash table layout decides: they
+/// are counted, never answered. Membership, size, equality and `hashCode` do
+/// not depend on order and are answered.
+pub(crate) fn chm_set_ordered_read(name: &str, descriptor: &str) -> bool {
+    matches!(
+        (name, descriptor),
+        ("iterator", "()Ljava/util/Iterator;")
+            | ("toArray", "()[Ljava/lang/Object;")
+            | ("toArray", "([Ljava/lang/Object;)[Ljava/lang/Object;")
+            | ("toArray", "(Ljava/util/function/IntFunction;)[Ljava/lang/Object;")
+            // Runs the action in iteration order (#548 review).
+            | ("forEach", "(Ljava/util/function/Consumer;)V")
+            // Tests the predicate in iteration order: a predicate's side
+            // effects would show it (#548 re-review).
+            | ("removeIf", "(Ljava/util/function/Predicate;)Z")
+            | ("stream", "()Ljava/util/stream/Stream;")
+            | ("parallelStream", "()Ljava/util/stream/Stream;")
+            | ("spliterator", "()Ljava/util/Spliterator;")
+            | ("toString", "()Ljava/lang/String;")
+    )
 }
 
 #[cfg(test)]
