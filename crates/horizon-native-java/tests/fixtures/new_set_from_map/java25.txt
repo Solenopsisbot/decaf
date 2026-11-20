@@ -3,3 +3,14 @@ hashMapDifferential=SetFromMap|[a, b]|[a, b]|195|true|2|true|true|true|true|Conc
 linkedMapDifferential=SetFromMap|[b, a]|[b, a]|195|true|2|true|true|true|true|ConcurrentModificationException|null|ConcurrentModificationException|null|IllegalArgumentException|Map is non-empty|[x, y, z]|{x=true, y=true, z=true}
 duplicate=IllegalArgumentException|Map is non-empty
 nullMap=NullPointerException|Cannot invoke "java.util.Map.isEmpty()" because "map" is null
+chmExact=true|false|true|true|false|0|true|NullPointerException|null
+chmRemoveNull=NullPointerException|Cannot invoke "Object.hashCode()" because "key" is null
+chmContainsNull=NullPointerException|Cannot invoke "Object.hashCode()" because "key" is null
+chmBulk=true|5|false|true|4|false|true|false|4
+identity=ok
+weak=ok
+concurrent=ok
+skipList=ok
+tree=ok
+enumMap=ok
+hashtable=ok
