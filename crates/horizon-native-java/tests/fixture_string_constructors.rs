@@ -53,11 +53,11 @@ public final class Ctors {
   // "0"
   public static String empty() { return "" + new String().length(); }
   // "xy"
-  public static String copy() { return new String("xy"); }
+  public static String copy() { return "" + new String("xy"); }
   // "sb"
-  public static String builder() { return new String(new StringBuilder("sb")); }
+  public static String builder() { return "" + new String(new StringBuilder("sb")); }
   // "bf"
-  public static String buffer() { return new String(new StringBuffer("bf")); }
+  public static String buffer() { return "" + new String(new StringBuffer("bf")); }
   // "q"
   public static String reference() { Function<char[], String> f = String::new; return f.apply(new char[] {'q'}); }
   // Java 25: "abcd|bc|abcd|bc"
@@ -67,6 +67,7 @@ public final class Ctors {
   public static String valueOfUnpaired() { return String.valueOf(new char[] {'a', '\uD800'}); }
   // "0"
   public static String supplier() { Supplier<String> f = String::new; return "" + f.get().length(); }
+  public static String countedUses() { String s = new String(); s.length(); s.charAt(0); s.substring(0); s.concat("x"); s.compareTo("x"); s.intern(); s.toString(); String ignored = "" + s; new StringBuilder().append((Object) s).toString(); return "ok"; }
   // "mh"
   public static String handle() throws Throwable {
     var h = java.lang.invoke.MethodHandles.lookup().findConstructor(
@@ -150,6 +151,9 @@ fn modelled_constructors_answer_java_25() {
         ("bytesRangeCharset", "bc"),
         ("bytesName", "ab"),
         ("bytesRangeName", "ab"),
+        ("copy", "xy"),
+        ("builder", "sb"),
+        ("buffer", "bf"),
     ];
     for (name, expected) in cases {
         let mut host = StdHost::new();
@@ -202,17 +206,49 @@ fn unpaired_value_of_stays_counted() {
 }
 
 #[test]
+fn counted_string_objects_are_never_read_as_markers() {
+    let jar = jar();
+    let mut host = StdHost::new();
+    let answer = jar
+        .invoke_method_with_args(
+            "demo.Ctors",
+            "countedUses",
+            "()Ljava/lang/String;",
+            None,
+            &[],
+            &mut host,
+        )
+        .unwrap();
+    assert_eq!(answer, horizon_native_java::Value::Ref(Some("ok".into())));
+    for call in [
+        "java/lang/String#<init>()V",
+        "java/lang/String#length()I",
+        "java/lang/String#charAt(I)C",
+        "java/lang/String#substring(I)Ljava/lang/String;",
+        "java/lang/String#concat(Ljava/lang/String;)Ljava/lang/String;",
+        "java/lang/String#compareTo(Ljava/lang/String;)I",
+        "java/lang/String#intern()Ljava/lang/String;",
+        "java/lang/String#toString()Ljava/lang/String;",
+    ] {
+        assert!(
+            host.unknown_host_calls()
+                .iter()
+                .any(|(seen, count)| seen == call && *count > 0),
+            "missing counted call {call}: {:?}",
+            host.unknown_host_calls()
+        );
+    }
+}
+
+#[test]
 fn every_string_constructor_is_counted_until_it_is_modelled() {
     let jar = jar();
     // (method, the constructor descriptor it must be counted under)
     let cases = [
         ("hibyte", "([BI)V"),
         ("empty", "()V"),
-        ("copy", "(Ljava/lang/String;)V"),
         ("supplier", "()V"),
         ("hibyteRange", "([BIII)V"),
-        ("builder", "(Ljava/lang/StringBuilder;)V"),
-        ("buffer", "(Ljava/lang/StringBuffer;)V"),
         // A `MethodHandle` constructor is counted for every overload
         // (`method_handles.rs`), modelled or not.
         ("handle", "(Ljava/lang/String;)V"),

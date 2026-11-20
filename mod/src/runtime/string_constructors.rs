@@ -29,8 +29,9 @@
 //!   same way (`"codePoints"` in the NPE), then each code point: an invalid one
 //!   throws `IllegalArgumentException` with the code point in decimal.
 //!
-//! * `String()` and `String(String)` remain counted because each constructs a
-//!   distinct object whose identity the text value cannot preserve.
+//! * `String(String)`, `String(StringBuilder)` and `String(StringBuffer)` keep
+//!   their distinct object identity in the host's text table. `String()` and
+//!   constructors whose text cannot be represented remain counted.
 //! * The `byte[]` constructors decode with the charset they name, or UTF-8
 //!   (the default charset since JDK 18) when they name none. The charset is
 //!   checked first: a null `Charset` or name throws `NullPointerException`
@@ -44,8 +45,7 @@
 //! input uses JDK 25's replacement lengths; other charsets (UTF-16 and a name
 //! the host does not model) stay counted.
 //!
-//! Every other constructor (`String()`, `String(String)`, `StringBuilder`/
-//! `StringBuffer`, and the deprecated hibyte `(byte[], int)` pair) is still
+//! The empty constructor and deprecated hibyte `(byte[], int)` pair are still
 //! counted. So is a `char[]`/`int[]`
 //! constructor whose text has an unpaired surrogate, which the runtime's
 //! strings cannot hold. A `String` constructor reached through a
@@ -439,14 +439,27 @@ pub(crate) fn build<H: Host>(
             Some(text)
         }
         "(Ljava/lang/String;)V" => match args.first() {
-            Some(Value::Ref(Some(text))) if value_class::is_plain_string(text) => {
-                Some(text.clone())
+            Some(Value::Ref(None)) => {
+                return Err(thrown(
+                    "java/lang/NullPointerException",
+                    "Cannot read field \"value\" because \"original\" is null".into(),
+                ));
             }
-            _ => None,
+            Some(value) => runtime
+                .host
+                .constructed_string_text(value)
+                .or_else(|| match value {
+                    Value::Ref(Some(text)) if value_class::is_plain_string(text) => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                }),
+            None => None,
         },
-        "(Ljava/lang/StringBuilder;)V" | "(Ljava/lang/StringBuffer;)V" => args
-            .first()
-            .and_then(|value| runtime.builder_text(value).cloned()),
+        "(Ljava/lang/StringBuilder;)V" | "(Ljava/lang/StringBuffer;)V" => {
+            let value = args.first();
+            value.and_then(|value| runtime.builder_text(value).cloned())
+        }
         _ => None,
     };
     Ok(text)

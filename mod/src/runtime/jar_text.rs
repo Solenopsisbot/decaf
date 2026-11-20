@@ -193,6 +193,16 @@ impl<H: Host> Runtime<'_, H> {
                     .map(Some),
             };
         }
+        if self.host.counted_string(value) {
+            return self
+                .host
+                .unknown_operand_call(&MethodRef {
+                    owner: "java/lang/String".into(),
+                    name: "toString".into(),
+                    descriptor: TO_STRING.into(),
+                })
+                .map(Some);
+        }
         // A `String` spelling an object's key is that text.
         if crate::runtime::jar_object::spells_key(value) {
             return Ok(None);
@@ -402,6 +412,24 @@ impl<H: Host> Runtime<'_, H> {
         method: &str,
     ) -> Result<(), NativeError> {
         for (position, value) in captured.iter_mut().enumerate() {
+            if let Some(text) = self.host.constructed_string_text(value) {
+                *value = Value::Ref(Some(text));
+                if let Some(argument) = arguments.get_mut(position) {
+                    *argument = "Ljava/lang/String;".into();
+                }
+                continue;
+            }
+            if self.host.counted_string(value) {
+                *value = self.host.unknown_operand_call(&MethodRef {
+                    owner: "java/lang/String".into(),
+                    name: "toString".into(),
+                    descriptor: TO_STRING.into(),
+                })?;
+                if let Some(argument) = arguments.get_mut(position) {
+                    *argument = "Ljava/lang/String;".into();
+                }
+                continue;
+            }
             if arguments.get(position).is_some_and(|argument| {
                 argument == "Ljava/lang/String;" || !argument.starts_with(['L', '['])
             }) {

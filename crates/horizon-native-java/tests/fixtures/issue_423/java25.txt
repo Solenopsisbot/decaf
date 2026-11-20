@@ -1,3 +1,7 @@
 copy=5/true/true/true/false
+methods=true/e/ell/hello!/0/true
+switch=hit
+null=java.lang.NullPointerException:Cannot read field "value" because "original" is null
+builder=ab/abcd
 chars=world/orl
 bytes=ABC

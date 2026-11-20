@@ -2585,6 +2585,10 @@ pub trait Host {
         None
     }
     fn record_constructed_string(&mut self, _value: &Value, _text: String) {}
+    fn counted_string(&self, _value: &Value) -> bool {
+        false
+    }
+    fn record_counted_string(&mut self, _value: &Value) {}
 
     /// The key and value of a host `Map.Entry` now (`host_map_entry.rs`); `None` for any
     /// other value, or when the entry's contents are unknown.
@@ -3636,6 +3640,10 @@ pub struct StdHost {
     constructed_uuids: BTreeMap<String, (i64, i64)>,
     /// Text of modeled `String` objects whose identity must remain distinct.
     constructed_strings: BTreeMap<String, String>,
+    /// `String` objects whose constructor was counted because its value is
+    /// unknown. Any later use of one is counted too; its allocation marker is
+    /// never a substitute for the string's contents.
+    counted_strings: BTreeSet<String>,
     /// The server levels this invocation has heard about, in the order the
     /// firings named them ([`events::StdHost::note_firing_levels`]).
     levels: Vec<events::FacadeLevel>,
@@ -3875,6 +3883,7 @@ impl StdHost {
             map_entries: host_map_entry::Entries::default(),
             constructed_uuids: BTreeMap::new(),
             constructed_strings: BTreeMap::new(),
+            counted_strings: BTreeSet::new(),
             levels: Vec::new(),
             references: BTreeMap::new(),
             iterators: BTreeMap::new(),
@@ -6817,6 +6826,16 @@ impl Host for StdHost {
     fn record_constructed_string(&mut self, value: &Value, text: String) {
         if let Some(key) = jar_object::object_key(value) {
             self.constructed_strings.insert(key.to_owned(), text);
+        }
+    }
+
+    fn counted_string(&self, value: &Value) -> bool {
+        jar_object::object_key(value).is_some_and(|key| self.counted_strings.contains(key))
+    }
+
+    fn record_counted_string(&mut self, value: &Value) {
+        if let Some(key) = jar_object::object_key(value) {
+            self.counted_strings.insert(key.to_owned());
         }
     }
 
@@ -24449,15 +24468,20 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(Some(Value::Ref(Some(text))));
                 }
                 let object = self.new_object(&callback.target.owner);
+                let counted_string = callback.target.owner == "java/lang/String"
+                    && string_constructors::count(self, &callback.target)?.is_some();
                 // `StringBuilder::new`: the interpreter's own builder, as `new`
                 // and `<init>` make it (`jdk_string_builder.rs`).
                 if self
                     .invoke_string_builder(&callback.target, Some(&object), &values)?
                     .is_none()
-                    && string_constructors::count(self, &callback.target)?.is_none()
+                    && !counted_string
                 {
                     self.host
                         .invoke_instance(&callback.target, &object, &values)?;
+                }
+                if counted_string {
+                    self.host.record_counted_string(&object);
                 }
                 return Ok(Some(object));
             }
@@ -31971,55 +31995,91 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
-                        && r.owner == "java/lang/String"
-                        && r.name == "equals"
-                        && r.descriptor == "(Ljava/lang/Object;)Z"
-                        && (receiver
-                            .as_ref()
-                            .and_then(|v| self.host.constructed_string_text(v))
-                            .is_some()
-                            || receiver
-                                .as_ref()
-                                .and_then(expect_ref)
-                                .is_some_and(|v| value_class::is_plain_string(v)))
+                        && let Some(receiver) = receiver.as_ref()
+                        && self.host.counted_string(receiver)
                     {
-                        let own = receiver
-                            .as_ref()
-                            .and_then(|v| self.host.constructed_string_text(v))
-                            .or_else(|| {
-                                receiver
-                                    .as_ref()
-                                    .and_then(expect_ref)
-                                    .filter(|v| value_class::is_plain_string(v))
-                                    .cloned()
-                            });
-                        let other = args.first();
-                        let equal = own.is_some_and(|text| {
-                            other.and_then(|v| self.host.constructed_string_text(v)).is_some_and(|value| value == text)
-                                || matches!(other, Some(Value::Ref(Some(value))) if value_class::is_plain_string(value) && value == &text)
-                        });
-                        dispatched = Some(Value::Int(i32::from(equal)));
-                    } else if dispatched.is_none()
-                        && r.owner == "java/lang/String"
+                        // A constructor we could not model leaves an object,
+                        // but not a string value. Never let its marker answer
+                        // a later call; Java's answer is unknown to this host.
+                        dispatched = Some(invoke_or_catch!(at, self.host.unknown_operand_call(&r)));
+                    }
+                    if dispatched.is_none()
                         && let Some(receiver) = receiver.as_ref()
                         && let Some(text) = self.host.constructed_string_text(receiver)
                     {
-                        dispatched = Some(match (r.name.as_str(), r.descriptor.as_str()) {
-                            ("length", "()I") => Value::Int(text.encode_utf16().count() as i32),
-                            ("toString", "()Ljava/lang/String;") => Value::Ref(Some(text)),
-                            ("hashCode", "()I") => {
-                                Value::Int(hash_map_order::java_string_hash(&text))
-                            }
-                            ("equals", "(Ljava/lang/Object;)Z") => {
-                                let other = args.first();
-                                let equal = other
-                                    .and_then(|value| self.host.constructed_string_text(value))
-                                    .is_some_and(|value| value == text)
-                                    || matches!(other, Some(Value::Ref(Some(value))) if value_class::is_plain_string(value) && value == &text);
-                                Value::Int(i32::from(equal))
-                            }
-                            _ => Value::Void,
-                        });
+                        // A modeled copy remains a distinct object. Its
+                        // toString therefore returns the copy itself, while
+                        // all other String methods use the same implementation
+                        // as a plain String containing this text. Normalize
+                        // copied String arguments too, so two copies compare
+                        // and concatenate by their contents.
+                        if r.name == "toString" && r.descriptor == "()Ljava/lang/String;" {
+                            dispatched = Some(receiver.clone());
+                        } else {
+                            let plain = Value::Ref(Some(text));
+                            let normalized_args = args
+                                .iter()
+                                .map(|value| {
+                                    self.host.constructed_string_text(value).map_or_else(
+                                        || value.clone(),
+                                        |text| Value::Ref(Some(text)),
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            dispatched = Some(
+                                if r.name == "compareTo"
+                                    && object_methods::is_compare_to(&r.descriptor)
+                                {
+                                    Value::Int(invoke_or_catch!(
+                                        at,
+                                        self.natural_order(
+                                            &plain,
+                                            normalized_args.first().unwrap_or(&Value::Ref(None))
+                                        )
+                                    ))
+                                } else {
+                                    invoke_or_catch!(
+                                        at,
+                                        self.host.invoke_instance(&r, &plain, &normalized_args)
+                                    )
+                                },
+                            );
+                        }
+                    }
+                    if dispatched.is_none()
+                        && r.owner == "java/lang/String"
+                        && let Some(receiver) = receiver.as_ref()
+                        && expect_ref(receiver)
+                            .is_some_and(|value| value_class::is_plain_string(value))
+                        && args
+                            .iter()
+                            .any(|value| self.host.constructed_string_text(value).is_some())
+                    {
+                        let normalized_args = args
+                            .iter()
+                            .map(|value| {
+                                self.host
+                                    .constructed_string_text(value)
+                                    .map_or_else(|| value.clone(), |text| Value::Ref(Some(text)))
+                            })
+                            .collect::<Vec<_>>();
+                        dispatched = Some(
+                            if r.name == "compareTo" && object_methods::is_compare_to(&r.descriptor)
+                            {
+                                Value::Int(invoke_or_catch!(
+                                    at,
+                                    self.natural_order(
+                                        receiver,
+                                        normalized_args.first().unwrap_or(&Value::Ref(None))
+                                    )
+                                ))
+                            } else {
+                                invoke_or_catch!(
+                                    at,
+                                    self.host.invoke_instance(&r, receiver, &normalized_args)
+                                )
+                            },
+                        );
                     }
                     if dispatched.is_none()
                         && (r.owner == "java/lang/String"
@@ -32331,6 +32391,12 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         dispatched = Some({
                             // `new String(...)` builds no text yet: counted.
+                            if let Some(marker) = receiver
+                                .as_ref()
+                                .filter(|value| jar_object::is_object(value))
+                            {
+                                self.host.record_counted_string(marker);
+                            }
                             value
                         });
                     }

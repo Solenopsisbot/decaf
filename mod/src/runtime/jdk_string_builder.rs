@@ -673,7 +673,11 @@ impl<H: Host> Runtime<'_, H> {
     /// the jar `new`ed, or a host builder marker. A `String` spelling a
     /// builder's key is no builder (`jar_object.rs`).
     pub(crate) fn builder_text(&self, value: &Value) -> Option<&String> {
-        if crate::runtime::jar_object::spells_key(value) {
+        if crate::runtime::jar_object::spells_key(value)
+            && !crate::runtime::jar_object::object_class(value).is_some_and(|class| {
+                matches!(class, "java/lang/StringBuilder" | "java/lang/StringBuffer")
+            })
+        {
             return None;
         }
         self.string_builders.get(expect_ref(value)?)
@@ -690,7 +694,12 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         crate::runtime::check_jdk_capacity(r, args)?;
         // A `String` spelling a builder's key is no builder (`jar_object.rs`).
-        if receiver.is_some_and(crate::runtime::jar_object::spells_key) {
+        if receiver.is_some_and(|value| {
+            crate::runtime::jar_object::spells_key(value)
+                && !crate::runtime::jar_object::object_class(value).is_some_and(|class| {
+                    matches!(class, "java/lang/StringBuilder" | "java/lang/StringBuffer")
+                })
+        }) {
             return Ok(None);
         }
         let Some(marker) = receiver.and_then(expect_ref).cloned() else {

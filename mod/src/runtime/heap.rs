@@ -453,6 +453,8 @@ impl StdHost {
             .chain(self.render_objects.keys())
             .chain(self.ranged_attributes.keys())
             .chain(self.menu_states.keys())
+            .chain(self.constructed_strings.keys())
+            .chain(self.counted_strings.iter())
             .map(String::as_str)
     }
 
@@ -494,6 +496,8 @@ impl StdHost {
         self.menu_states.retain(|key, _| keep(key));
         self.jdk_list_of.retain(|key| keep(key));
         self.render_objects.retain(|key, _| keep(key));
+        self.constructed_strings.retain(|key, _| keep(key));
+        self.counted_strings.retain(|key| keep(key));
     }
 }
 
@@ -1721,6 +1725,8 @@ mod tests {
             "view_kinds",
             "locales",
             "constructed_uuids",
+            "constructed_strings",
+            "counted_strings",
             "levels",
             "references",
             "iterators",
@@ -1840,6 +1846,28 @@ mod tests {
             stale.is_empty(),
             "classified fields the host lacks: {stale:?}"
         );
+    }
+
+    #[test]
+    fn constructed_string_rows_follow_object_reachability() {
+        let mut host = StdHost::new();
+        let mut heap = JavaHeap::default();
+        host.constructed_strings
+            .insert("java/lang/String#1".into(), "live".into());
+        host.constructed_strings
+            .insert("java/lang/String#2".into(), "dead".into());
+        host.counted_strings.insert("java/lang/String#3".into());
+        host.persistent_static_fields.insert(
+            "demo/Mod#ROOTLjava/lang/String;".into(),
+            crate::runtime::jar_object::handle("java/lang/String#1".into()),
+        );
+        heap.next_object = 4;
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(
+            host.constructed_strings.keys().collect::<Vec<_>>(),
+            ["java/lang/String#1"]
+        );
+        assert!(host.counted_strings.is_empty());
     }
 
     #[test]
