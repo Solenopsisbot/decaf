@@ -317,6 +317,11 @@ impl<H: Host> Runtime<'_, H> {
         if *receiver == Value::Ref(None) {
             return Err(null_checks::invoke_on_null(&r));
         }
+        if crate::runtime::menu_models::is_menu_class(owner)
+            && let Some(value) = self.invoke_menu_model(&r, receiver, args)?
+        {
+            return Ok(value);
+        }
         let opcode = if kind == Site::Interface { 0xb9 } else { 0xb6 };
         if self.host.is_chm_set(receiver)
             && crate::runtime::jdk_new_set_from_map::chm_set_ordered_read(name, descriptor)

@@ -1,0 +1,54 @@
+slotCount=39
+slot position=0 index=0 x=17 y=29 containerSlot=0
+slot position=1 index=1 x=73 y=29 containerSlot=1
+slot position=2 index=2 x=121 y=29 containerSlot=2
+slot position=3 index=3 x=8 y=84 containerSlot=9
+slot position=4 index=4 x=26 y=84 containerSlot=10
+slot position=5 index=5 x=44 y=84 containerSlot=11
+slot position=6 index=6 x=62 y=84 containerSlot=12
+slot position=7 index=7 x=80 y=84 containerSlot=13
+slot position=8 index=8 x=98 y=84 containerSlot=14
+slot position=9 index=9 x=116 y=84 containerSlot=15
+slot position=10 index=10 x=134 y=84 containerSlot=16
+slot position=11 index=11 x=152 y=84 containerSlot=17
+slot position=12 index=12 x=8 y=102 containerSlot=18
+slot position=13 index=13 x=26 y=102 containerSlot=19
+slot position=14 index=14 x=44 y=102 containerSlot=20
+slot position=15 index=15 x=62 y=102 containerSlot=21
+slot position=16 index=16 x=80 y=102 containerSlot=22
+slot position=17 index=17 x=98 y=102 containerSlot=23
+slot position=18 index=18 x=116 y=102 containerSlot=24
+slot position=19 index=19 x=134 y=102 containerSlot=25
+slot position=20 index=20 x=152 y=102 containerSlot=26
+slot position=21 index=21 x=8 y=120 containerSlot=27
+slot position=22 index=22 x=26 y=120 containerSlot=28
+slot position=23 index=23 x=44 y=120 containerSlot=29
+slot position=24 index=24 x=62 y=120 containerSlot=30
+slot position=25 index=25 x=80 y=120 containerSlot=31
+slot position=26 index=26 x=98 y=120 containerSlot=32
+slot position=27 index=27 x=116 y=120 containerSlot=33
+slot position=28 index=28 x=134 y=120 containerSlot=34
+slot position=29 index=29 x=152 y=120 containerSlot=35
+slot position=30 index=30 x=8 y=142 containerSlot=0
+slot position=31 index=31 x=26 y=142 containerSlot=1
+slot position=32 index=32 x=44 y=142 containerSlot=2
+slot position=33 index=33 x=62 y=142 containerSlot=3
+slot position=34 index=34 x=80 y=142 containerSlot=4
+slot position=35 index=35 x=98 y=142 containerSlot=5
+slot position=36 index=36 x=116 y=142 containerSlot=6
+slot position=37 index=37 x=134 y=142 containerSlot=7
+slot position=38 index=38 x=152 y=142 containerSlot=8
+resultSlot=2
+inventoryStart=3
+inventoryEnd=30
+useRowStart=30
+useRowEnd=39
+stillValid=true
+inputEmpty=true
+resultEmpty=true
+resultSet=true
+mayPlace=false
+builderEmpty=java.lang.IllegalArgumentException:Need to define both inputSlots and resultSlot
+builderUnsetResult=java.lang.IllegalArgumentException:Expected result slot index to follow last input slot
+builderBadInputIndex=java.lang.IllegalArgumentException:Expected input slots to have continous indexes
+builderBadResultIndex=java.lang.IllegalArgumentException:Expected result slot index to follow last input slot

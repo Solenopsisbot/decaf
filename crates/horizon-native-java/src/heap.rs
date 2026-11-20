@@ -413,6 +413,9 @@ impl StdHost {
             out.push(marker.to_owned());
         }
         push(self.ranged_attributes.get(marker), out);
+        if let Some(text) = crate::menu_models::keyed_text(&self.menu_states, marker) {
+            out.push(text);
+        }
     }
 
     /// Every key of the tables [`Self::keyed_texts`] reads, and of the other
@@ -449,6 +452,7 @@ impl StdHost {
             .chain(self.array_view_markers())
             .chain(self.render_objects.keys())
             .chain(self.ranged_attributes.keys())
+            .chain(self.menu_states.keys())
             .map(String::as_str)
     }
 
@@ -487,6 +491,7 @@ impl StdHost {
         self.deque_layouts.retain(|key, _| keep(key));
         self.empty_collections.retain(|key| keep(key));
         self.ranged_attributes.retain(|key, _| keep(key));
+        self.menu_states.retain(|key, _| keep(key));
         self.jdk_list_of.retain(|key| keep(key));
         self.render_objects.retain(|key, _| keep(key));
     }
@@ -1667,6 +1672,7 @@ mod tests {
             "resource_streams",
             "calls",
             "invocations",
+            "menu_states",
             "posted_events",
             "registrations",
             "content_builders",
@@ -1834,5 +1840,38 @@ mod tests {
             stale.is_empty(),
             "classified fields the host lacks: {stale:?}"
         );
+    }
+
+    #[test]
+    fn unrooted_menu_states_are_pruned() {
+        let mut host = StdHost::new();
+        let mut heap = JavaHeap::default();
+        for i in 0..256 {
+            let key = format!("demo/Menu#{i}");
+            host.menu_states.insert(
+                key,
+                crate::menu_models::Object::Menu(crate::menu_models::MenuState {
+                    input: format!("input#{i}"),
+                    result: format!("result#{i}"),
+                    slots: format!("slots#{i}"),
+                    definition: crate::menu_models::Definition {
+                        inputs: Vec::new(),
+                        result: crate::menu_models::SlotDef {
+                            index: 0,
+                            x: 0,
+                            y: 0,
+                            may_place: Value::Ref(None),
+                            empty: false,
+                        },
+                    },
+                    container_id: i,
+                    access: Value::Ref(None),
+                    player: Value::Ref(None),
+                }),
+            );
+        }
+        heap.next_object = 256;
+        collect(&mut heap, &mut host, &[]);
+        assert!(host.menu_states.is_empty());
     }
 }

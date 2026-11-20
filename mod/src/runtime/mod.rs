@@ -197,6 +197,7 @@ mod library_dispatch;
 mod linked_resources;
 mod list_equality;
 mod map_compute;
+mod menu_models;
 mod method_handles;
 mod mixin_extras;
 mod mixin_plugins;
@@ -2386,6 +2387,28 @@ pub struct EventDispatch {
 /// keeps no such state", which the caller turns into a counted path of its own (#246's review:
 /// a silent `null` from `unknown_operand_call` printed a hook-tier player as `null`).
 pub trait Host {
+    /// Structural vanilla menu/container call. `None` leaves the call on the
+    /// ordinary host path; a returned error is a counted refusal.
+    fn menu_instance_call(
+        &mut self,
+        _r: &MethodRef,
+        _receiver: &Value,
+        _args: &[Value],
+    ) -> Option<Result<Value, NativeError>> {
+        None
+    }
+
+    /// A menu model may need the interpreter to run a virtual subclass method
+    /// (for example `ItemCombinerMenu$4.setChanged` reaching `createResult`).
+    /// The default host has no pending action.
+    fn take_menu_action(&mut self) -> Option<menu_models::MenuAction> {
+        None
+    }
+
+    fn menu_field(&mut self, _receiver: &Value, _r: &MethodRef) -> Option<Value> {
+        None
+    }
+
     /// Record one property added to a `StateDefinition.Builder` while a block
     /// constructor's virtual `createBlockStateDefinition` runs.
     fn block_state_builder_add(&mut self, _builder: &Value, _property: &Value) {}
@@ -3724,6 +3747,7 @@ pub struct StdHost {
     /// Fabric biome modifications and their recorded modifiers (`fabric_biome_modifications.rs`).
     fabric_biome_modifications: fabric_biome_modifications::State,
     vec2: vec2::State,
+    menu_states: menu_models::States,
 }
 
 impl Default for StdHost {
@@ -3905,6 +3929,7 @@ impl StdHost {
             creative_tab: host_creative_tab::State::default(),
             fabric_biome_modifications: fabric_biome_modifications::State::default(),
             vec2: vec2::State::default(),
+            menu_states: BTreeMap::new(),
         }
     }
 
@@ -5958,6 +5983,23 @@ pub(crate) fn check_jdk_capacity(r: &MethodRef, args: &[Value]) -> Result<(), Na
 }
 
 impl Host for StdHost {
+    fn menu_instance_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Option<Result<Value, NativeError>> {
+        menu_models::call(&mut self.menu_states, r, receiver, args)
+    }
+
+    fn menu_field(&mut self, receiver: &Value, r: &MethodRef) -> Option<Value> {
+        menu_models::field(&self.menu_states, receiver, r)
+    }
+
+    fn take_menu_action(&mut self) -> Option<menu_models::MenuAction> {
+        menu_models::take_action(&mut self.menu_states)
+    }
+
     fn block_placement_unknown(&mut self) {
         *self
             .unknown_host_calls
@@ -6180,6 +6222,9 @@ impl Host for StdHost {
     }
 
     fn get_field(&mut self, receiver: &Value, r: &MethodRef) -> Result<Value, NativeError> {
+        if let Some(value) = self.menu_field(receiver, r) {
+            return Ok(value);
+        }
         if let Some(value) = vec2::get_field(&self.vec2, receiver, r) {
             return value;
         }
@@ -6896,6 +6941,21 @@ impl Host for StdHost {
     }
 
     fn get_static(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
+        // `ItemStack.EMPTY` is one object on every side: the same typed value the client surface
+        // answers (`client_surface.rs`), so the client item model's `isEmpty` and the menu models
+        // agree on it, server side too.
+        if r.owner == "net/minecraft/world/item/ItemStack"
+            && r.name == "EMPTY"
+            && r.descriptor == "Lnet/minecraft/world/item/ItemStack;"
+        {
+            return Ok(menu_models::empty_stack());
+        }
+        if r.owner == "net/minecraft/world/inventory/ContainerLevelAccess"
+            && r.name == "NULL"
+            && r.descriptor == "Lnet/minecraft/world/inventory/ContainerLevelAccess;"
+        {
+            return Ok(Value::Ref(Some("container-level-access/null".into())));
+        }
         if let Some(value) = tool_material::static_field(&mut self.tool_material, r) {
             return value;
         }
@@ -7200,6 +7260,11 @@ impl Host for StdHost {
     }
 
     fn invoke(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
+        if menu_models::is_menu_class(&r.owner)
+            && let Some(value) = menu_models::static_call(&mut self.menu_states, r, args)
+        {
+            return value;
+        }
         if let Some(value) = fabric_block_api::static_call(&mut self.fabric_block_api, r, args) {
             return value;
         }
@@ -8618,6 +8683,9 @@ impl Host for StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Value, NativeError> {
+        if let Some(value) = self.menu_instance_call(r, receiver, args) {
+            return value;
+        }
         if let Some(value) =
             host_creative_tab::instance_call(&mut self.creative_tab, r, receiver, args)
         {
@@ -23237,6 +23305,11 @@ impl<H: Host> Runtime<'_, H> {
         let mut current = field.owner.clone();
         for _ in 0..MAX_SUPERCLASS_WALK {
             let Some(file) = self.class(&current) else {
+                if let Some(owner) =
+                    menu_models::field_owner(&current, &field.name, &field.descriptor)
+                {
+                    return owner.to_owned();
+                }
                 // `AbstractList.modCount`, inherited from a JDK skeleton.
                 if let Some(owner) =
                     jdk_skeletons::skeleton_field_owner(&current, &field.name, &field.descriptor)
@@ -30163,6 +30236,59 @@ impl<H: Host> Runtime<'_, H> {
         Ok(Some(result))
     }
 
+    fn invoke_menu_model(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(result) = self.host.menu_instance_call(r, receiver, args) else {
+            return Ok(None);
+        };
+        let mut value = result?;
+        while let Some(action) = self.host.take_menu_action() {
+            value = match action {
+                menu_models::MenuAction::SlotsChanged { menu, container } => {
+                    if let Some(value) = self.invoke_menu_model(
+                        &MethodRef {
+                            owner: "net/minecraft/world/inventory/ItemCombinerMenu".into(),
+                            name: "slotsChanged".into(),
+                            descriptor: "(Lnet/minecraft/world/Container;)V".into(),
+                        },
+                        &menu,
+                        &[container],
+                    )? {
+                        value
+                    } else {
+                        let class = crate::runtime::expect_ref(&menu)
+                            .and_then(|key| key.split_once('#').map(|(class, _)| class.to_owned()))
+                            .ok_or_else(|| {
+                                NativeError::Metadata("menu receiver is not a jar object".into())
+                            })?;
+                        self.invoke(&class, "createResult", "()V", Some(menu), &[])?
+                    }
+                }
+                menu_models::MenuAction::CreateResult { menu } => {
+                    let class = crate::runtime::expect_ref(&menu)
+                        .and_then(|key| key.split_once('#').map(|(class, _)| class.to_owned()))
+                        .ok_or_else(|| {
+                            NativeError::Metadata("menu receiver is not a jar object".into())
+                        })?;
+                    self.invoke(&class, "createResult", "()V", Some(menu), &[])?
+                }
+                menu_models::MenuAction::Predicate { predicate, stack } => self.call_virtual(
+                    jdk_call::Site::Interface,
+                    "java/util/function/Predicate",
+                    "test",
+                    "(Ljava/lang/Object;)Z",
+                    &predicate,
+                    &[stack],
+                )?,
+            };
+        }
+        Ok(Some(value))
+    }
+
     /// Enter one jar frame under the execution's recursion and time bounds.
     ///
     /// The bound is checked here rather than in [`Self::invoke_frame`] so every
@@ -30344,6 +30470,17 @@ impl<H: Host> Runtime<'_, H> {
             (None, None) if !host_models => linked
                 .get(class)
                 .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?,
+            (None, None) if host_models => {
+                let r = MethodRef {
+                    owner: class.to_owned(),
+                    name: method.to_owned(),
+                    descriptor: desc.to_owned(),
+                };
+                return match receiver.as_ref() {
+                    Some(receiver) => self.host.invoke_instance(&r, receiver, args),
+                    None => self.host.invoke(&r, args),
+                };
+            }
             (None, None) => {
                 return Err(NativeError::MissingMethod(format!(
                     "{class}#{method}{desc}"
@@ -31636,7 +31773,11 @@ impl<H: Host> Runtime<'_, H> {
                                 }
                                 None => {
                                     self.refuse_collected(&receiver, &r)?;
-                                    self.host.get_field(&receiver, &r)?
+                                    if let Some(value) = self.host.menu_field(&receiver, &r) {
+                                        value
+                                    } else {
+                                        self.host.get_field(&receiver, &r)?
+                                    }
                                 }
                             }
                         }
@@ -31813,6 +31954,14 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     if dispatched.is_none()
                         && let Some(value) = self.dispatch_invoke_hooks(&r, class, method, at)?
+                    {
+                        dispatched = Some(value);
+                    }
+                    if dispatched.is_none()
+                        && menu_models::is_menu_class(&r.owner)
+                        && let Some(receiver) = receiver.as_ref()
+                        && let Some(value) =
+                            invoke_or_catch!(at, self.invoke_menu_model(&r, receiver, &args))
                     {
                         dispatched = Some(value);
                     }
