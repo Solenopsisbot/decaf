@@ -1,0 +1,1 @@
+com.mojang.datafixers.Products$P1|com.mojang.serialization.codecs.RecordCodecBuilder|emptySame=true|nonemptySame=true|codec=com.mojang.serialization.codecs.RecordCodecBuilder$2|keys="condition"

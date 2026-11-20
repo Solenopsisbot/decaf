@@ -4,8 +4,8 @@ import java.lang.reflect.Method;
 /** Runs every HostCodecs probe on DataFixerUpper 10.0.21. */
 public final class HostCodecsOracle {
   public static void main(String[] args) throws Exception {
-    for (String probe : new String[] {"spelled", "spelledTypes", "pairs", "pairMaps", "eithers", "nested", "codecSingletons", "dfuConstruction", "opaqueCodec",
-        "codecDuplicate", "codecText", "mapUnitIdentity", "mapUnitText", "mapUnitCodecIdentity", "mapUnitExecution", "mapUnitNull", "streamUnitIdentity", "streamUnitRoundTrip", "streamUnitNull", "streamUnitCustomEquals", "countedOperations", "dfuText", "callbackXmapUse", "forgedDfuReceiver", "forgedDfuReceivers", "pairVsJdk"}) {
+    for (String probe : new String[] {"spelled", "spelledTypes", "pairs", "pairMaps", "recordConstruction", "identifierCodec", "eithers", "nested", "codecSingletons", "dfuConstruction", "opaqueCodec",
+        "codecDuplicate", "textFlatXmap", "textComapFlatMap", "textMapXmap", "textMapFlatXmap", "textList", "textRecord", "createCounter", "createCounterNull", "createThrows", "encodeUnknown", "parseUnknown", "codecText", "mapUnitIdentity", "mapUnitText", "mapUnitCodecIdentity", "mapUnitExecution", "mapUnitNull", "streamUnitIdentity", "streamUnitRoundTrip", "streamUnitNull", "streamUnitCustomEquals", "countedOperations", "dfuText", "callbackXmapUse", "forgedDfuReceiver", "forgedDfuReceivers", "pairVsJdk"}) {
       Method m = HostCodecs.class.getMethod(probe);
       Object answer;
       try {

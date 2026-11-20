@@ -2666,6 +2666,12 @@ pub trait Host {
         None
     }
 
+    fn is_unmodifiable_collection(&self, _marker: &str) -> bool {
+        false
+    }
+
+    fn mark_unmodifiable_collection(&mut self, _marker: &str) {}
+
     /// A new `Collections$UnmodifiableList` or `$UnmodifiableRandomAccessList`
     /// (`class`) reading `source` live: what `UnmodifiableList.subList` makes
     /// with `new` (#251), whatever `source`'s own class. `None` when the host
@@ -4149,6 +4155,9 @@ impl StdHost {
         // table of its own (`hash_collections.rs`).
         if let Some(marker) = expect_ref(&made) {
             let marker = marker.clone();
+            if self.is_unmodifiable_collection(&source) {
+                self.mark_unmodifiable_collection(&marker);
+            }
             self.note_view_copy(&marker, &source);
             self.note_view_kind(&marker, view);
         }
@@ -6321,6 +6330,16 @@ impl Host for StdHost {
 
     fn unmodifiable_view_source(&self, marker: &str) -> Option<String> {
         self.unmodifiable_collections.get(marker).cloned().flatten()
+    }
+
+    fn is_unmodifiable_collection(&self, marker: &str) -> bool {
+        self.unmodifiable_collections.contains_key(marker)
+    }
+
+    fn mark_unmodifiable_collection(&mut self, marker: &str) {
+        self.unmodifiable_collections
+            .entry(marker.to_owned())
+            .or_insert(None);
     }
 
     fn unmodifiable_list_view_as(&mut self, class: &str, source: &Value) -> Option<Value> {
@@ -13819,6 +13838,24 @@ fn marker_id(value: &str) -> Option<String> {
     (lowercase(namespace, b"_.-") && lowercase(path, b"_./-")).then(|| value.to_owned())
 }
 
+/// Game enums whose constants [`game_enum_constants`] does not list. `Class.isEnum` is true
+/// for them (each `extends java.lang.Enum` in the 26.3 jar), and that is all this answers:
+/// their `values()`, `valueOf` and `getEnumConstants` stay counted. Bookshelf asks `isEnum`
+/// of these while it builds codec helpers in class initialization.
+///
+/// They must stay out of `game_enum_constants`: an empty list there answers `values()` with an
+/// empty array and `valueOf` with "No enum constant", where Java has both.
+pub(crate) fn game_enum_class(class: &str) -> bool {
+    matches!(
+        class,
+        "net/minecraft/world/item/Rarity"
+            | "net/minecraft/core/Direction$Plane"
+            | "net/minecraft/world/entity/MobCategory"
+            | "net/minecraft/world/item/DyeColor"
+            | "net/minecraft/world/Difficulty"
+    )
+}
+
 /// Constants of the game enums whose `values()` the host answers.
 ///
 /// Only enums whose declaration order vanilla pins are listed; a mod calling
@@ -14242,6 +14279,15 @@ impl StdHost {
             },
             _ => return self.unknown_host_call(r),
         };
+        if handle.kind() == HostKind::Class
+            && r.name == "isEnum"
+            && r.descriptor == "()Z"
+            && let Some(class) = crate::host_class::class_name(&Value::Host(handle.clone()))
+            && game_enum_constants(class).is_some()
+        {
+            self.unknown_host_call(r)?;
+            return Ok(Value::Int(1));
+        }
         let answer = match r.name.as_str() {
             // A callback's text: counted, a text answered, never its key.
             "toString" if handle.kind() == HostKind::Callback => {
@@ -14684,7 +14730,9 @@ fn game_builder_value(r: &MethodRef) -> Option<Value> {
 }
 
 /// The game's codec value types: a call or constant declared to answer one
-/// never answers null in the game.
+/// never answers null in the game. Only the game's and DataFixerUpper's own
+/// classes: a mod's `FooCodec` may well answer null, so its unmodelled
+/// result keeps the neutral null (#410 review).
 fn is_codec_type(name: &str) -> bool {
     matches!(
         name,
@@ -14693,7 +14741,8 @@ fn is_codec_type(name: &str) -> bool {
             | "com/mojang/serialization/MapCodec"
             | "com/mojang/serialization/codecs/PrimitiveCodec"
             | "com/mojang/serialization/codecs/RecordCodecBuilder"
-    )
+    ) || (name.ends_with("Codec")
+        && (name.starts_with("net/minecraft/") || name.starts_with("com/mojang/")))
 }
 
 fn empty_collection_kind(descriptor: &str) -> Option<&'static str> {
@@ -24940,6 +24989,34 @@ impl<H: Host> Runtime<'_, H> {
             .and_then(|(owner, jar)| jar.then_some(owner))
     }
 
+    /// `LootItemConditionalFunction.commonFields(instance)` as a jar subclass calls it: its
+    /// `invokestatic` names the subclass. Answered only when the jar's chain from `r.owner` reaches
+    /// the vanilla class without any jar class declaring a `commonFields` of its own (whose body the
+    /// interpreter runs instead).
+    fn vanilla_loot_common_fields(&mut self, r: &MethodRef, args: &[Value]) -> Option<Value> {
+        const LOOT_FUNCTION: &str =
+            "net/minecraft/world/level/storage/loot/functions/LootItemConditionalFunction";
+        let mut current = r.owner.clone();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            if current == LOOT_FUNCTION {
+                let vanilla = MethodRef {
+                    owner: LOOT_FUNCTION.into(),
+                    ..r.clone()
+                };
+                return dfu_codec::invoke(self.host, &vanilla, None, args);
+            }
+            let file = self.class(&current)?;
+            if file.method(&r.name, &r.descriptor).is_some() {
+                return None;
+            }
+            if file.super_name.is_empty() || file.super_name == current {
+                return None;
+            }
+            current = file.super_name.clone();
+        }
+        None
+    }
+
     pub(crate) fn jar_extends(&self, class: &str, wanted: &str) -> bool {
         let mut current = class.to_owned();
         for _ in 0..MAX_SUPERCLASS_WALK {
@@ -31754,6 +31831,66 @@ impl<H: Host> Runtime<'_, H> {
                             // hook above replaced the call, so it never ran.
                             invoke_or_catch!(at, Err(null_checks::invoke_on_null(&r)))
                         });
+                    }
+                    if dispatched.is_none()
+                        && let Some(value) = r
+                            .owner
+                            .starts_with("com/mojang/datafixers/Products$P")
+                            .then(|| dfu_codec::invoke(self.host, &r, receiver.as_ref(), &args))
+                            .flatten()
+                    {
+                        dispatched = Some({
+                            // DFU's own product classes (`Products.P1.and`): never a jar's class, so
+                            // they are answered before any jar body would be looked up.
+                            value
+                        });
+                    }
+                    if dispatched.is_none()
+                        && r.name == "commonFields"
+                        && args.first() == Some(&Value::Ref(None))
+                        && (r.owner
+                            == "net/minecraft/world/level/storage/loot/functions/LootItemConditionalFunction"
+                            || (self.jar_extends(
+                                &r.owner,
+                                "net/minecraft/world/level/storage/loot/functions/LootItemConditionalFunction",
+                            ) && self
+                                .jar_method_owner(&r.owner, &r.name, &r.descriptor)
+                                .is_none()))
+                    {
+                        dispatched = Some({
+                        // The exception class is known, but invoke_on_null cannot recover
+                        // vanilla's `because "i" is null` suffix. Count this call rather
+                        // than presenting its shortened message as Java's answer.
+                        invoke_or_catch!(at, self.host.unknown_operand_call(&r));
+                        invoke_or_catch!(
+                            at,
+                            Err(null_checks::invoke_on_null(&MethodRef {
+                                owner: "com/mojang/serialization/codecs/RecordCodecBuilder$Instance".into(),
+                                name: "group".into(),
+                                descriptor: "(Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P1;".into(),
+                            }))
+                        )
+                        });
+                    }
+                    if dispatched.is_none()
+                        && r.name == "commonFields"
+                        && let Some(value) = self.vanilla_loot_common_fields(&r, &args)
+                    {
+                        dispatched = Some({
+                            // `LootItemConditionalFunction.commonFields`, which a subclass calls
+                            // unqualified, so the call names the jar's own class: answered only
+                            // when that class inherits it from the vanilla one (#410 review).
+                            value
+                        });
+                    }
+                    if dispatched.is_none()
+                        && r.owner.starts_with("com/mojang/datafixers/Products$P")
+                        && let Some(value) = invoke_or_catch!(
+                            at,
+                            dfu_codec::runtime_instance_call(self, &r, receiver.as_ref(), &args)
+                        )
+                    {
+                        dispatched = Some(value);
                     }
                     if dispatched.is_none()
                         && (r.owner == "java/lang/String"

@@ -16,11 +16,16 @@ public interface Codec<A> {
     com.mojang.serialization.MapCodec<Object> EMPTY = null;
     <S> Codec<S> xmap(java.util.function.Function<? super A, ? extends S> to,
                       java.util.function.Function<? super S, ? extends A> from);
+    <S> Codec<S> comapFlatMap(java.util.function.Function<? super A, ? extends DataResult<? extends S>> to,
+                               java.util.function.Function<? super S, ? extends A> from);
+    <S> Codec<S> flatXmap(java.util.function.Function<? super A, ? extends DataResult<? extends S>> to,
+                          java.util.function.Function<? super S, ? extends DataResult<? extends A>> from);
     com.mojang.serialization.MapCodec<A> fieldOf(String name);
     com.mojang.serialization.MapCodec<java.util.Optional<A>> optionalFieldOf(String name);
     com.mojang.serialization.MapCodec<A> optionalFieldOf(String name, A defaultValue);
     com.mojang.serialization.MapCodec<A> optionalFieldOf(String name, A defaultValue, Lifecycle lifecycle);
     <B> Codec<B> listOf();
+    Codec<java.util.List<A>> listOf(int minSize, int maxSize);
     <B> Codec<B> dispatch(java.util.function.Function<A, ? extends Codec<B>> type,
                           java.util.function.Function<B, ? extends A> key);
     Codec<A> orElse(Codec<? extends A> fallback);
