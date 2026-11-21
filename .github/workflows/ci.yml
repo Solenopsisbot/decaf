@@ -100,3 +100,85 @@ jobs:
         run: cargo +stable clippy --manifest-path mod/Cargo.toml --all-targets -- -D warnings
       - name: Unit tests (mod)
         run: cargo +stable test --manifest-path mod/Cargo.toml --lib
+
+  # `mod-horizon/` is the same mod built on the official Horizon's `horizon-mod-api` (the `mod/` job
+  # above builds the Sunrise one). Gabbotampo's side owns this build and keeps it green (#310): a
+  # runtime change that breaks it is fixed in a follow-up there, so this job never holds a runtime PR.
+  mod-horizon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Deliberate: the official API moves on its own schedule, so a red run here reports a break for
+    # the mod-horizon owners to fix and never blocks a Sunrise or runtime PR (docs/mod-horizon.md).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Fetch the pinned Horizon SDK
+        # `mod-horizon/Cargo.toml` names the mod API by `.horizon/sdk/` (the only form the official
+        # Horizon accepts, E_SDK_SOURCE), so the SDK of the build pinned in `mod-horizon/horizon-mod.toml`
+        # is fetched before cargo runs, with the checks of Horizon's
+        # docs/modding/src/reference/sdk/01-release.md: `SHA256SUMS` signed by Horizon for the tag
+        # `sdk-<build>` (the key is in crates/horizon-release-sign/release-keys.txt), `sdk.json` listed
+        # there and naming this build, and each file used at the size and SHA-256 `sdk.json` gives.
+        # Only the API source is needed to check, lint and test the crate. (The official
+        # `cargo horizon-mod` tool has no prebuilt release; it is built from source with `cargo install`.)
+        run: |
+          set -eu
+          PIN=$(sed -n 's/^horizon = "\([0-9a-f]\{40\}\)"$/\1/p' mod-horizon/horizon-mod.toml)
+          [ -n "$PIN" ] || { echo "no [native] horizon pin in mod-horizon/horizon-mod.toml" >&2; exit 1; }
+          BASE=https://github.com/horizon-rust/horizon/releases/download/sdk-$PIN
+          KEY=MU4oiIQcCxkZvbwSjjXs7SySCuM6ywRQ3nGaJYZG0gw=
+          WORK=$RUNNER_TEMP/horizon-sdk
+          mkdir -p "$WORK" && cd "$WORK"
+          for file in SHA256SUMS SHA256SUMS.sig sdk.json surface.json api-source.tar.xz; do
+            curl -fsSLO "$BASE/$file"
+          done
+          printf 'horizon release %s\n' "sdk-$PIN" | cat - SHA256SUMS > message
+          { printf '\060\052\060\005\006\003\053\145\160\003\041\000'; printf '%s' "$KEY" | openssl base64 -d -A; } > key.der
+          signed=
+          while read -r line || [ -n "$line" ]; do
+            printf '%s' "$line" | openssl base64 -d -A > signature
+            openssl pkeyutl -verify -rawin -pubin -keyform DER -inkey key.der -in message -sigfile signature > /dev/null 2>&1 && signed=1
+          done < SHA256SUMS.sig
+          [ -n "$signed" ] || { echo "SHA256SUMS is not signed by Horizon" >&2; exit 1; }
+          grep ' sdk\.json$' SHA256SUMS | sha256sum -c -
+          python3 - "$PIN" <<'EOF'
+          import hashlib, json, sys
+          sdk = json.load(open("sdk.json"))
+          if sdk["build"]["commit"] != sys.argv[1]:
+              sys.exit(f"sdk.json names build {sdk['build']['commit']}, not {sys.argv[1]}")
+          for name in ("surface.json", "api-source.tar.xz"):
+              asset, data = sdk["assets"][name], open(name, "rb").read()
+              if len(data) != asset["size"] or hashlib.sha256(data).hexdigest() != asset["sha256"]:
+                  sys.exit(f"{name}: not the file sdk.json lists")
+          EOF
+          SDK=$GITHUB_WORKSPACE/mod-horizon/.horizon/sdk
+          mkdir -p "$SDK/api"
+          tar -xJf api-source.tar.xz -C "$SDK/api"
+          cp sdk.json surface.json "$SDK/"
+          test -f "$SDK/api/crates/horizon-mod-api/Cargo.toml"
+      - name: Install the SDK's Rust toolchain
+        # The Rust release the pinned SDK was compiled with (`toolchain.rust` in its sdk.json), so
+        # the job does not move with `stable`; every later cargo and rustfmt call uses it.
+        run: |
+          RUST=$(python3 -c 'import json; print(json.load(open("mod-horizon/.horizon/sdk/sdk.json"))["toolchain"]["rust"])')
+          rustup toolchain install "$RUST" --profile minimal --component rustfmt,clippy
+          echo "RUSTUP_TOOLCHAIN=$RUST" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mod-horizon
+      - name: Generate mod-horizon's runtime copy
+        # Not committed (docs/mod-horizon.md): generated here from crates/horizon-native-java/src, so
+        # a runtime PR never has to touch mod-horizon/ and the gates job checks mod/ only.
+        run: python3 tools/vendor.py --mod mod-horizon
+      - name: Format (mod-horizon's own files)
+        # Like `mod/`, only the mod's own files: src/runtime/ is generated.
+        run: find mod-horizon/src -maxdepth 1 -name '*.rs' -print0 | xargs -0 rustfmt --edition 2024 --check --config skip_children=true
+      - name: Clippy (mod-horizon)
+        # `--locked`: mod-horizon/Cargo.lock holds Horizon's own versions at the pin.
+        run: cargo clippy --locked --manifest-path mod-horizon/Cargo.toml --all-targets -- -D warnings
+      - name: Unit tests (mod-horizon)
+        run: cargo test --locked --manifest-path mod-horizon/Cargo.toml --lib

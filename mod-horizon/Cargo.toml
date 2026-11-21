@@ -1,0 +1,44 @@
+[package]
+name = "horizon-java-mod"
+version = "0.1.0"
+edition = "2024"
+# zip 9.1.3 (below, the runtime's only non-trivial dependency) is `rust-version = "1.88"`.
+rust-version = "1.88"
+publish = false
+description = "Horizon Java: runs Java mod jars on the native bytecode runtime"
+
+[lib]
+# The launcher links this crate into the game executable it builds.
+path = "src/lib.rs"
+
+[dependencies]
+# The mod API of the exact build pinned in `horizon-mod.toml`, from its signed SDK, which
+# `cargo horizon-mod` (`check`, `build`, `run`) fetches into `.horizon/sdk/`. Horizon refuses
+# every other form (git, version, another path) under E_SDK_SOURCE
+# (docs/modding/src/reference/sdk/03-in-a-project.md).
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
+# The runtime's dependencies, pinned to the exact versions in Horizon's `Cargo.lock`
+# (docs/modding/src/how-to/native-mods/01-the-mods-crate.md): keeping the same versions as the
+# pinned game build avoids duplicate registry copies across mods.
+crc32fast = "=1.5.2"
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
+zip = { version = "=9.1.3", default-features = false, features = ["deflate"] }
+log = "=0.4.34"
+
+[dev-dependencies]
+# The dispatch-level game-hook tests use the API's in-process fake server host.
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api", features = ["testing"] }
+
+# The runtime's stack-bounds lookup (`java_regex/stack.rs`), at the version
+# Horizon's `Cargo.lock` resolves.
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.190"
+
+# The workspace's `[workspace.lints.clippy]` allowances, repeated because `mod-horizon/` is excluded from
+# the workspace: the vendored runtime is the same code the workspace lints, so it gets the same
+# lint set (keep the two in step).
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+large_enum_variant = "allow"

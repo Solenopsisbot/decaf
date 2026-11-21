@@ -3,7 +3,7 @@ members = ["crates/horizon-native-java", "crates/horizon-jvm"]
 # `mod/` is a Horizon native mod: one flat crate with its own dependency rules (Horizon's
 # Cargo.lock), built by the game's launcher rather than by this workspace. Excluding it keeps it
 # out of this workspace's formatting, lints and dependency resolution.
-exclude = ["mod"]
+exclude = ["mod", "mod-horizon"]
 resolver = "3"
 
 [workspace.package]
