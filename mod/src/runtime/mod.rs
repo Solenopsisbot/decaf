@@ -8920,7 +8920,16 @@ impl Host for StdHost {
                 Ok(uuid_value(&random_uuid())?)
             }
             ("java/util/UUID", "fromString", "(Ljava/lang/String;)Ljava/util/UUID;") => {
-                Ok(uuid_value(expect_string(Self::argument(r, args, 0)?))?)
+                // A null name throws a NullPointerException whose helpful message names the
+                // JDK's own code: counted, not answered.
+                let Some(text) = expect_ref(Self::argument(r, args, 0)?) else {
+                    return self.unknown_host_call(r);
+                };
+                match uuid_from_string(text) {
+                    Some(Ok(uuid)) => Ok(host_jdk_value::uuid(&uuid)),
+                    Some(Err(thrown)) => Err(thrown),
+                    None => self.unknown_host_call(r),
+                }
             }
             (
                 "java/net/URLEncoder",
@@ -14902,44 +14911,112 @@ fn random_uuid() -> String {
 }
 
 fn uuid_value(text: &str) -> Result<Value, NativeError> {
-    Ok(host_jdk_value::uuid(&canonical_uuid(text)?))
-}
-
-fn canonical_uuid(text: &str) -> Result<String, NativeError> {
-    let bytes = text.as_bytes();
-    if bytes.len() != 36
-        || ![8, 13, 18, 23].iter().all(|&index| bytes[index] == b'-')
-        || bytes
-            .iter()
-            .enumerate()
-            .any(|(index, byte)| ![8, 13, 18, 23].contains(&index) && !byte.is_ascii_hexdigit())
-    {
-        return legacy_uuid(text)
-            .ok_or_else(|| NativeError::Metadata(format!("invalid UUID string {text:?}")));
+    match uuid_from_string(text) {
+        Some(Ok(uuid)) => Ok(host_jdk_value::uuid(&uuid)),
+        _ => Err(NativeError::Metadata(format!(
+            "invalid UUID string {text:?}"
+        ))),
     }
-    Ok(text.to_ascii_lowercase())
 }
 
-/// `UUID.fromString1` (Java 25), the form other than the canonical 36 characters: five
-/// dash-separated hex fields of any width, each `Long.parseLong(.., 16)` masked to its field
-/// (`1-2-3-4-5` is `00000001-0002-0003-0004-000000000005`). `None` where Java throws, or a
-/// field has a sign this model does not read.
-fn legacy_uuid(text: &str) -> Option<String> {
-    let fields: Vec<&str> = text.split('-').collect();
-    if text.len() > 36 || fields.len() != 5 {
+/// `UUID.fromString(text)` on Java 25: the canonical text of the UUID it answers, or the exception
+/// it throws, class and message (`tests/fixtures/uuid_from_string/java25.txt` is the captured
+/// oracle). `None` where this model cannot tell: once the length and dash checks pass, text with a
+/// non-ASCII character, since Java reads each field with `Character.digit`, which takes every
+/// Unicode decimal digit and the fullwidth letters.
+///
+/// Java's order: text longer than 36 UTF-16 units is "too large"; the canonical 36 characters
+/// (dashes at 8, 13, 18 and 23, hex digits elsewhere, either case) are read directly; any other
+/// text needs exactly four dashes, and each of the five fields between them is read as
+/// `Long.parseLong(.., 16)` reads a part of a string, then masked to its field's width
+/// (`1-2-3-4-5` is `00000001-0002-0003-0004-000000000005`).
+fn uuid_from_string(text: &str) -> Option<Result<String, NativeError>> {
+    let thrown = |class: &str, message: String| NativeError::UncaughtException {
+        class: class.into(),
+        message: Some(message),
+        frame: None,
+    };
+    if text.encode_utf16().count() > 36 {
+        return Some(Err(thrown(
+            "java/lang/IllegalArgumentException",
+            "UUID string too large".into(),
+        )));
+    }
+    let bytes = text.as_bytes();
+    let dash = |index: usize| [8, 13, 18, 23].contains(&index);
+    if bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if dash(index) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Some(Ok(text.to_ascii_lowercase()));
+    }
+    if text.matches('-').count() != 4 {
+        return Some(Err(thrown(
+            "java/lang/IllegalArgumentException",
+            format!("Invalid UUID string: {text}"),
+        )));
+    }
+    if !text.is_ascii() {
         return None;
     }
     let mut values = [0_i64; 5];
-    for (value, field) in values.iter_mut().zip(&fields) {
-        if field.is_empty() || !field.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return None;
+    for (value, field) in values.iter_mut().zip(text.split('-')) {
+        match uuid_field(field) {
+            Ok(parsed) => *value = parsed,
+            Err(message) => return Some(Err(thrown("java/lang/NumberFormatException", message))),
         }
-        *value = i64::from_str_radix(field, 16).ok()?;
     }
     let msb =
         ((values[0] & 0xffff_ffff) << 32) | ((values[1] & 0xffff) << 16) | (values[2] & 0xffff);
     let lsb = ((values[3] & 0xffff) << 48) | (values[4] & 0xffff_ffff_ffff);
-    Some(host_jdk_value::uuid_text_of(msb, lsb))
+    Some(Ok(host_jdk_value::uuid_text_of(msb, lsb)))
+}
+
+/// One field of a non-canonical [`uuid_from_string`] text, ASCII and without a dash, read as
+/// Java 25's `Long.parseLong(CharSequence, begin, end, 16)` reads it: an optional `+`, then hex
+/// digits, accumulated negatively so the overflow check is on the digit that overflows. The
+/// error is that call's `NumberFormatException` message, with the index counted from the
+/// field's start.
+fn uuid_field(field: &str) -> Result<i64, String> {
+    let bytes = field.as_bytes();
+    let error_at = |index: usize| format!("Error at index {index} in: \"{field}\"");
+    let Some(&first) = bytes.first() else {
+        return Err("For input string: \"\" under radix 16".into());
+    };
+    let mut index = 0;
+    if first < b'0' {
+        // A field never holds a `-`: the text was split at its dashes.
+        if first != b'+' {
+            return Err(error_at(0));
+        }
+        if bytes.len() == 1 {
+            return Err(error_at(1));
+        }
+        index = 1;
+    }
+    const LIMIT: i64 = -i64::MAX;
+    const MULTMIN: i64 = LIMIT / 16;
+    let mut result = 0_i64;
+    while index < bytes.len() {
+        let Some(digit) = char::from(bytes[index]).to_digit(16).map(i64::from) else {
+            return Err(error_at(index));
+        };
+        if result < MULTMIN {
+            return Err(error_at(index));
+        }
+        result *= 16;
+        if result < LIMIT + digit {
+            return Err(error_at(index));
+        }
+        result -= digit;
+        index += 1;
+    }
+    Ok(-result)
 }
 
 fn enum_name(value: &Value) -> &str {

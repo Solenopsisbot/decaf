@@ -1232,7 +1232,9 @@ equality, hashing, and string conversion. Bounded `Double` and `Float` parsing, 
 `isNaN`/`isInfinite`, and Java-style string conversion use deterministic floating-point markers;
 malformed values remain explicit metadata errors. `java.util.UUID.fromString`, deterministic `randomUUID`,
 `toString`, `equals`, and `hashCode` preserve canonical UUID identity markers without process randomness;
-malformed UUID strings remain explicit metadata errors. `Enum.valueOf`, `name`, `ordinal`, `equals`,
+`fromString` of text Java 25 refuses throws its exact `IllegalArgumentException` or
+`NumberFormatException` (captured in `tests/fixtures/uuid_from_string/java25.txt`), and the text it
+cannot judge (a non-ASCII field past the dash check, a null name) is counted. `Enum.valueOf`, `name`, `ordinal`, `equals`,
 and `hashCode` preserve deterministic enum markers for loader and configuration branches. Collection `stream()` supports bounded `map`, `filter`, `distinct`,
 `limit`, `skip`, `count`, `toList`, `toArray`, `collect(Collectors.toList/toSet)`, `isEmpty`, `findFirst`, `findAny`, `anyMatch`, `allMatch`, `noneMatch`, and `forEach` chains using the same in-jar callback bridge. `Stream.toArray()` returns a runtime-owned object-array marker, and `Optional.stream()` produces a bounded zero-or-one-element stream, so optional registry lookups can enter those chains without a JVM.
 Native `ArrayList`, `HashMap`, `LinkedHashMap`, `HashSet`, and `LinkedHashSet` markers also retain bounded
