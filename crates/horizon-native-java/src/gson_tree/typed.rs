@@ -215,7 +215,15 @@ impl<H: Host> Runtime<'_, H> {
             // An empty document is `null`.
             (Parsed::Empty, _) => Ok(Some(Value::Ref(None))),
             (Parsed::Value(tree), false) => self.gson_read(&tree, target, style),
-            (Parsed::Value(_), true) | (Parsed::Unsupported, _) => Ok(None),
+            // Read as `Object`, the reader reaches the 256th bracket before
+            // any adapter can refuse a shape. Another target's adapter may
+            // throw first, and a repeated name may matter: counted.
+            (Parsed::TooDeep(message), false) if matches!(target, GenericType::Class(class) if class == "java/lang/Object") => {
+                Err(self.json_syntax_exception(message))
+            }
+            (Parsed::Value(_), true) | (Parsed::TooDeep(_), _) | (Parsed::Unsupported, _) => {
+                Ok(None)
+            }
         }
     }
 

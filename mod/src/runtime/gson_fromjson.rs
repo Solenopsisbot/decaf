@@ -743,7 +743,7 @@ impl<H: Host> Runtime<'_, H> {
                 Parsed::Value(tree) => tree,
                 // Keep the established bounded parser's diagnostic for malformed,
                 // BOM-prefixed and otherwise unsupported input.
-                Parsed::Unsupported => return Ok(None),
+                Parsed::TooDeep(_) | Parsed::Unsupported => return Ok(None),
             }
         };
         if tree_depth(&parsed, 0) > MAX_GSON_DEPTH {

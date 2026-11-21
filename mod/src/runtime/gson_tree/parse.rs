@@ -11,20 +11,28 @@
 //! Counted instead of answered: a document using the lenient forms this
 //! parser does not reproduce (unquoted or single-quoted text, `;`/`=`
 //! separators, implied `null`s, upper-case keywords, the `)]}'` prefix), and a
-//! malformed document, including one nested past Gson's 255 levels (the
-//! exception's message is the reader's position text, which is not
-//! reproduced); a reader whose text the runtime does not hold; a JSON `null`,
+//! malformed document; a reader whose text the runtime does not hold; a JSON `null`,
 //! or a value of the wrong kind, read into a tree class through `fromJson`
 //! (the type adapter's message carries the reader's path); and any read from a
 //! `Gson` whose options are themselves counted (#49).
+//!
+//! A document nested past Gson's 255 levels, read as Gson reads it up to the
+//! 256th opening bracket, throws what gson-2.14.0 throws there (#262): a
+//! `JsonSyntaxException` whose cause is `MalformedJsonException: Nesting limit
+//! 255 reached at line L column C path P` ([`Parsed::TooDeep`]).
 
 use super::*;
 
 const JSON_PARSER: &str = "com/google/gson/JsonParser";
 
 /// Gson's `JsonReader` nesting limit: 255 nested arrays or objects parse,
-/// the 256th throws (and so is counted here).
+/// the 256th throws ([`Parsed::TooDeep`]).
 const MAX_TREE_DEPTH: usize = 255;
+
+/// The class `Gson.fromJson` and `JsonParser` throw for a malformed document,
+/// and the reader's exception it wraps (`JsonSyntaxException(cause)`).
+pub(crate) const JSON_SYNTAX_EXCEPTION: &str = "com/google/gson/JsonSyntaxException";
+pub(crate) const MALFORMED_JSON_EXCEPTION: &str = "com/google/gson/stream/MalformedJsonException";
 
 /// One parsed JSON value, before it becomes runtime objects.
 #[derive(Clone)]
@@ -43,8 +51,20 @@ pub(crate) enum Parsed {
     /// `Gson.fromJson` answers `null`.
     Empty,
     Value(Tree),
+    /// Nested past [`MAX_TREE_DEPTH`], with everything before the offending
+    /// bracket read as Gson reads it: the reader's `MalformedJsonException`
+    /// message.
+    TooDeep(String),
     /// A form this parser does not reproduce, or a malformed document.
     Unsupported,
+}
+
+/// One open container on [`Parser`]'s way down, as `JsonReader.getPath`
+/// names it: the index of the array element being read, or the object
+/// member's name (decoded, unquoted).
+enum PathPart {
+    Index(usize),
+    Name(String),
 }
 
 /// A strict-JSON reader plus the lenient forms whose result is unambiguous:
@@ -58,6 +78,10 @@ pub(crate) struct Parser<'a> {
     /// position, last value), Gson's map adapter throws "duplicate key".
     duplicate: bool,
     allow_special_floats: bool,
+    /// The containers open at the current position.
+    path: Vec<PathPart>,
+    /// The nesting-limit message, once the 256th bracket is reached.
+    too_deep: Option<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -86,6 +110,8 @@ impl<'a> Parser<'a> {
             pos: if text.starts_with('\u{feff}') { 3 } else { 0 },
             duplicate: false,
             allow_special_floats,
+            path: Vec::new(),
+            too_deep: None,
         };
         let parsed = (|| {
             parser.skip_space()?;
@@ -96,7 +122,40 @@ impl<'a> Parser<'a> {
             parser.skip_space()?;
             (parser.pos == parser.bytes.len()).then_some(Parsed::Value(value))
         })();
-        (parsed.unwrap_or(Parsed::Unsupported), parser.duplicate)
+        let parsed = match (parsed, parser.too_deep) {
+            (Some(parsed), _) => parsed,
+            (None, Some(message)) => Parsed::TooDeep(message),
+            (None, None) => Parsed::Unsupported,
+        };
+        (parsed, parser.duplicate)
+    }
+
+    /// `MalformedJsonException`'s message for the bracket at `self.pos`, the
+    /// one past the limit: `JsonReader.locationString` after it consumed that
+    /// bracket. The line counts every `\n` before it (in strings and comments
+    /// too, not `\r`); the column is in UTF-16 units from the line's start
+    /// (after a leading byte order mark on the first line), past the bracket,
+    /// plus one. Captured in `tests/fixtures/gson_parse_depth/java25.txt`.
+    fn nesting_message(&self) -> String {
+        let before = &self.text[..self.pos];
+        let line = 1 + before.matches('\n').count();
+        let line_start = match before.rfind('\n') {
+            Some(newline) => newline + 1,
+            None if self.text.starts_with('\u{feff}') => 3,
+            None => 0,
+        };
+        let column = self.text[line_start..=self.pos].encode_utf16().count() + 1;
+        let mut path = String::from("$");
+        for part in &self.path {
+            match part {
+                PathPart::Index(index) => path.push_str(&format!("[{index}]")),
+                PathPart::Name(name) => {
+                    path.push('.');
+                    path.push_str(name);
+                }
+            }
+        }
+        format!("Nesting limit {MAX_TREE_DEPTH} reached at line {line} column {column} path {path}")
     }
 
     fn peek(&self) -> Option<u8> {
@@ -157,6 +216,7 @@ impl<'a> Parser<'a> {
         match self.peek()? {
             b'{' => {
                 if depth >= MAX_TREE_DEPTH {
+                    self.too_deep = Some(self.nesting_message());
                     return None;
                 }
                 self.pos += 1;
@@ -166,11 +226,15 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                     return Some(Tree::Object(members));
                 }
+                self.path.push(PathPart::Name(String::new()));
                 loop {
                     if self.peek() != Some(b'"') {
                         return None;
                     }
                     let name = self.string()?;
+                    if let Some(last) = self.path.last_mut() {
+                        *last = PathPart::Name(name.clone());
+                    }
                     self.skip_space()?;
                     if self.peek() != Some(b':') {
                         return None;
@@ -195,6 +259,7 @@ impl<'a> Parser<'a> {
                         }
                         b'}' => {
                             self.pos += 1;
+                            self.path.pop();
                             return Some(Tree::Object(members));
                         }
                         _ => return None,
@@ -203,6 +268,7 @@ impl<'a> Parser<'a> {
             }
             b'[' => {
                 if depth >= MAX_TREE_DEPTH {
+                    self.too_deep = Some(self.nesting_message());
                     return None;
                 }
                 self.pos += 1;
@@ -212,7 +278,11 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                     return Some(Tree::Array(elements));
                 }
+                self.path.push(PathPart::Index(0));
                 loop {
+                    if let Some(last) = self.path.last_mut() {
+                        *last = PathPart::Index(elements.len());
+                    }
                     elements.push(self.value(depth + 1)?);
                     self.skip_space()?;
                     match self.peek()? {
@@ -222,6 +292,7 @@ impl<'a> Parser<'a> {
                         }
                         b']' => {
                             self.pos += 1;
+                            self.path.pop();
                             return Some(Tree::Array(elements));
                         }
                         _ => return None,
@@ -380,6 +451,8 @@ impl<H: Host> Runtime<'_, H> {
         match Parser::parse(&text) {
             Parsed::Empty => Ok(Some(null_instance())),
             Parsed::Value(tree) => self.materialize(tree).map(Some),
+            // `JsonParser.parseReader` wraps the reader's exception.
+            Parsed::TooDeep(message) => Err(self.json_syntax_exception(message)),
             Parsed::Unsupported => self.count_tree_call(r, receiver, args).map(Some),
         }
     }
@@ -434,6 +507,10 @@ impl<H: Host> Runtime<'_, H> {
             // the first token).
             Parsed::Empty => return Ok(Some(Value::Ref(None))),
             Parsed::Value(tree) => tree,
+            // The tree adapter reads the whole document before the requested
+            // class is checked, so the reader's exception comes first;
+            // `Gson.fromJson` wraps it.
+            Parsed::TooDeep(message) => return Err(self.json_syntax_exception(message)),
             Parsed::Unsupported => {
                 return self
                     .count_tree_call(r, Some(&receiver_value), args)
@@ -483,11 +560,27 @@ fn parse_text_with_options<H: Host>(
     match parsed {
         Parsed::Empty => Ok(super::null_instance()),
         Parsed::Value(tree) => runtime.materialize(tree),
-        Parsed::Unsupported => Err(NativeError::UnknownHostCall(MethodRef {
+        Parsed::TooDeep(_) | Parsed::Unsupported => Err(NativeError::UnknownHostCall(MethodRef {
             owner: JSON_PARSER.into(),
             name: "parseString".into(),
             descriptor: "(Ljava/lang/String;)Lcom/google/gson/JsonElement;".into(),
         })),
+    }
+}
+
+impl<H: Host> Runtime<'_, H> {
+    /// What `Gson.fromJson` and `JsonParser` throw for the reader's
+    /// `MalformedJsonException` with `message`: `JsonSyntaxException(cause)`,
+    /// whose message is the cause's `toString()`.
+    pub(crate) fn json_syntax_exception(&mut self, message: String) -> NativeError {
+        self.throw_caused(
+            JSON_SYNTAX_EXCEPTION,
+            NativeError::UncaughtException {
+                class: MALFORMED_JSON_EXCEPTION.into(),
+                message: Some(message),
+                frame: None,
+            },
+        )
     }
 }
 
@@ -543,7 +636,19 @@ mod tests {
         // gson-2.14.0 parses 255 nested arrays and throws
         // `MalformedJsonException: Nesting limit 255 reached` at 256.
         let nested = format!("{}{}", "[".repeat(256), "]".repeat(256));
-        assert!(matches!(Parser::parse(&nested), Parsed::Unsupported));
+        let Parsed::TooDeep(message) = Parser::parse(&nested) else {
+            panic!("256 levels are past the limit");
+        };
+        assert_eq!(
+            message,
+            format!(
+                "Nesting limit 255 reached at line 1 column 257 path ${}",
+                "[0]".repeat(255)
+            )
+        );
+        // A document Gson rejects before the limit is still not reproduced.
+        let early = format!("[1 2,{}]", "[".repeat(300));
+        assert!(matches!(Parser::parse(&early), Parsed::Unsupported));
         let nested = format!("{}{}", "[".repeat(255), "]".repeat(255));
         assert!(matches!(Parser::parse(&nested), Parsed::Value(_)));
     }

@@ -15617,6 +15617,11 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         // Mixin's, which a `cancel()` on a callback info that is not
         // cancellable throws (sponge-mixin 0.17.5, `host_mixin.rs`).
         host_mixin::CANCELLATION_EXCEPTION => "java/lang/RuntimeException",
+        // gson-2.14.0's, which `Gson.fromJson` and `JsonParser` throw for a
+        // malformed document (`gson_tree/parse.rs`).
+        gson_tree::parse::JSON_SYNTAX_EXCEPTION => "com/google/gson/JsonParseException",
+        "com/google/gson/JsonParseException" => "java/lang/RuntimeException",
+        gson_tree::parse::MALFORMED_JSON_EXCEPTION => "java/io/IOException",
         "java/lang/NumberFormatException"
         | "java/nio/charset/UnsupportedCharsetException"
         | "java/nio/charset/IllegalCharsetNameException" => "java/lang/IllegalArgumentException",
