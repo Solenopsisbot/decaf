@@ -23092,6 +23092,7 @@ impl NativeJar {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -23442,6 +23443,7 @@ impl NativeJar {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -23611,6 +23613,7 @@ impl NativeJar {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -25826,6 +25829,8 @@ struct Runtime<'a, H> {
     string_builders: BTreeMap<String, String>,
     /// JsonWriter states keyed by their jar object marker.
     gson_writers: BTreeMap<String, gson_writer::State>,
+    /// Registered Gson TypeAdapter instances keyed by builder/Gson marker.
+    gson_type_adapters: BTreeMap<String, Vec<(String, Value)>>,
     /// The current backing capacity of each modelled StringBuilder. Its
     /// growth is `(old << 1) + 2`, so ensureCapacity can refuse the actual
     /// array length rather than only the requested minimum.
@@ -26087,8 +26092,9 @@ impl<H: Host> Runtime<'_, H> {
         &mut self,
         value: &Value,
         style: &gson_model::GsonStyle,
+        gson_marker: Option<&str>,
     ) -> Result<Option<String>, NativeError> {
-        let Some(text) = self.gson_to_json(value, style, 0)? else {
+        let Some(text) = self.gson_to_json(value, style, 0, gson_marker)? else {
             return Ok(None);
         };
         let mut writer = gson_writer::State::new("gson-toJson-object".into());
@@ -32498,7 +32504,22 @@ impl<H: Host> Runtime<'_, H> {
                 // custom naming/exclusion strategy, an adapter, a date format,
                 // ...): every write and read is a counted unknown instead of
                 // text that ignores it.
+                let adapter_hit = args
+                    .first()
+                    .and_then(crate::runtime::jar_object::object_class)
+                    .is_some_and(|class| {
+                        receiver
+                            .and_then(expect_ref)
+                            .and_then(|marker| self.gson_type_adapters.get(marker))
+                            .is_some_and(|adapters| adapters.iter().any(|(ty, _)| ty == class))
+                    });
+                let has_type_adapter = receiver
+                    .and_then(expect_ref)
+                    .and_then(|marker| self.gson_type_adapters.get(marker))
+                    .is_some_and(|adapters| !adapters.is_empty());
                 if style.is_counted()
+                    && !adapter_hit
+                    && !has_type_adapter
                     && matches!(r.name.as_str(), "toJson" | "toJsonTree" | "fromJson")
                 {
                     return self
@@ -32567,6 +32588,7 @@ impl<H: Host> Runtime<'_, H> {
                         match self.gson_to_json_string(
                             args.first().unwrap_or(&Value::Ref(None)),
                             &style,
+                            receiver.and_then(expect_ref).map(|x| x.as_str()),
                         )? {
                             Some(text) => Ok(Some(Value::Ref(Some(text)))),
                             // A value with no honest JSON shape is a counted
@@ -32637,6 +32659,7 @@ impl<H: Host> Runtime<'_, H> {
                         let Some(text) = self.gson_to_json_string(
                             args.first().unwrap_or(&Value::Ref(None)),
                             &style,
+                            receiver.and_then(expect_ref).map(|x| x.as_str()),
                         )?
                         else {
                             return self
@@ -42816,6 +42839,7 @@ mod tests {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -42898,6 +42922,7 @@ mod tests {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -50060,6 +50085,7 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -50284,6 +50310,7 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -50483,6 +50510,7 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -50858,6 +50886,7 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -51177,6 +51206,7 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -56454,6 +56484,7 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),
@@ -56523,6 +56554,7 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             gson_writers: BTreeMap::new(),
+            gson_type_adapters: BTreeMap::new(),
             string_builder_capacities: BTreeMap::new(),
 
             string_readers: BTreeMap::new(),

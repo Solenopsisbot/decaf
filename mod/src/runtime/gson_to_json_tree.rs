@@ -26,7 +26,7 @@ pub(crate) fn instance_call<H: Host>(
     let Some(value) = args.first() else {
         return Ok(None);
     };
-    let text = match runtime.gson_to_json_tree(value, &style, 0)? {
+    let text = match runtime.gson_to_json_tree(value, &style, 0, None)? {
         Some(text) => text,
         None => return runtime.host.invoke_instance(r, receiver, args).map(Some),
     };
