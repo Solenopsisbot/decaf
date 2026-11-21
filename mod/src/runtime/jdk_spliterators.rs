@@ -133,6 +133,24 @@ pub(crate) struct Splits {
     next: usize,
 }
 
+impl Splits {
+    /// Direct backing collection or iterator held by modelled spliterator `key`.
+    pub(crate) fn source_of(&self, key: &str) -> Option<Value> {
+        match self.models.get(key)? {
+            Split::Iter {
+                collection,
+                it,
+                sorted_set,
+                ..
+            } => collection
+                .clone()
+                .or_else(|| it.clone())
+                .or_else(|| sorted_set.clone()),
+            Split::RandomAccess { list, .. } => Some(list.clone()),
+        }
+    }
+}
+
 /// `IteratorSpliterator`'s flags: `SIZED | SUBSIZED` unless `CONCURRENT`.
 pub(crate) fn sized_flags(flags: i32) -> i32 {
     if flags & CONCURRENT == 0 {

@@ -103,6 +103,87 @@ public final class Probe {
         return String.valueOf(m.get("k"));
     }
 
+    /// Keys and values in an IdentityHashMap both use reference identity,
+    /// including the Map default compute methods and the overridden mappings.
+    public static String identityOperations() {
+        String a = new String("x"), b = new String("x");
+        IdentityHashMap<String, Integer> m = new IdentityHashMap<>();
+        m.put(a, 1);
+        m.put(b, 2);
+        Integer first = m.get(b);
+        Integer same = m.get(a);
+        String v1 = new String("v"), v2 = new String("v");
+        IdentityHashMap<String, String> n = new IdentityHashMap<>();
+        n.put("k", v1);
+        boolean removedEqual = n.remove("k", v2);
+        boolean replacedEqual = n.replace("k", v2, new String("z"));
+        boolean removedSame = n.remove("k", v1);
+        return first + ":" + same + ":" + m.size() + ":" + removedEqual + ":"
+            + replacedEqual + ":" + removedSame + ":" + n.size();
+    }
+
+    /// `Map.computeIfAbsent` on an IdentityHashMap finds keys by reference.
+    public static String identityComputeIfAbsent() {
+        String a = new String("x"), b = new String("x");
+        IdentityHashMap<String, Integer> m = new IdentityHashMap<>();
+        m.put(a, 1);
+        Integer added = m.computeIfAbsent(b, k -> 2);
+        Integer kept = m.computeIfAbsent(a, k -> 3);
+        return added + ":" + kept + ":" + m.size();
+    }
+
+    public static String identityCompute() {
+        String a = new String("x"), b = new String("x");
+        IdentityHashMap<String, Integer> m = new IdentityHashMap<>();
+        m.put(a, 1);
+        Integer added = m.compute(b, (k, v) -> 2);
+        Integer replaced = m.compute(a, (k, v) -> v + 2);
+        return added + ":" + replaced + ":" + m.size();
+    }
+
+    public static String identityComputeIfPresent() {
+        String a = new String("x"), b = new String("x");
+        IdentityHashMap<String, Integer> m = new IdentityHashMap<>();
+        m.put(a, 1);
+        Integer absent = m.computeIfPresent(b, (k, v) -> 2);
+        Integer present = m.computeIfPresent(a, (k, v) -> v + 2);
+        return absent + ":" + present + ":" + m.size();
+    }
+
+    public static String identityMerge() {
+        String a = new String("x"), b = new String("x");
+        IdentityHashMap<String, Integer> m = new IdentityHashMap<>();
+        m.put(a, 1);
+        Integer added = m.merge(b, 2, Integer::sum);
+        Integer merged = m.merge(a, 2, Integer::sum);
+        return added + ":" + merged + ":" + m.size();
+    }
+
+    public static String identityPutIfAbsent() {
+        String a = new String("x"), b = new String("x");
+        IdentityHashMap<String, Integer> m = new IdentityHashMap<>();
+        m.put(a, 1);
+        Integer added = m.putIfAbsent(b, 2);
+        Integer kept = m.putIfAbsent(a, 3);
+        return added + ":" + kept + ":" + m.size();
+    }
+
+    public static String identityGetOrDefault() {
+        String a = new String("x"), b = new String("x");
+        IdentityHashMap<String, Integer> m = new IdentityHashMap<>();
+        m.put(a, 1);
+        return m.getOrDefault(a, 8) + ":" + m.getOrDefault(b, 9) + ":" + m.size();
+    }
+
+    public static String identityCallbackMutation() {
+        String a = new String("x"), b = new String("x");
+        IdentityHashMap<String, Integer> m = new IdentityHashMap<>();
+        m.put("z", 1);
+        m.put(a, 2);
+        Integer n = m.computeIfAbsent(b, k -> { m.remove("z"); return 3; });
+        return n + ":" + m.get(a) + ":" + m.get(b) + ":" + m.size();
+    }
+
     public static String random_m0() { return RandomImm.m0(); }
     public static String random_m1() { return RandomImm.m2(); }
     public static String random_m2() { return RandomImm.m3(); }
@@ -432,6 +513,16 @@ fn identity_hash_maps_keep_identity() {
         &[
             ("identityKeys", "2|null|false"),
             ("identityStrings", "null"),
+            ("identityOperations", "2:1:2:false:false:true:0"),
+            // Both "k" literals are the same interned String (JLS 3.10.5).
+            ("identityStringPresent", "1"),
+            ("identityComputeIfAbsent", "2:1:2"),
+            ("identityCompute", "2:3:2"),
+            ("identityComputeIfPresent", "null:3:1"),
+            ("identityMerge", "2:3:2"),
+            ("identityPutIfAbsent", "null:1:2"),
+            ("identityGetOrDefault", "1:9:1"),
+            ("identityCallbackMutation", "3:2:3:2"),
         ],
     );
 }
@@ -503,19 +594,13 @@ fn random_set_of_and_map_of_programs_match_jdk_25() {
 #[test]
 fn random_orders_and_ambiguous_identities_are_counted() {
     let fixture = fixture("random-orders-and-ambiguous-identities-a");
-    let cases: &[(&str, &[(&str, usize)])] = &[
-        (
-            "randomIteration",
-            &[(
-                "java/lang/String#valueOf(Ljava/lang/Object;)Ljava/lang/String;",
-                4,
-            )],
-        ),
-        (
-            "identityStringPresent",
-            &[("java/util/Map#get(Ljava/lang/Object;)Ljava/lang/Object;", 1)],
-        ),
-    ];
+    let cases: &[(&str, &[(&str, usize)])] = &[(
+        "randomIteration",
+        &[(
+            "java/lang/String#valueOf(Ljava/lang/Object;)Ljava/lang/String;",
+            4,
+        )],
+    )];
     for (method, expected) in cases {
         let mut host = fixture.jar.seed_host(StdHost::new());
         fixture.text_on(&mut host, method);

@@ -189,10 +189,10 @@ impl StdHost {
             if let Some(part) = part {
                 for (iterator, view) in &self.array_views.iterators {
                     if *view == marker
-                        && let Some((snapshot, _)) = self.iterators.get_mut(iterator)
-                        && snapshot.len() == part.len()
+                        && let Some(entry) = self.iterators.get_mut(iterator)
+                        && entry.values.len() == part.len()
                     {
-                        snapshot.clone_from(&part);
+                        entry.values.clone_from(&part);
                     }
                 }
             }

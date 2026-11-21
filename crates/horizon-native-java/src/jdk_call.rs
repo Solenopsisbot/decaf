@@ -341,6 +341,11 @@ impl<H: Host> Runtime<'_, H> {
             let other = args.first().unwrap_or(&Value::Ref(None));
             return Ok(Value::Int(self.natural_order(receiver, other)?));
         }
+        if let Some(value) =
+            self.count_if_uncertain_identity_operand(&r, opcode, Some(receiver), args)?
+        {
+            return Ok(value);
+        }
         if let Some(value) = self.invoke_jdk_skeleton(&r, opcode, Some(receiver), args)? {
             return Ok(value);
         }
@@ -461,8 +466,10 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Err(self.budget_exceeded(&r.owner, &r.name));
         }
+        let frame_id = self.next_frame_id;
+        self.next_frame_id = self.next_frame_id.wrapping_add(1);
         self.depth += 1;
-        let result = self.invoke_frame(&class, SITE_METHOD, &descriptor, None, values);
+        let result = self.invoke_frame(&class, SITE_METHOD, &descriptor, None, values, frame_id);
         self.depth -= 1;
         // A throw that started in the call itself names no jar frame: the
         // site is not one, and the JDK body has no frame label here.

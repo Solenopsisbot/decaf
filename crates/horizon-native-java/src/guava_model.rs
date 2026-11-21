@@ -852,9 +852,13 @@ impl<H: Host> Runtime<'_, H> {
                 if r.name == "newIdentityHashMap"
                     && r.descriptor == "()Ljava/util/IdentityHashMap;" =>
             {
-                Ok(self
+                let map = self
                     .host
-                    .empty_mutable_collection("java/util/IdentityHashMap"))
+                    .empty_mutable_collection("java/util/IdentityHashMap");
+                if let Some(map) = map.as_ref() {
+                    self.note_fresh_identity_collection(map);
+                }
+                Ok(map)
             }
             // `Maps.immutableEnumMap` copies the supplied map into an
             // immutable map. The host map representation already preserves
@@ -932,9 +936,13 @@ impl<H: Host> Runtime<'_, H> {
             "com/google/common/collect/Sets"
                 if r.name == "newIdentityHashSet" && r.descriptor == "()Ljava/util/Set;" =>
             {
-                Ok(self
+                let set = self
                     .host
-                    .empty_mutable_collection("java/util/Collections$SetFromMap"))
+                    .empty_mutable_collection("java/util/Collections$SetFromMap");
+                if let Some(set) = set.as_ref() {
+                    self.note_fresh_identity_collection(set);
+                }
+                Ok(set)
             }
             "com/google/common/collect/MapMaker" => self.invoke_map_maker(r, receiver, args),
             _ => Ok(None),

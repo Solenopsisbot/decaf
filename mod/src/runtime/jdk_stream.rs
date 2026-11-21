@@ -771,6 +771,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     pub(crate) fn more_stream_stages(
         &mut self,
         r: &MethodRef,
+        stream: &Value,
         values: &[Value],
     ) -> Result<Option<Value>, NativeError> {
         let result = match (r.name.as_str(), r.descriptor.as_str()) {
@@ -801,6 +802,10 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
                 if let Some(key) = key {
                     self.host
                         .set_host_iterator_source(&key, "java/util/stream/Stream".into());
+                    if let Some(root) = self.identity_root_marker(stream) {
+                        self.host
+                            .set_host_iterator_origin(&key, crate::runtime::jar_object::stored_value(&root));
+                    }
                 }
                 iterator
             }

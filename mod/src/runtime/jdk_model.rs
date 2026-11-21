@@ -1112,23 +1112,22 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             }
             _ => return Ok(None),
         };
+        if self.contains_counted_string_deep(separator)
+            || elements
+                .iter()
+                .any(|value| self.contains_counted_string_deep(value))
+        {
+            return self.counted_unknown(r).map(Some);
+        }
         // `String.join` takes `String.valueOf(element)` of each element: a
         // builder's text, a jar `CharSequence`'s own `toString()`
         // (`jar_text.rs`, counted when it has none), else the value's text.
         let mut parts = Vec::with_capacity(elements.len());
         for value in std::iter::once(separator).chain(&elements) {
-            let text = match value {
-                value if self.builder_text(value).is_some() => {
-                    self.builder_text(value).cloned().unwrap_or_default()
-                }
-                value if crate::runtime::jar_object::packaged_object_class(value).is_some() => {
-                    match self.runtime_value_of(value, "java/lang/String", "join")? {
-                        Some(Value::Ref(Some(text))) => text,
-                        Some(_) => "null".to_owned(),
-                        None => crate::runtime::value_text(value),
-                    }
-                }
-                other => crate::runtime::value_text(other),
+            let Some(text) =
+                self.java_text(value, "Ljava/lang/Object;", "java/lang/String", "join")?
+            else {
+                return self.counted_unknown(r).map(Some);
             };
             parts.push(text);
         }

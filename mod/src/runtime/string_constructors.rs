@@ -1,17 +1,17 @@
-//! `new String(...)`: counted, never answered with the allocation marker.
+//! `new String(...)`: build an ordinary runtime string whenever its Java 25
+//! text can be reproduced exactly; count the constructor otherwise.
 //!
-//! `new java/lang/String` pushes an object marker (`java/lang/String#n`), and
-//! no model turns that marker into the text the constructor builds. Every
-//! overload therefore left the marker in place of the string: on `main`,
-//! `new String(new char[] {'a', 'b'})` answered an 18-character string whose
-//! `equals("ab")` was `false`, and `new String("xy")`, `new String()`,
-//! `new String(byte[], UTF_8)` and `new String(StringBuilder)` answered the
-//! same marker, all without a count, so the run still read clean.
+//! `new java/lang/String` initially pushes an object marker (`java/lang/String#n`).
+//! [`build`] returns the constructor's text and the interpreter rewrites that
+//! marker everywhere in the frame (including the `dup`ed operand), exactly as
+//! it does for `StringBuilder.toString()` and concatenation results. The value
+//! therefore follows every existing String path: methods, append,
+//! `contentEquals`, collection equality and hashing, `switch`, `+`, and
+//! `intern`. The bytecode producer remains a fresh `new` allocation for
+//! reference identity, while the value itself is just the ordinary String
+//! text. No constructor-specific object kind or side table is needed.
 //!
-//! [`build`] now builds the text for the `char[]` and code-point constructors,
-//! as JDK 25 does, and the interpreter rewrites the allocation marker to that
-//! text wherever the frame holds it (the `dup`ed copy on the operand stack, and
-//! the locals), so the string is a string from then on. night-config's TOML
+//! night-config's TOML
 //! parser builds every key with `new String(char[], int, int)`; with the
 //! marker in its place a key read `java/lang/String#477`, and every Forge
 //! Config API Port user on Fabric failed to parse its config (#124).
@@ -29,8 +29,10 @@
 //!   same way (`"codePoints"` in the NPE), then each code point: an invalid one
 //!   throws `IllegalArgumentException` with the code point in decimal.
 //!
-//! * `String()` and `String(String)` remain counted because each constructs a
-//!   distinct object whose identity the text value cannot preserve.
+//! * `String()`, `String(String)`, and `StringBuilder`/`StringBuffer` are
+//!   modelled as fresh ordinary strings. Their allocation identity is retained
+//!   by the bytecode producer analysis, just as for concatenation and builder
+//!   `toString()` results.
 //! * The `byte[]` constructors decode with the charset they name, or UTF-8
 //!   (the default charset since JDK 18) when they name none. The charset is
 //!   checked first: a null `Charset` or name throws `NullPointerException`
@@ -44,9 +46,8 @@
 //! input uses JDK 25's replacement lengths; other charsets (UTF-16 and a name
 //! the host does not model) stay counted.
 //!
-//! Every other constructor (`String()`, `String(String)`, `StringBuilder`/
-//! `StringBuffer`, and the deprecated hibyte `(byte[], int)` pair) is still
-//! counted. So is a `char[]`/`int[]`
+//! Constructors whose charset or text cannot be reproduced exactly, and a
+//! `char[]`/`int[]`
 //! constructor whose text has an unpaired surrogate, which the runtime's
 //! strings cannot hold. A `String` constructor reached through a
 //! `MethodHandle` (`String::new`) is answered or counted the same way.
@@ -395,6 +396,7 @@ pub(crate) fn build<H: Host>(
         expect_int(r, StdHost::argument(r, args, index)?)
     };
     let text = match r.descriptor.as_str() {
+        "()V" => Some(String::new()),
         "([B)V" | "([BII)V" => {
             return decode_bytes(
                 runtime,
@@ -418,6 +420,68 @@ pub(crate) fn build<H: Host>(
         }
         "([C)V" => char_array_text(runtime, r, args, false)?,
         "([CII)V" => char_array_text(runtime, r, args, true)?,
+        "([BI)V" | "([BIII)V" => {
+            // Deprecated ISO-8859-1-style constructors: each byte is joined
+            // with the high byte before becoming a UTF-16 code unit. This is
+            // exact when the resulting units contain no lone surrogate.
+            let values = match args.first() {
+                Some(array @ Value::Host(_)) => runtime.array(array)?.clone(),
+                _ => {
+                    return Err(thrown(
+                        "java/lang/NullPointerException",
+                        "Cannot read the array length because \"ascii\" is null".into(),
+                    ));
+                }
+            };
+            let bytes = values
+                .iter()
+                .map(|value| match value {
+                    Value::Int(byte) => Some(*byte as u8),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            let Some(bytes) = bytes else { return Ok(None) };
+            let hibyte = int(1)? as u8;
+            let (offset, count) = if r.descriptor == "([BIII)V" {
+                let offset = int(2)?;
+                let count = int(3)?;
+                check_range(offset, count, bytes.len())?;
+                (offset as usize, count as usize)
+            } else {
+                (0, bytes.len())
+            };
+            let units = bytes[offset..offset + count]
+                .iter()
+                .map(|byte| (u16::from(hibyte) << 8) | u16::from(*byte))
+                .collect::<Vec<_>>();
+            String::from_utf16(&units).ok()
+        }
+        "(Ljava/lang/String;)V" => match args.first() {
+            Some(Value::Ref(None)) => {
+                return Err(thrown(
+                    "java/lang/NullPointerException",
+                    "Cannot read field \"value\" because \"original\" is null".into(),
+                ));
+            }
+            Some(Value::Ref(Some(text))) => Some(text.clone()),
+            // A String constructor cannot receive a host object without a
+            // verifier/type error; preserve that boundary instead of guessing.
+            Some(_) | None => None,
+        },
+        "(Ljava/lang/StringBuilder;)V" | "(Ljava/lang/StringBuffer;)V" => {
+            let Some(value) = args.first() else {
+                return Ok(None);
+            };
+            if matches!(value, Value::Ref(None)) {
+                let message = if r.descriptor == "(Ljava/lang/StringBuffer;)V" {
+                    "Cannot invoke \"java.lang.StringBuffer.toString()\" because \"buffer\" is null"
+                } else {
+                    "Cannot invoke \"java.lang.AbstractStringBuilder.getValue()\" because \"asb\" is null"
+                };
+                return Err(thrown("java/lang/NullPointerException", message.into()));
+            }
+            runtime.builder_text(value).cloned()
+        }
         "([III)V" => {
             let points = codes(runtime, "codePoints")?;
             let (offset, count) = (int(1)?, int(2)?);

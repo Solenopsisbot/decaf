@@ -201,8 +201,10 @@ impl StdHost {
             // elements only the runtime knows: counted.
             _ => return Ok(None),
         };
-        if let Some((values, index)) = self.iterators.get(marker) {
-            return Ok(Some(values[(*index).min(values.len())..].to_vec()));
+        if let Some(entry) = self.iterators.get(marker) {
+            return Ok(Some(
+                entry.values[entry.index.min(entry.values.len())..].to_vec(),
+            ));
         }
         match runtime_collection_values(self, value) {
             Ok(values) => Ok(Some(values)),

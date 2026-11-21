@@ -39,9 +39,9 @@ import java.util.Set;
 @SuppressWarnings({"removal", "deprecation"})
 public final class Identity {
   public static String boxes() {
-    Integer a = 1000, b = 1000, c = 127, d = 127, e = 128, f = 128, g = -128, h = -128, i = -129, j = -129;
-    return "" + (a == b) + (a != b) + (c == d) + (e == f) + (g == h) + (i == j)
-        + (Integer.valueOf(1000) == Integer.valueOf(1000)) + (Integer.valueOf("5") == c - 122);
+    Integer a = -1000, b = -1000, c = 127, d = 127, g = -128, h = -128, i = -129, j = -129;
+    return "" + (a == b) + (a != b) + (c == d) + (g == h) + (i == j)
+        + (Integer.valueOf(-1000) == Integer.valueOf(-1000)) + (Integer.valueOf("5") == c - 122);
   }
 
   public static String otherBoxes() {
@@ -78,7 +78,7 @@ public final class Identity {
     for (int i = 0; i < 3; i++) {
       wide += i;
     }
-    Integer a = 1000;
+    Integer a = -1000;
     Integer b = a;
     switch ((int) wide) {
       case 5: real += 1; break;
@@ -98,7 +98,7 @@ public final class Identity {
     } catch (IllegalStateException ex) {
       wide += (long) real;
     }
-    Integer c = 1000;
+    Integer c = -1000;
     return "" + (a == b) + (a == c) + wide;
   }
 
@@ -139,6 +139,14 @@ public final class Identity {
   }
 
   // ---- not provable: counted ----
+  /** Integer > 127 caching depends on -XX:AutoBoxCacheMax / -Djava.lang.Integer.IntegerCache.high.
+   *  JDK 25.0.5 default: "falsefalsefalse"; with -XX:AutoBoxCacheMax=1000 (or
+   *  -Djava.lang.Integer.IntegerCache.high=1000): "truetruetrue". */
+  public static String integerAbove127() {
+    Integer a = 128, b = 128, c = 200, d = 200, e = 1000, f = 1000;
+    return "" + (a == b) + (c == d) + (e == f);
+  }
+
   public static String fromList() {
     List<Integer> l = new ArrayList<>();
     l.add(1000);
@@ -329,7 +337,7 @@ fn text(value: &str) -> Value {
 fn provable_identities_answer_as_java_25() {
     let jar = jar("exact");
     for (name, expected) in [
-        ("boxes", "falsetruetruefalsetruefalsefalsetrue"),
+        ("boxes", "falsetruetruetruefalsefalsetrue"),
         ("sameReference", "truetruetruefalsefalsetrue"),
         ("mixedTypes", "falsefalsefalsefalse"),
         ("acrossShapes", "truefalse15"),
@@ -359,8 +367,13 @@ fn provable_identities_answer_as_java_25() {
 #[test]
 fn identities_the_interpreter_does_not_keep_are_counted() {
     let jar = jar("counted");
-    // (method, Java 25's answer, the family it is counted under)
+    // (method, Java 25's default answer, the family it is counted under)
+    // Note: `integerAbove127` answers "falsefalsefalse" on default JDK 25.0.5 and
+    // "truetruetrue" under `-XX:AutoBoxCacheMax=1000` or
+    // `-Djava.lang.Integer.IntegerCache.high=1000` (forwarded via JAVA_TOOL_OPTIONS /
+    // _JAVA_OPTIONS / JDK_JAVA_OPTIONS), so Decaf counts `Integer` values > 127.
     for (name, java, family) in [
+        ("integerAbove127", "falsefalsefalse", "java/lang/Object"),
         ("fromList", "false", "java/lang/Object"),
         ("inLoop", "falsefalse", "java/lang/Object"),
         ("params", "false", "java/lang/Object"),

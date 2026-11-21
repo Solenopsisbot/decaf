@@ -99,6 +99,9 @@ impl<H: Host> Runtime<'_, H> {
             Value::Void => return Ok(Arg::Opaque),
             Value::Ref(Some(marker)) => marker,
         };
+        if self.is_counted_string(value) {
+            return Ok(Arg::Opaque);
+        }
         if let Some(text) = self.builder_text(value) {
             return Ok(Arg::Str(text.clone()));
         }
@@ -110,6 +113,7 @@ impl<H: Host> Runtime<'_, H> {
         // refused here and counted by the host.
         if crate::runtime::jar_object::packaged_object_class(value).is_some() {
             return match self.jar_to_string(value, "java/util/Formatter", "format") {
+                Ok(Some(result)) if self.is_counted_string(&result) => Ok(Arg::Opaque),
                 Ok(Some(Value::Ref(Some(text)))) => Ok(Arg::Str(text)),
                 Ok(Some(Value::Ref(None))) => Ok(Arg::Null),
                 Ok(Some(_)) => Ok(Arg::Opaque),

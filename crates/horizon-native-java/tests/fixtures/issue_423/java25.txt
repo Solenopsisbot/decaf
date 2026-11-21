@@ -1,0 +1,10 @@
+copy=5/true/true/true/false
+methods=true/e/ell/hello!/0/true
+switch=hit
+null=java.lang.NullPointerException:Cannot read field "value" because "original" is null
+builder=ab/abcd
+chars=world/orl
+bytes=ABC
+common=5/false/e/101/0/true/true/true/2/3/ell/ell/hello!/herro/hello/HELLO/hello/hello/hellohello/true/true
+ints=hello/hello,x/hello:3/hit/7
+nulls=java.lang.NullPointerException:Cannot read field "value" because "original" is null|java.lang.NullPointerException:Cannot read the array length because "value" is null|java.lang.NullPointerException:Cannot read the array length because "value" is null|java.lang.NullPointerException:Cannot read the array length because "bytes" is null|java.lang.NullPointerException:Cannot read the array length because "bytes" is null|java.lang.NullPointerException:null|java.lang.NullPointerException:Cannot invoke "java.lang.AbstractStringBuilder.getValue()" because "asb" is null|java.lang.NullPointerException:Cannot invoke "java.lang.StringBuffer.toString()" because "buffer" is null

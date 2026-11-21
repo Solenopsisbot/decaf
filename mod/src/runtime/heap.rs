@@ -196,6 +196,18 @@ impl StdHost {
         self.map_entries.len()
     }
 
+    /// How many live per-collection identity-epoch entries the host keeps in
+    /// `CollectionStore` (pruned automatically on removal, epoch bump, and GC).
+    pub fn identity_epoch_count(&self) -> usize {
+        self.mutable_collections.identity_epoch_count()
+    }
+
+    /// Peak number of `IdentityCollectionTokens` entries held concurrently in
+    /// any `Runtime` invocation on this host.
+    pub fn peak_identity_token_count(&self) -> usize {
+        self.peak_identity_tokens
+    }
+
     /// How many canonical `BlockState` rows the host keeps (`block_states`): each lives as
     /// long as its owning `Block` (reachable directly or through a jar reference to a state),
     /// so this follows live blocks rather than every block a jar ever constructed.
@@ -801,11 +813,9 @@ fn heap_bytes(heap: &JavaHeap, host: &StdHost) -> usize {
                 .iter()
                 .map(|(key, source)| key.len() + source.len()),
         )
-        .chain(
-            host.iterators
-                .iter()
-                .map(|(key, (elements, _))| key.len() + values(elements)),
-        )
+        .chain(host.iterators.iter().map(|(key, entry)| {
+            key.len() + values(&entry.values) + entry.origin.as_ref().map_or(0, value_bytes)
+        }))
         .chain(host.component_states.iter().map(|(key, state)| {
             key.len()
                 + serde_json::Value::Object(state.base.clone())
@@ -1043,7 +1053,7 @@ fn has_live_shape_probe(heap: &JavaHeap, host: &StdHost, extra: &[String]) -> bo
         || host
             .iterators
             .values()
-            .flat_map(|(elements, _)| elements)
+            .flat_map(|entry| entry.values.iter().chain(entry.origin.iter()))
             .any(value_has_shape_probe)
         || host.iterator_last.values().any(value_has_shape_probe)
         || host
@@ -1147,7 +1157,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
                 host.iterators
                     .iter()
                     .filter(|(key, _)| !collectable.markers.contains(key.as_str()))
-                    .flat_map(|(_, (elements, _))| elements),
+                    .flat_map(|(_, entry)| entry.values.iter().chain(entry.origin.iter())),
             );
         for value in kept_values {
             roots.extend(value_texts(value));
@@ -1206,7 +1216,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .iterators
             .get(&marker)
             .into_iter()
-            .flat_map(|(elements, _)| elements);
+            .flat_map(|entry| entry.values.iter().chain(entry.origin.iter()));
         let iterator_last = host.iterator_last.get(&marker);
         // An enumeration's iterator or vector (`host_iterator.rs`).
         let enumerations = host
@@ -2080,6 +2090,7 @@ mod tests {
             "random_seed_uniquifier",
             "random_time_origin",
             "fired_creative_tab_registrations",
+            "peak_identity_tokens",
         ];
         let debug = format!("{:#?}", StdHost::new());
         let fields: BTreeSet<&str> = debug

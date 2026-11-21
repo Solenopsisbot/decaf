@@ -189,7 +189,8 @@ impl<H: Host> Runtime<'_, H> {
                 if !marker.starts_with(&format!("stream/{}/{}/", SOURCE.0, SOURCE.1)) {
                     return Ok(None);
                 }
-                let Some(points) = self.streams.get(marker).cloned() else {
+                let Some(points) = self.streams.get(marker).map(|entry| entry.values.clone())
+                else {
                     return Ok(None);
                 };
                 let consumer = StdHost::argument(r, args, 0)?.clone();

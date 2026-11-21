@@ -374,6 +374,37 @@ pub(crate) struct Pipelines {
     used: BTreeSet<String>,
 }
 
+impl Pipelines {
+    /// Follow intermediate stage links iteratively to the source stream marker.
+    pub(crate) fn root_stream<'a>(&'a self, mut marker: &'a str) -> &'a str {
+        while let Some(link) = self.links.get(marker) {
+            marker = &link.upstream;
+        }
+        marker
+    }
+
+    /// Direct upstream handles feeding source stream `root` (up to two for
+    /// `Stream.concat`).
+    pub(crate) fn source_origins(&self, root: &str) -> [Option<Value>; 2] {
+        if let Some((a, b)) = self.concats.get(root) {
+            return [
+                Some(Value::Ref(Some(a.clone()))),
+                Some(Value::Ref(Some(b.clone()))),
+            ];
+        }
+        if let Some((spliterator, _)) = self.spliterators.get(root) {
+            return [Some(spliterator.clone()), None];
+        }
+        if let Some(view) = self.view_origins.get(root) {
+            return [Some(view.map.clone()), None];
+        }
+        if let Some(origin) = self.origins.get(root) {
+            return [Some(origin.collection.clone()), None];
+        }
+        [None, None]
+    }
+}
+
 /// The marker of a new stream (a source or a stage). Streams are still
 /// marker text (#156's P15 moves them onto handles); the per-process random
 /// tag keeps a jar `String` constant from spelling a live stream, so a forged
@@ -777,6 +808,9 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         let (Some(marker), Some(source)) = (expect_ref(stream), expect_ref(collection)) else {
             return;
         };
+        if let Some(entry) = self.streams.get_mut(marker) {
+            entry.origin = Some(collection.clone());
+        }
         // A map view's copy: the JDK's view binds late and fails fast on its
         // map, which the copy cannot; a write to the map before the
         // traversal ends is counted.
@@ -816,7 +850,17 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             Source::Values(marker) => {
                 if let Some(origin) = self.pipelines.origins.get(&marker).cloned() {
                     let values = self.origin_items(&origin)?;
-                    self.streams.insert(marker, values);
+                    if let Some(entry) = self.streams.get_mut(&marker) {
+                        entry.values = values;
+                    } else {
+                        self.streams.insert(
+                            marker,
+                            crate::runtime::StreamEntry {
+                                values,
+                                origin: Some(origin.collection),
+                            },
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -945,7 +989,10 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     /// spliterator's answer (a call into it), a concatenation's sum.
     fn source_size(&mut self, source: &Source) -> Result<i64, NativeError> {
         Ok(match source {
-            Source::Values(marker) => self.streams.get(marker).map_or(0, Vec::len) as i64,
+            Source::Values(marker) => self
+                .streams
+                .get(marker)
+                .map_or(0, |entry| entry.values.len()) as i64,
             Source::Concat(a, b) => {
                 let (a, b) = (a.clone(), b.clone());
                 let a = self.exact_size(&a)?.unwrap_or(-1);
@@ -1417,7 +1464,7 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
             self.count_stream(terminal, descriptor)?;
         }
         self.bind_sources(&marker)?;
-        if let Some(values) = self.streams.get(&marker).cloned() {
+        if let Some(values) = self.streams.get(&marker).map(|entry| entry.values.clone()) {
             self.check_view_origin(&marker)?;
             return Ok(values);
         }
@@ -1557,7 +1604,11 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
     fn feed(&mut self, source: &Source, id: u64) -> Result<(), NativeError> {
         match source {
             Source::Values(marker) => {
-                let values = self.streams.get(marker).cloned().unwrap_or_default();
+                let values = self
+                    .streams
+                    .get(marker)
+                    .map(|entry| entry.values.clone())
+                    .unwrap_or_default();
                 let origin = self.pipelines.origins.get(marker).cloned();
                 let Some(origin) = origin else {
                     for value in values {

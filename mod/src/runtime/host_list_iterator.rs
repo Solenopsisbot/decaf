@@ -46,6 +46,13 @@ pub struct ListIter {
     expected: ModStamp,
 }
 
+impl ListIter {
+    /// The host list this list iterator reads.
+    pub(crate) fn source(&self) -> &Value {
+        &self.source
+    }
+}
+
 fn throw(class: &str, message: Option<String>) -> NativeError {
     NativeError::UncaughtException {
         class: class.to_owned(),

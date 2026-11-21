@@ -8,13 +8,16 @@
 //! instead. What JDK 25 does, read from its bytecode (`javap -c`, OpenJDK
 //! 25.0.5) and checked by running it:
 //!
-//! * `Integer`/`Short`/`Long.valueOf` (and so autoboxing) answer a cached
-//!   object for -128..=127, `Character.valueOf` for 0..=127, `Byte.valueOf`
-//!   always, `Boolean.valueOf` the `TRUE`/`FALSE` singletons; outside its
-//!   cache every call is a `new`. The `valueOf(String)` overloads go through
-//!   the same caches. `Float`/`Double.valueOf` are always a `new`. (The
-//!   `Integer` cache's upper bound can be raised with `-XX:AutoBoxCacheMax`;
-//!   the game's launcher does not, so 127 holds.)
+//! * `Short`/`Long.valueOf` (and so autoboxing) answer a cached object for
+//!   -128..=127, `Character.valueOf` for 0..=127, `Byte.valueOf` always,
+//!   `Boolean.valueOf` the `TRUE`/`FALSE` singletons; outside their fixed
+//!   caches every call is a `new`. `Integer.valueOf` caches -128..=127 and
+//!   always allocates `< -128`, but its upper bound can be raised above 127
+//!   with `-XX:AutoBoxCacheMax` or `-Djava.lang.Integer.IntegerCache.high`
+//!   (which Decaf's launcher forwards through `JAVA_TOOL_OPTIONS` /
+//!   `_JAVA_OPTIONS` / `JDK_JAVA_OPTIONS`), so `Integer` values `> 127` have
+//!   unknown caching identity and are counted. The `valueOf(String)` overloads
+//!   go through the same caches. `Float`/`Double.valueOf` are always a `new`.
 //! * `new X(..)` and string concatenation (`StringConcatHelper.simpleConcat`,
 //!   `newStringOf`, `doConcat` all end in `new String`, JLS 15.18.1) always
 //!   make a new object.
@@ -59,7 +62,10 @@
 //! model's marker) keep the old value-equality answer.
 
 use super::*;
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 /// Methods whose analysis the thread keeps, and the code bytes they may hold
 /// together, before the table starts over.
@@ -266,6 +272,123 @@ struct Operand {
 #[derive(Debug, Default)]
 struct Flow {
     compares: BTreeMap<u32, (Operand, Operand)>,
+    calls: BTreeMap<u32, Vec<Operand>>,
+}
+
+/// Allocation provenance of a value whose runtime representation is compared
+/// by content (`String` or boxed primitive) at a call site.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ValueIdentity {
+    /// A single non-repeating fresh allocation (`new String`, non-empty
+    /// `StringBuilder`/`StringBuffer.toString()`, non-unary-boolean concat,
+    /// `new` box, or uncached box `valueOf`) within one frame invocation.
+    Fresh(String),
+    /// The JVM string-pool object for this text (a string literal, empty
+    /// builder `toString()`, unary boolean concat, or `String.intern()`).
+    Interned(String),
+    /// A canonical JVM cached box singleton (`Integer`/`Short`/`Long` in
+    /// `-128..=127`, `Character` in `0..=127`, any `Byte` or `Boolean`).
+    CachedBox { class: &'static str, bits: i64 },
+}
+
+/// Runtime-local observations of the JVM string pool for `String.intern()`.
+///
+/// An executed `ldc` string literal (or empty-builder `""`) guarantees that
+/// text is already in the JVM pool before any later `String.intern()`. When
+/// `String.intern()` runs on text not yet observed in the pool, Java 25 may
+/// install the fresh receiver itself into the pool, so comparisons between a
+/// fresh allocation and an interned/literal string of that text are ambiguous
+/// and must be counted.
+#[derive(Default)]
+pub(crate) struct StringPoolState {
+    known_pooled: BTreeSet<String>,
+    ambiguous_intern: BTreeSet<String>,
+}
+
+impl StringPoolState {
+    pub(crate) fn note_literal(&mut self, text: &str) {
+        self.known_pooled.insert(text.to_owned());
+    }
+
+    pub(crate) fn note_intern(&mut self, text: &str) {
+        if !self.known_pooled.contains(text) {
+            self.ambiguous_intern.insert(text.to_owned());
+        }
+    }
+
+    pub(crate) fn is_intern_ambiguous(&self, text: &str) -> bool {
+        self.ambiguous_intern.contains(text)
+    }
+}
+
+/// Provenance of a reference argument at a call site. `None` means the
+/// value's allocation identity is not retained and an identity operation
+/// must be counted.
+pub(crate) type CallIdentity = Option<ValueIdentity>;
+
+/// Return identity provenance for the argument at `index` of an invocation at
+/// `at`. This uses the same method-local dataflow as `==` comparisons, so a
+/// copied `new String` remains distinct after its text is materialised and
+/// cached primitive boxes keep their canonical JVM singleton identity.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn call_identity(
+    file: &ClassFile,
+    class: &str,
+    method: &str,
+    desc: &str,
+    is_static: bool,
+    code: &[u8],
+    frame_id: u64,
+    at: usize,
+    index: usize,
+    value: &Value,
+) -> CallIdentity {
+    let flow = flow(file, method, desc, is_static, code)?;
+    let operand = flow.calls.get(&(at as u32))?.get(index).copied()?;
+    if let Value::Ref(Some(text)) = value
+        && value_class::is_plain_string(text)
+    {
+        return match operand.kind {
+            Kind::Interned => Some(ValueIdentity::Interned(text.clone())),
+            Kind::BuilderText if text.is_empty() => Some(ValueIdentity::Interned(String::new())),
+            Kind::Fresh | Kind::BuilderText if !operand.repeats => {
+                let Source::At(pc) = operand.source? else {
+                    return None;
+                };
+                Some(ValueIdentity::Fresh(format!(
+                    "{class}.{method}{desc}#{frame_id}:{pc}"
+                )))
+            }
+            _ => None,
+        };
+    }
+    let boxed = box_key(value)?;
+    match operand.kind {
+        Kind::Cached(box_class) => match cache_status(box_class, boxed.bits) {
+            CacheStatus::Cached => Some(ValueIdentity::CachedBox {
+                class: box_class,
+                bits: boxed.bits,
+            }),
+            CacheStatus::Uncached if !operand.repeats => {
+                let Source::At(pc) = operand.source? else {
+                    return None;
+                };
+                Some(ValueIdentity::Fresh(format!(
+                    "{class}.{method}{desc}#{frame_id}:{pc}"
+                )))
+            }
+            CacheStatus::Uncached | CacheStatus::Unknown => None,
+        },
+        Kind::Uncached(_) | Kind::Fresh if !operand.repeats => {
+            let Source::At(pc) = operand.source? else {
+                return None;
+            };
+            Some(ValueIdentity::Fresh(format!(
+                "{class}.{method}{desc}#{frame_id}:{pc}"
+            )))
+        }
+        _ => None,
+    }
 }
 
 /// The answer for one comparison.
@@ -310,6 +433,7 @@ impl<H: Host> Runtime<'_, H> {
         at: usize,
         lhs: &Value,
         rhs: &Value,
+        frame_modified: bool,
     ) -> Result<bool, NativeError> {
         // The old answer, kept when the comparison is counted.
         let equal = lhs == rhs;
@@ -332,12 +456,13 @@ impl<H: Host> Runtime<'_, H> {
             if let Some(same) = left.same_object(right) {
                 return Ok(same);
             }
-            let same = frame
-                .flow
-                .get_or_insert_with(|| flow(file, method, desc, is_static, code))
-                .as_ref()
-                .and_then(|flow| flow.compares.get(&(at as u32)).copied())
-                .is_some_and(|(l, r)| l.source.is_some() && l.source == r.source && !l.repeats);
+            let same = !frame_modified
+                && frame
+                    .flow
+                    .get_or_insert_with(|| flow(file, method, desc, is_static, code))
+                    .as_ref()
+                    .and_then(|flow| flow.compares.get(&(at as u32)).copied())
+                    .is_some_and(|(l, r)| l.source.is_some() && l.source == r.source && !l.repeats);
             if !same {
                 self.host.unknown_operand_call(&MethodRef {
                     owner: "java/lang/Object".into(),
@@ -364,11 +489,15 @@ impl<H: Host> Runtime<'_, H> {
             // Different values are different objects; null is null.
             return Ok(equal);
         }
-        let operands = frame
-            .flow
-            .get_or_insert_with(|| flow(file, method, desc, is_static, code))
-            .as_ref()
-            .and_then(|flow| flow.compares.get(&(at as u32)).copied());
+        let operands = if frame_modified {
+            None
+        } else {
+            frame
+                .flow
+                .get_or_insert_with(|| flow(file, method, desc, is_static, code))
+                .as_ref()
+                .and_then(|flow| flow.compares.get(&(at as u32)).copied())
+        };
         let (family, identity) = if let Some(boxed) = boxed {
             let identity =
                 operands.map_or(Identity::Unknown, |(l, r)| decide(Some(boxed), false, l, r));
@@ -380,6 +509,7 @@ impl<H: Host> Runtime<'_, H> {
                 {
                     (Family::Collection, decide(None, false, l, r))
                 }
+                None if frame_modified => (Family::Collection, Identity::Unknown),
                 // Neither is a shared empty collection: two markers, two objects.
                 _ => return Ok(false),
             }
@@ -421,7 +551,30 @@ impl<H: Host> Runtime<'_, H> {
                     name: "if_acmp".into(),
                     descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Z".into(),
                 })?;
-                Ok(equal)
+                // A fresh String is distinct from a literal that was loaded
+                // earlier in the same method. If the literal load occurs
+                // later, Java may let `intern()` install the fresh value in
+                // the pool before the ldc, so retain the counted fallback.
+                let fresh_precedes_literal = operands.is_some_and(|(left, right)| {
+                    let pair = [(left.kind, left.source), (right.kind, right.source)];
+                    let fresh = pair
+                        .iter()
+                        .filter_map(|(kind, source)| {
+                            (*kind == Kind::Fresh).then_some(*source).flatten()
+                        })
+                        .next();
+                    let literal = pair
+                        .iter()
+                        .filter_map(|(kind, source)| {
+                            (*kind == Kind::Interned).then_some(*source).flatten()
+                        })
+                        .next();
+                    match (fresh, literal) {
+                        (Some(Source::At(fresh)), Some(Source::At(literal))) => literal < fresh,
+                        _ => false,
+                    }
+                });
+                Ok(if fresh_precedes_literal { false } else { equal })
             }
         }
     }
@@ -535,10 +688,12 @@ fn decide(boxed: Option<BoxKey>, empty: bool, left: Operand, right: Operand) -> 
         (Kind::Cached(a) | Kind::Uncached(a), Kind::Cached(b) | Kind::Uncached(b)) if a != b => {
             Identity::Different
         }
-        (Kind::Cached(class), Kind::Cached(_))
-            if boxed.is_some_and(|value| in_cache(class, value.bits)) =>
-        {
-            Identity::Same
+        (Kind::Cached(class), Kind::Cached(_)) => {
+            match boxed.map(|value| cache_status(class, value.bits)) {
+                Some(CacheStatus::Cached) => Identity::Same,
+                Some(CacheStatus::Uncached) => separate(Identity::Different),
+                Some(CacheStatus::Unknown) | None => Identity::Unknown,
+            }
         }
         // Each run of a fresh producer (or a box outside its cache) makes its
         // own object.
@@ -546,13 +701,50 @@ fn decide(boxed: Option<BoxKey>, empty: bool, left: Operand, right: Operand) -> 
     }
 }
 
-/// Whether `valueOf` of `class` answers its cached object for `value`.
-fn in_cache(class: &str, value: i64) -> bool {
+/// Whether `valueOf` of `class` is guaranteed to return a cached object,
+/// guaranteed to allocate a fresh box, or dependent on JVM options.
+///
+/// In JDK 25 (`javap -c -p`), `Byte`, `Boolean`, `Character` (`0..=127`),
+/// `Short` (`-128..=127`), and `Long` (`-128..=127`) have fixed caches.
+/// `Integer`'s lower bound is fixed at `-128` (`< -128` is always fresh),
+/// `-128..=127` is always cached, and `> 127` can be cached when
+/// `-XX:AutoBoxCacheMax` or `-Djava.lang.Integer.IntegerCache.high` is set
+/// (forwarded via `JAVA_TOOL_OPTIONS` / `_JAVA_OPTIONS` / `JDK_JAVA_OPTIONS`),
+/// so `Integer` values `> 127` are [`CacheStatus::Unknown`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheStatus {
+    Cached,
+    Uncached,
+    Unknown,
+}
+
+fn cache_status(class: &str, value: i64) -> CacheStatus {
     match class {
-        "java/lang/Byte" | "java/lang/Boolean" => true,
-        "java/lang/Character" => (0..=127).contains(&value),
-        "java/lang/Integer" | "java/lang/Short" | "java/lang/Long" => (-128..=127).contains(&value),
-        _ => false,
+        "java/lang/Byte" | "java/lang/Boolean" => CacheStatus::Cached,
+        "java/lang/Character" => {
+            if (0..=127).contains(&value) {
+                CacheStatus::Cached
+            } else {
+                CacheStatus::Uncached
+            }
+        }
+        "java/lang/Short" | "java/lang/Long" => {
+            if (-128..=127).contains(&value) {
+                CacheStatus::Cached
+            } else {
+                CacheStatus::Uncached
+            }
+        }
+        "java/lang/Integer" => {
+            if (-128..=127).contains(&value) {
+                CacheStatus::Cached
+            } else if value < -128 {
+                CacheStatus::Uncached
+            } else {
+                CacheStatus::Unknown
+            }
+        }
+        _ => CacheStatus::Uncached,
     }
 }
 
@@ -680,6 +872,7 @@ fn analyse(
     queued[0] = true;
     let mut edges: Vec<Vec<usize>> = vec![Vec::new(); blocks.len()];
     let mut compares = BTreeMap::new();
+    let mut call_slots = BTreeMap::new();
     let mut done = 0usize;
     let merge = |entry: &mut Vec<Option<State>>,
                  work: &mut Vec<usize>,
@@ -735,6 +928,31 @@ fn analyse(
                 let lhs = *state.stack.get(n.checked_sub(2)?)?;
                 compares.insert(pc as u32, (lhs, rhs));
             }
+            if matches!(code[pc], 0xb6..=0xba) {
+                let descriptor = if code[pc] == 0xba {
+                    file.invoke_dynamic_descriptor(u16::from_be_bytes([
+                        *code.get(pc + 1)?,
+                        *code.get(pc + 2)?,
+                    ]))
+                    .ok()?
+                } else {
+                    file.method_ref(u16::from_be_bytes([*code.get(pc + 1)?, *code.get(pc + 2)?]))
+                        .ok()?
+                        .descriptor
+                };
+                let arg_descs = descriptor_arguments(&descriptor);
+                let total_words: usize = arg_descs.iter().map(|argument| words(argument)).sum();
+                let receiver = usize::from(matches!(code[pc], 0xb6 | 0xb7 | 0xb9));
+                let count = total_words + receiver;
+                let start = state.stack.len().checked_sub(count)?;
+                let mut offset = start + receiver;
+                let mut arg_slots = Vec::with_capacity(arg_descs.len());
+                for argument in &arg_descs {
+                    arg_slots.push(*state.stack.get(offset)?);
+                    offset += words(argument);
+                }
+                call_slots.insert(pc as u32, arg_slots);
+            }
             step(file, code, pc, &mut state)?;
             let targets = successors(code, pc)?;
             let next = pc + instruction_length(code, pc)?;
@@ -772,11 +990,32 @@ fn analyse(
             _ => false,
         },
     };
+    let calls = call_slots
+        .into_iter()
+        .map(|(pc, slots)| {
+            let operands = slots
+                .into_iter()
+                .map(|slot| Operand {
+                    source: slot.source,
+                    ty: slot.ty,
+                    kind: slot
+                        .source
+                        .map_or(Kind::Opaque, |source| kind(file, code, source)),
+                    repeats: match slot.source {
+                        Some(Source::At(source_pc)) => cyclic[block_of[source_pc as usize]],
+                        _ => false,
+                    },
+                })
+                .collect();
+            (pc, operands)
+        })
+        .collect();
     Some(Flow {
         compares: compares
             .into_iter()
             .map(|(pc, (lhs, rhs))| (pc, (operand(lhs), operand(rhs))))
             .collect(),
+        calls,
     })
 }
 
@@ -897,7 +1136,7 @@ fn kind(file: &ClassFile, code: &[u8], source: Source) -> Kind {
             },
             _ => Kind::Opaque,
         },
-        Some(op @ (0xb6 | 0xb8 | 0xb9)) => {
+        Some(op @ 0xb6..=0xb9) => {
             let Some(m) = index(true).and_then(|i| file.method_ref(i).ok()) else {
                 return Kind::Opaque;
             };
@@ -907,6 +1146,10 @@ fn kind(file: &ClassFile, code: &[u8], source: Source) -> Kind {
                 == Some(m.owner.as_str());
             let no_args = m.descriptor.starts_with("()");
             match (op, m.owner.as_str(), m.name.as_str()) {
+                // The result of `new String(...)` is a fresh ordinary String.
+                // Its text is represented directly, while this producer keeps
+                // the allocation identity for `if_acmp`.
+                (0xb7, "java/lang/String", "<init>") => Kind::Fresh,
                 (0xb8, owner, "valueOf") if returns_own => {
                     if let Some(class) = CACHED_BOXES.iter().find(|c| **c == owner) {
                         Kind::Cached(class)
@@ -1039,20 +1282,53 @@ fn step(file: &ClassFile, code: &[u8], pc: usize, state: &mut State) -> Option<(
             }
         }
         0xb6..=0xba => {
+            let method = (op != 0xba).then(|| file.method_ref(u2(1)?).ok()).flatten();
             let descriptor = if op == 0xba {
                 file.invoke_dynamic_descriptor(u2(1)?).ok()?
             } else {
-                file.method_ref(u2(1)?).ok()?.descriptor
+                method.as_ref()?.descriptor.clone()
             };
             let arguments: usize = descriptor_arguments(&descriptor)
                 .iter()
                 .map(|a| words(a))
                 .sum();
+            let receiver = if matches!(op, 0xb6 | 0xb7 | 0xb9) {
+                stack.get(stack.len().checked_sub(arguments + 1)?).copied()
+            } else {
+                None
+            };
+            let first_arg = if op == 0xb8 && arguments == 1 {
+                stack.last().copied()
+            } else {
+                None
+            };
             pop(
                 stack,
                 arguments + usize::from(matches!(op, 0xb6 | 0xb7 | 0xb9)),
             )?;
-            push_result(stack, return_desc(&descriptor), produced);
+            // `String#toString` returns the receiver itself, and
+            // `String.valueOf(Object)` returns `obj == null ? "null" : obj.toString()`,
+            // which for a statically-typed `String` preserves the non-null argument's
+            // exact identity (while `null != "null"` cannot alias a null operand).
+            if method.as_ref().is_some_and(|m| {
+                m.owner == "java/lang/String"
+                    && m.name == "toString"
+                    && m.descriptor == "()Ljava/lang/String;"
+            }) {
+                let receiver = receiver?;
+                stack.push(receiver);
+            } else if op == 0xb8
+                && method.as_ref().is_some_and(|m| {
+                    m.owner == "java/lang/String"
+                        && m.name == "valueOf"
+                        && m.descriptor == "(Ljava/lang/Object;)Ljava/lang/String;"
+                })
+                && first_arg.is_some_and(|arg| arg.ty == Ty::String)
+            {
+                stack.push(first_arg?);
+            } else {
+                push_result(stack, return_desc(&descriptor), produced);
+            }
         }
         0xbb => {
             let ty = match class_ty(u2(1)?)? {

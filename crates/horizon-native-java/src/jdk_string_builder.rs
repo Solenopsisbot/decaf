@@ -669,6 +669,41 @@ fn builder_class(owner: &str) -> bool {
 }
 
 impl<H: Host> Runtime<'_, H> {
+    /// `String.contentEquals` reads a builder's live text, the same value the
+    /// JDK's `AbstractStringBuilder` exposes. Keeping this at the Runtime
+    /// layer lets the String method consume a modelled builder without making
+    /// the generic host know about the builder table.
+    pub(crate) fn invoke_string_content_equals(
+        &self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "java/lang/String"
+            || r.name != "contentEquals"
+            || !matches!(
+                r.descriptor.as_str(),
+                "(Ljava/lang/CharSequence;)Z" | "(Ljava/lang/StringBuffer;)Z"
+            )
+        {
+            return Ok(None);
+        }
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        let Some(other) = args.first() else {
+            return Ok(None);
+        };
+        let text = expect_string(receiver);
+        let Some(other) = self.builder_text(other) else {
+            // Plain CharSequence/String values remain on the host path; this
+            // model exists specifically to bridge a live StringBuilder or
+            // StringBuffer into String.contentEquals.
+            return Ok(None);
+        };
+        Ok(Some(Value::Int((text == other) as i32)))
+    }
+
     /// The text of the builder `value` is: a `StringBuilder`/`StringBuffer`
     /// the jar `new`ed, or a host builder marker. A `String` spelling a
     /// builder's key is no builder (`jar_object.rs`).
@@ -703,6 +738,17 @@ impl<H: Host> Runtime<'_, H> {
             "java/lang/CharSequence" | "java/lang/Appendable" | "java/lang/AbstractStringBuilder"
         );
         if !(typed_as_builder || through_interface && !constructing) {
+            return Ok(None);
+        }
+        // Appending/inserting an opaque String makes the builder's resulting
+        // text opaque as well. Let the host count the call and retain that
+        // fact on the builder for its later toString/concat use.
+        if !constructing
+            && matches!(r.name.as_str(), "append" | "insert")
+            && args.iter().any(|value| self.is_counted_string(value))
+        {
+            self.string_builders.remove(&marker);
+            self.counted_strings.insert(marker.clone());
             return Ok(None);
         }
         let text = if constructing {
@@ -791,7 +837,12 @@ impl<H: Host> Runtime<'_, H> {
                     Answer::This => receiver.cloned().unwrap_or(Value::Ref(Some(marker))),
                     Answer::Void => Value::Void,
                     Answer::Int(value) => Value::Int(value),
-                    Answer::Text(text) => Value::Ref(Some(text)),
+                    Answer::Text(text) => {
+                        if text.is_empty() && r.name == "toString" {
+                            self.string_pool.note_literal("");
+                        }
+                        Value::Ref(Some(text))
+                    }
                     Answer::WriteChars { at, units } => {
                         let Some(array) = args.get(2).and_then(host_array::array_key) else {
                             return Ok(None);
@@ -910,6 +961,9 @@ impl<H: Host> Runtime<'_, H> {
     /// parameter what `String.valueOf` gives a box or a host-modelled object.
     /// `None` for an object whose text only its own class knows.
     fn builder_argument_text(&mut self, param: &str, value: &Value) -> Option<String> {
+        if self.is_counted_string(value) {
+            return None;
+        }
         let marker = expect_ref(value)?;
         // A `String` spelling an object's key is that text (`jar_object.rs`).
         if crate::jar_object::spells_key(value) {

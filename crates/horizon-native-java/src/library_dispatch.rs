@@ -1869,20 +1869,83 @@ impl<H: Host> Runtime<'_, H> {
         let Ok(items) = runtime_collection_values(&*self.host, receiver) else {
             return Ok(None);
         };
-        // `toArray(IntFunction)` on an entry set of `Collections.unmodifiableMap` is JDK 25's
-        // `UnmodifiableCollection.toArray(f)`, `c.toArray(f)`: the source map's own entries.
-        // `UnmodifiableEntrySet` wraps each entry only in `toArray()` and `toArray(T[])`, so the
-        // other two forms keep the wrappers (#221 review 7, B11). Only a view's entry set holds
-        // wrappers (a list copied from it keeps them, as Java's copy does).
-        let unwrap = r.descriptor == "(Ljava/util/function/IntFunction;)[Ljava/lang/Object;"
-            && expect_ref(receiver).is_some_and(|marker| {
-                self.host.view_copy_kind(marker).as_deref() == Some("entrySet")
-            });
-        let values = if unwrap {
-            items
-                .into_iter()
-                .map(|entry| self.host.unwrapped_view_entry(&entry).unwrap_or(entry))
-                .collect()
+        let entry_set_root = expect_ref(receiver)
+            .filter(|marker| self.host.view_copy_kind(marker).as_deref() == Some("entrySet"))
+            .and_then(|marker| self.host.view_copy_source(marker))
+            .map(|source| self.root_map_of_view(crate::jar_object::stored_value(&source)));
+        if let Some((root_map, _)) = entry_set_root.as_ref()
+            && self.collection_uncertain(root_map)
+        {
+            return self.host.unknown_operand_call(r).map(Some);
+        }
+        // JDK 25 `entrySet().toArray` behavior per root map behind any chain of
+        // `Collections.unmodifiableMap` / `Collections.synchronizedMap` views:
+        // - `UnmodifiableEntrySet.toArray()` and `toArray(T[])` wrap every entry
+        //   in `UnmodifiableEntry` (`Life::Wrapped`, already in `items`).
+        // - `UnmodifiableCollection.toArray(IntFunction)` (and `SynchronizedCollection`)
+        //   delegates to the root map's `entrySet().toArray(T[])`:
+        //   - `IdentityHashMap`, `EnumMap`, and `WeakHashMap` return detached
+        //     `AbstractMap$SimpleEntry` copies (both directly and via `IntFunction`).
+        //   - The verified map types below return their own entries (unwrapped from
+        //     `Life::Wrapped` when reached through `toArray(IntFunction)`).
+        //   - Any other non-empty entrySet root is counted instead of guessed.
+        let by_generator = r.descriptor == "(Ljava/util/function/IntFunction;)[Ljava/lang/Object;";
+        let values = if let Some((root_map, saw_unmodifiable)) = entry_set_root {
+            if saw_unmodifiable && !by_generator {
+                items
+            } else {
+                match self.map_root_class(&root_map).as_deref() {
+                    Some(
+                        "java/util/IdentityHashMap" | "java/util/EnumMap" | "java/util/WeakHashMap",
+                    ) => {
+                        let mut detached = Vec::with_capacity(items.len());
+                        for entry in items {
+                            let Some((key, value)) = self.host.map_entry_parts(&entry) else {
+                                return self.host.unknown_operand_call(r).map(Some);
+                            };
+                            detached.push(self.host.mint_map_entry(
+                                None,
+                                &key,
+                                &value,
+                                host_map_entry::EntryMade::SimpleEntry,
+                            ));
+                        }
+                        detached
+                    }
+                    Some(
+                        "java/util/HashMap"
+                        | "java/util/LinkedHashMap"
+                        | "java/util/TreeMap"
+                        | "java/util/Hashtable"
+                        | "java/util/concurrent/ConcurrentHashMap"
+                        | "java/util/concurrent/ConcurrentSkipListMap"
+                        | "java/util/Collections$SingletonMap"
+                        | "java/util/Collections$EmptyMap"
+                        | "java/util/ImmutableCollections$Map1"
+                        | "java/util/ImmutableCollections$MapN"
+                        | crate::gson_tree::TREE_MAP
+                        | "com/google/common/collect/RegularImmutableMap"
+                        | "com/google/common/collect/SingletonImmutableBiMap"
+                        | "com/google/common/collect/RegularImmutableBiMap",
+                    ) => {
+                        if saw_unmodifiable {
+                            items
+                                .into_iter()
+                                .map(|mut entry| {
+                                    while let Some(inner) = self.host.unwrapped_view_entry(&entry) {
+                                        entry = inner;
+                                    }
+                                    entry
+                                })
+                                .collect()
+                        } else {
+                            items
+                        }
+                    }
+                    _ if items.is_empty() => items,
+                    _ => return self.host.unknown_operand_call(r).map(Some),
+                }
+            }
         } else {
             items
         };

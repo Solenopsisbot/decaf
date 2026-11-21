@@ -30,6 +30,12 @@ pub struct CollectionStore {
     /// while that count stands still, no mirror needs a look.
     watched: HashSet<String>,
     watched_writes: u64,
+    /// Per-collection known `(run_id, epoch)` for `IdentityHashMap` /
+    /// `IdentityHashSet`, stored directly on the host collection store so
+    /// `remove`, epoch bumps, and `retain_markers` (GC) prune entries
+    /// automatically without any separate runtime side map.
+    next_identity_run: u64,
+    identity_epochs: HashMap<String, (u64, u64)>,
 }
 
 impl std::ops::Deref for CollectionStore {
@@ -70,7 +76,47 @@ impl CollectionStore {
     pub(crate) fn remove(&mut self, marker: &str) -> Option<Vec<Value>> {
         self.bump(marker);
         self.capacities.remove(marker);
+        self.identity_epochs.remove(marker);
         self.map.remove(marker)
+    }
+
+    /// Allocate a fresh per-invocation run identifier for identity-epoch tracking
+    /// and drop any stale entries from earlier runs or earlier epochs.
+    pub(crate) fn next_identity_run(&mut self) -> u64 {
+        self.next_identity_run = self.next_identity_run.saturating_add(1);
+        self.identity_epochs.clear();
+        self.next_identity_run
+    }
+
+    /// Clear per-collection identity-epoch entries after an epoch bump (every
+    /// pre-existing collection had an older epoch and defaults to `0 < epoch`).
+    pub(crate) fn clear_identity_epochs(&mut self) {
+        self.identity_epochs.clear();
+    }
+
+    /// `(run_id, epoch)` at which `marker`'s identity-collection contents were
+    /// last known, if recorded during an active bumped invocation.
+    pub(crate) fn collection_identity_epoch(&self, marker: &str) -> Option<(u64, u64)> {
+        self.identity_epochs.get(marker).copied()
+    }
+
+    /// Record the `(run_id, epoch)` at which `marker` was freshly constructed.
+    pub(crate) fn set_collection_identity_epoch(
+        &mut self,
+        marker: String,
+        run_id: u64,
+        epoch: u64,
+    ) {
+        if epoch == 0 {
+            self.identity_epochs.remove(&marker);
+        } else {
+            self.identity_epochs.insert(marker, (run_id, epoch));
+        }
+    }
+
+    /// Number of live per-collection identity-epoch entries tracked in this store.
+    pub(crate) fn identity_epoch_count(&self) -> usize {
+        self.identity_epochs.len()
     }
 
     pub(crate) fn capacity(&self, marker: &str) -> Option<(usize, bool)> {
@@ -112,6 +158,8 @@ impl CollectionStore {
         self.generations
             .retain(|marker, _| self.map.contains_key(marker));
         self.capacities
+            .retain(|marker, _| self.map.contains_key(marker));
+        self.identity_epochs
             .retain(|marker, _| self.map.contains_key(marker));
     }
 }

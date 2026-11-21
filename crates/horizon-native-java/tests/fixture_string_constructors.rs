@@ -150,6 +150,14 @@ fn modelled_constructors_answer_java_25() {
         ("bytesRangeCharset", "bc"),
         ("bytesName", "ab"),
         ("bytesRangeName", "ab"),
+        ("hibyte", "ab"),
+        ("hibyteRange", "b"),
+        ("empty", "0"),
+        ("copy", "xy"),
+        ("builder", "sb"),
+        ("buffer", "bf"),
+        ("supplier", "0"),
+        ("handle", "mh"),
     ];
     for (name, expected) in cases {
         let mut host = StdHost::new();
@@ -202,37 +210,38 @@ fn unpaired_value_of_stays_counted() {
 }
 
 #[test]
-fn every_string_constructor_is_counted_until_it_is_modelled() {
+fn modeled_string_constructors_are_not_counted() {
     let jar = jar();
-    // (method, the constructor descriptor it must be counted under)
-    let cases = [
-        ("hibyte", "([BI)V"),
-        ("empty", "()V"),
-        ("copy", "(Ljava/lang/String;)V"),
-        ("supplier", "()V"),
-        ("hibyteRange", "([BIII)V"),
-        ("builder", "(Ljava/lang/StringBuilder;)V"),
-        ("buffer", "(Ljava/lang/StringBuffer;)V"),
-        // A `MethodHandle` constructor is counted for every overload
-        // (`method_handles.rs`), modelled or not.
-        ("handle", "(Ljava/lang/String;)V"),
-    ];
-    for (name, descriptor) in cases {
+    for (name, expected) in [
+        ("hibyte", "ab"),
+        ("hibyteRange", "b"),
+        ("empty", "0"),
+        ("copy", "xy"),
+        ("builder", "sb"),
+        ("buffer", "bf"),
+        ("supplier", "0"),
+        ("handle", "mh"),
+    ] {
         let mut host = StdHost::new();
-        let answer = jar.invoke_method_with_args(
-            "demo.Ctors",
-            name,
-            "()Ljava/lang/String;",
-            None,
-            &[],
-            &mut host,
+        let answer = jar
+            .invoke_method_with_args(
+                "demo.Ctors",
+                name,
+                "()Ljava/lang/String;",
+                None,
+                &[],
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(
+            answer,
+            horizon_native_java::Value::Ref(Some(expected.into())),
+            "{name}"
         );
-        let counted = format!("java/lang/String#<init>{descriptor}");
-        assert!(
-            host.unknown_host_calls()
-                .iter()
-                .any(|(call, count)| call == &counted && *count >= 1),
-            "{name} answered {answer:?} without counting {counted}: {:?}",
+        assert_eq!(
+            host.unknown_host_call_count(),
+            0,
+            "{name}: {:?}",
             host.unknown_host_calls()
         );
     }

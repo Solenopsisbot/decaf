@@ -67,12 +67,30 @@ public final class Probe {
 fn other_charsets_stay_counted() {
     let fixture = Fixture::build("string-bytes-counted", &[("demo/Probe.java", COUNTED)]);
     let mut host = fixture.jar.seed_host(StdHost::new());
-    fixture.text_on(&mut host, "run");
+    // `out` comes from a counted constructor, so `out += ...` is a counted
+    // concatenation too (#423): `run` answers the counted placeholder, not text.
+    fixture
+        .jar
+        .invoke_method_with_args(
+            "demo/Probe",
+            "run",
+            "()Ljava/lang/String;",
+            None,
+            &[],
+            &mut host,
+        )
+        .expect("run executes");
     let counted = host.unknown_host_calls();
     assert!(
         counted.iter().any(|(call, count)| call
             == "java/lang/String#<init>([BLjava/lang/String;)V"
             && *count == 1),
+        "{counted:?}"
+    );
+    assert!(
+        counted
+            .iter()
+            .any(|(call, _)| call.starts_with("java/lang/invoke/StringConcatFactory#")),
         "{counted:?}"
     );
 }

@@ -1319,8 +1319,19 @@ impl<H: Host> Runtime<'_, H> {
                 let object = self.new_object(owner);
                 if jar_owned {
                     self.invoke(owner, "<init>", descriptor, Some(object.clone()), &values)?;
+                } else if owner == "java/lang/String"
+                    && let Some(text) = string_constructors::build(self, &member, &values)?
+                {
+                    // A constructor handle has the same plain String result
+                    // as the direct `new` path; its `new` allocation remains
+                    // fresh to the caller's reference analysis.
+                    return Ok(Value::Ref(Some(text)));
                 } else if string_constructors::count(self, &member)?.is_some() {
-                    // `String::new`: counted like `invokespecial` (`string_constructors.rs`).
+                    // Unsupported constructor forms stay counted, including
+                    // every later use of the allocated object.
+                    if let Some(key) = crate::jar_object::object_key(&object) {
+                        self.counted_strings.insert(key.to_owned());
+                    }
                 } else {
                     self.host.invoke_instance(&member, &object, &values)?;
                 }
@@ -1389,6 +1400,7 @@ impl<H: Host> Runtime<'_, H> {
                 )? {
                     return Ok(value);
                 }
+                self.note_string_intern(&member, Some(receiver));
                 self.host.invoke_instance(&member, receiver, &values)
             }
         }

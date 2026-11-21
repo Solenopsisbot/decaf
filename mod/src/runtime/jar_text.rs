@@ -68,6 +68,47 @@ fn string_overload(r: &MethodRef) -> Option<&'static str> {
 }
 
 impl<H: Host> Runtime<'_, H> {
+    /// The single boundary from runtime values to Java text. A counted String
+    /// has no known contents; callers must leave the enclosing operation to
+    /// the host instead of ever exposing its allocation marker.
+    pub(crate) fn java_text(
+        &mut self,
+        value: &Value,
+        desc: &str,
+        class: &str,
+        method: &str,
+    ) -> Result<Option<String>, NativeError> {
+        if self.is_counted_string(value)
+            || self
+                .uncertain_identity_root(value, &object_to_string())
+                .is_some()
+        {
+            return Ok(None);
+        }
+        if matches!(value, Value::Ref(Some(_))) || crate::runtime::jar_object::is_object(value) {
+            if let Some(result) = self.runtime_value_of(value, class, method)? {
+                if self.is_counted_string(&result) {
+                    return Ok(None);
+                }
+                return Ok(match result {
+                    Value::Ref(Some(text)) => Some(text),
+                    Value::Ref(None) => Some("null".into()),
+                    _ => Some("null".into()),
+                });
+            }
+            if let Some(text) = self.host.modelled_to_string_checked(value)? {
+                return Ok(Some(text));
+            }
+            if desc == "Ljava/lang/String;"
+                || matches!(value, Value::Ref(Some(text)) if crate::runtime::value_class::is_plain_string(text))
+            {
+                return Ok(Some(crate::runtime::value_text(value)));
+            }
+            return Ok(None);
+        }
+        Ok(Some(crate::runtime::java_value_text(&mut *self.host, value, desc)?))
+    }
+
     /// The jar class of an object this run built from a jar's own class.
     fn jar_object_class(&self, value: &Value) -> Option<String> {
         let class = crate::runtime::jar_object::packaged_object_class(value)?;
@@ -180,6 +221,15 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        if self
+            .uncertain_identity_root(value, &object_to_string())
+            .is_some()
+        {
+            return self
+                .host
+                .unknown_operand_call(&object_to_string())
+                .map(Some);
+        }
         // A host handle prints its kind's `toString` (`host_ref.rs`); one
         // whose held value has no text here is counted.
         if let Value::Host(handle) = value
@@ -273,6 +323,13 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<String, NativeError> {
+        if self
+            .uncertain_identity_root(value, &object_to_string())
+            .is_some()
+        {
+            self.host.unknown_operand_call(&object_to_string())?;
+            return Ok("null".into());
+        }
         if let Value::Host(handle) = value
             && !crate::runtime::jar_object::is_object_handle(handle)
         {
@@ -323,13 +380,28 @@ impl<H: Host> Runtime<'_, H> {
             && matches!(opcode, 0xb6 | 0xb9)
             && let Some(receiver) = receiver
         {
+            if let Some(key) = crate::runtime::jar_object::object_key(receiver)
+                && self.counted_text_objects.contains(key)
+            {
+                return self.counted_unknown(r).map(Some);
+            }
+            if self.is_counted_string(receiver) {
+                return self.counted_unknown(r).map(Some);
+            }
             if let Some(text) = self.host_entry_text(receiver, class, method)? {
                 return Ok(Some(text));
             }
             if expect_ref(receiver).is_some_and(|marker| self.is_live_stream(marker)) {
                 return self.runtime_value_of(receiver, class, method);
             }
-            return self.jar_to_string(receiver, class, method);
+            let result = self.jar_to_string(receiver, class, method)?;
+            if result
+                .as_ref()
+                .is_some_and(|value| self.is_counted_string(value))
+            {
+                return self.counted_unknown(r).map(Some);
+            }
+            return Ok(result);
         }
         match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
             ("java/lang/String", "valueOf", "(Ljava/lang/Object;)Ljava/lang/String;")
@@ -337,7 +409,17 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(value) = args.first() else {
                     return Ok(None);
                 };
-                return self.runtime_value_of(value, class, method);
+                if self.is_counted_string(value) {
+                    return self.counted_unknown(r).map(Some);
+                }
+                let result = self.runtime_value_of(value, class, method)?;
+                if result
+                    .as_ref()
+                    .is_some_and(|result| self.is_counted_string(result))
+                {
+                    return self.counted_unknown(r).map(Some);
+                }
+                return Ok(result);
             }
             // `Objects.toString(o, nullDefault)`: `o == null ? nullDefault :
             // o.toString()`, which for a non-null `o` is `String.valueOf(o)`.
@@ -352,7 +434,13 @@ impl<H: Host> Runtime<'_, H> {
                 if *value == Value::Ref(None) {
                     return Ok(Some(default.clone()));
                 }
+                if self.is_counted_string(value) {
+                    return self.counted_unknown(r).map(Some);
+                }
                 if let Some(text) = self.runtime_value_of(value, class, method)? {
+                    if self.is_counted_string(&text) {
+                        return self.counted_unknown(r).map(Some);
+                    }
                     return Ok(Some(text));
                 }
                 let value_of = MethodRef {
@@ -379,9 +467,19 @@ impl<H: Host> Runtime<'_, H> {
         if self.builder_text(value).is_some() {
             return Ok(None);
         }
+        if self.is_counted_string(value)
+            || self
+                .uncertain_identity_root(value, &object_to_string())
+                .is_some()
+        {
+            return self.counted_unknown(r).map(Some);
+        }
         let Some(text) = self.runtime_value_of(value, class, method)? else {
             return Ok(None);
         };
+        if self.is_counted_string(&text) {
+            return self.counted_unknown(r).map(Some);
+        }
         let rewritten = MethodRef {
             owner: r.owner.clone(),
             name: r.name.clone(),
@@ -410,23 +508,29 @@ impl<H: Host> Runtime<'_, H> {
         arguments: &mut [String],
         class: &str,
         method: &str,
-    ) -> Result<(), NativeError> {
+    ) -> Result<bool, NativeError> {
         for (position, value) in captured.iter_mut().enumerate() {
             if arguments.get(position).is_some_and(|argument| {
                 argument == "Ljava/lang/String;" || !argument.starts_with(['L', '['])
             }) {
                 continue;
             }
-            if let Some(text) = self.runtime_value_of(value, class, method)? {
-                *value = match text {
-                    Value::Ref(None) => Value::Ref(Some("null".into())),
-                    text => text,
-                };
-                if let Some(argument) = arguments.get_mut(position) {
-                    *argument = "Ljava/lang/String;".into();
-                }
+            let Some(text) = self.java_text(
+                value,
+                arguments
+                    .get(position)
+                    .map_or("Ljava/lang/Object;", String::as_str),
+                class,
+                method,
+            )?
+            else {
+                return Ok(true);
+            };
+            *value = Value::Ref(Some(text));
+            if let Some(argument) = arguments.get_mut(position) {
+                *argument = "Ljava/lang/String;".into();
             }
         }
-        Ok(())
+        Ok(false)
     }
 }
