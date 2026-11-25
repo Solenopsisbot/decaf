@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use horizon_native_java::{
     EntitySoundFacts, ExecutionBudget, GameHookContext, GameHookEffect, GameObject, HostKind,
-    HostRef, LevelSoundEffect, NativeError, NativeJar, SoundHolderKind, SoundSeed, SoundSide,
-    SoundSource, SoundTarget, StdHost, Value,
+    HostRef, LevelSoundEffect, NativeError, NativeJar, SoundHolderKind, SoundRecord, SoundSeed,
+    SoundSide, SoundSource, SoundTarget, StdHost, Value,
     client_surface::{ClientCamera, ClientLevel, ClientPlayer, ClientSnapshot},
     events::{EventContext, EventFacade, EventFiring, FacadeLevel, FacadePlayer, GameEvent},
 };
@@ -1414,11 +1414,9 @@ public class PlayerSoundMixin {
         )
         .expect("tick listener runs");
     assert_eq!(firing.sounds.len(), 1);
-    assert_eq!(firing.sounds[0].sound_id, "demo:tick");
-    assert_eq!(
-        firing.sounds[0].seed,
-        SoundSeed::LevelSeedGenerator(SEED_42_LONGS[0])
-    );
+    let tick = firing.sounds[0].effect().expect("a played sound");
+    assert_eq!(tick.sound_id, "demo:tick");
+    assert_eq!(tick.seed, SoundSeed::LevelSeedGenerator(SEED_42_LONGS[0]));
 
     // 2. GameHookContext path
     let weave = fixture
@@ -1969,8 +1967,10 @@ fn unknown_sound_streams_count_every_later_draw_until_seeded_again() {
         SoundSeed::LevelSeedGenerator(SOUND_SEEDS_42[0])
     );
 
-    // 2. A seed deferred to a live host whose call then counts never reaches the host, which
-    //    draws only for a sound it plays: the host's stream is now one draw behind Java's.
+    // 2. A seed deferred to a live host whose call then counts after the draw is logged as a
+    //    draw that played nothing (`SoundRecord::SeedDrawn`), in call order: the host bridge
+    //    draws the host's stream there too (Sunrise's `LevelRef::next_sound_seed`), so the
+    //    stream stays in step and later sounds play.
     let mut host = StdHost::new();
     host.set_host_deferred_server_sound_seeds(true);
     draw_order_call(
@@ -1982,19 +1982,49 @@ fn unknown_sound_streams_count_every_later_draw_until_seeded_again() {
     )
     .unwrap();
     assert_eq!(host.unknown_host_call_count(), 1);
-    assert!(!host.sound_stream_known(overworld_stream));
+    assert!(host.sound_stream_known(overworld_stream));
+    for level in [&overworld, &nether] {
+        draw_order_call(
+            &fixture,
+            &mut host,
+            "valid",
+            LEVEL_DESC,
+            std::slice::from_ref(level),
+        )
+        .unwrap();
+    }
+    assert_eq!(host.unknown_host_call_count(), 1);
+    let records = host.take_sound_records();
+    assert_eq!(records.len(), 3, "{records:#?}");
+    assert_eq!(
+        records[0],
+        SoundRecord::SeedDrawn {
+            dimension: "minecraft:overworld".into()
+        }
+    );
+    for (record, dimension) in records[1..]
+        .iter()
+        .zip(["minecraft:overworld", "minecraft:the_nether"])
+    {
+        let sound = record.effect().expect("a played sound");
+        assert_eq!(sound.dimension.as_deref(), Some(dimension));
+        assert_eq!(sound.sound_id, "demo:ok");
+        assert_eq!(sound.seed, SoundSeed::HostDeferred);
+    }
+
+    // 2b. A call that may or may not reach its draw (a `BlockPos` Decaf cannot read) is still
+    //     unknown: no draw can be logged for it. Sunrise draws every level's seeds from one
+    //     stream, so while seeds are deferred the nether's position is unknown too.
     draw_order_call(
         &fixture,
         &mut host,
-        "valid",
+        "oddBlockPos",
         LEVEL_DESC,
         std::slice::from_ref(&overworld),
     )
     .unwrap();
     assert_eq!(host.unknown_host_call_count(), 2);
-    assert!(host.played_sounds().is_empty());
-    // Java's nether stream did not move, but a live host may draw every level's seeds from one
-    // stream (Sunrise does): while seeds are deferred, the nether's position is unknown too.
+    assert!(!host.sound_stream_known(overworld_stream));
     assert!(!host.sound_stream_known(nether_stream));
     draw_order_call(
         &fixture,
@@ -2005,7 +2035,7 @@ fn unknown_sound_streams_count_every_later_draw_until_seeded_again() {
     )
     .unwrap();
     assert_eq!(host.unknown_host_call_count(), 3);
-    assert!(host.played_sounds().is_empty());
+    assert!(host.sound_records().is_empty());
     // A new server's levels start fresh streams.
     host.forget_unknown_server_sound_streams();
     for level in [&overworld, &nether] {

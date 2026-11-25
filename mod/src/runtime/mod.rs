@@ -353,8 +353,8 @@ pub(crate) use host_path::{path_text, path_value, unix_normal};
 pub use host_ref::{HostKind, HostRef};
 pub use java_nbt::{MAX_DEPTH as NBT_MAX_DEPTH, Nbt, NbtCompound};
 pub use level_sound::{
-    EntitySoundFacts, LevelSoundEffect, SoundHolderKind, SoundSeed, SoundSide, SoundSource,
-    SoundTarget,
+    EntitySoundFacts, LevelSoundEffect, SoundHolderKind, SoundRecord, SoundSeed, SoundSide,
+    SoundSource, SoundTarget,
 };
 pub use mixin_extras::{GameHookShape, MixinExtrasKind, MixinExtrasPlan};
 pub use mixin_plugins::ConfigPluginReport;
@@ -3434,7 +3434,8 @@ pub trait Host {
     }
 
     /// Draw `Level.soundSeedGenerator.nextLong()` for `level_marker` (or return
-    /// [`level_sound::SoundSeed::HostDeferred`] when a live host owns the seed stream).
+    /// [`level_sound::SoundSeed::HostDeferred`] when a live host owns the seed stream and
+    /// replays the draw, in call order, from the recorded [`level_sound::SoundRecord`]s).
     fn draw_level_sound_seed(
         &mut self,
         _level_marker: &str,

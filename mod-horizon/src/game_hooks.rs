@@ -451,6 +451,10 @@ pub(crate) fn deliverable_effects(
             GameHookEffect::PlaySound(_) => {
                 host.note_unknown_game_hook("level sound has no bridge on the official Horizon");
             }
+            // A seed drawn for a call that then played nothing: the call itself was counted, and
+            // this build never defers seeds to a host (only deferred draws are logged), so there
+            // is no stream to replay it on.
+            GameHookEffect::SoundSeedDrawn { .. } => {}
             other => effects.push(other),
         }
     }
