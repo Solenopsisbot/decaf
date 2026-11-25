@@ -23,10 +23,18 @@
 //! first, and the game does not run in between), so the values are the ones a
 //! draw at the call would give.
 //!
+//! Inside an open Sunrise transaction the order is the journal's instead:
+//! Sunrise holds every level sound until the outermost commit and draws an
+//! unseeded one's seed then, so the bridge plays deferred sounds unseeded
+//! there and Sunrise draws them in journal order, after the sounds it queued
+//! earlier in the transaction ([`apply_server_sounds`]).
+//!
 //! A stream becomes unknown only where the bridge cannot draw: no Sunrise level
-//! to draw on, a hit hook (`HitHost` has no draw of its own; its
-//! `play_sound_*` draw only for a sound they play), and the client (the same,
-//! for `play_local_sound`). Sunrise keeps one stream for the whole server
+//! to draw on, inside a transaction a draw that cannot join the journal (a
+//! call that played nothing, or a refused sound: the SDK has no journaled bare
+//! draw), a hit hook (`HitHost` has no draw of its own; its `play_sound_*`
+//! draw only for a sound they play), and the client (the same, for
+//! `play_local_sound`). Sunrise keeps one stream for the whole server
 //! (Java keeps one per level), so an unknown server stream marks every level's
 //! unknown for every jar, and every later deferred sound is counted
 //! ([`deliver_in_order`], [`gather_unknown_sound_streams`]).
@@ -45,7 +53,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use mod_api::{
     ClientHost, ClientSetupContext, EntityRef, HitHost, LevelWriteHost, ServerHost, SoundPlay,
-    SoundRef, SoundSource as ApiSoundSource,
+    SoundRef, SoundSource as ApiSoundSource, TransactionLifecycle,
 };
 
 use crate::runtime::events::{EventContext, EventFacade};
@@ -407,30 +415,86 @@ fn server_stream(dimension: Option<&str>) -> String {
     )
 }
 
-/// Deliver a recorded server sound log to a Sunrise [`ServerHost`]: replay
-/// every deferred draw with `LevelRef::next_sound_seed` where Java drew it,
-/// and play each sound with its seed through `LevelRef::play_seeded_sound`
-/// (positional) or `EntityRef::play_seeded_bound_sound` (entity-bound). See
-/// the module docs.
+/// Whether Sunrise has a transaction open (`Transaction.getLifecycle` anything
+/// but `None`), so a sound it queues now waits in the journal and draws its
+/// seed only when the outermost commit publishes it.
 ///
-/// A sound Sunrise cannot play faithfully is counted through `on_unbridged`,
-/// after its seed is drawn, so the stream stays in step. A stream goes into
-/// `unknown` only when Sunrise cannot draw for it (no such level); every
-/// later deferred sound on it is then counted (it is still drawn, as Java's
-/// stream moved).
+/// Sunrise journals a level effect only while a transaction is open on the
+/// level active at the call (`Game::has_level_transaction`); with one open
+/// elsewhere it publishes, and an unseeded sound draws, at the call. The SDK
+/// shows only whether any transaction is open, and that is enough: an
+/// unseeded play draws where Sunrise's own sounds draw in either case. A
+/// lifecycle this pin does not know counts as open.
+fn transaction_open(host: &dyn ServerHost) -> bool {
+    !matches!(host.transaction_lifecycle(), TransactionLifecycle::None)
+}
+
+/// [`transaction_open`], asked only when `records` hold a draw deferred to
+/// Sunrise (a delivery with nothing deferred asks the host nothing).
+fn transaction_open_for(host: &dyn ServerHost, records: &[SoundRecord]) -> bool {
+    records
+        .iter()
+        .any(|record| deferred_stream(record).is_some())
+        && transaction_open(host)
+}
+
+/// How a server sound's seed reaches Sunrise.
+#[derive(Clone, Copy)]
+enum SeedPlan {
+    /// Already drawn (with `next_sound_seed`), or given by Java: a seeded play.
+    Given(i64),
+    /// Drawn by Sunrise when it publishes the sound, in journal order: an
+    /// unseeded play, inside an open transaction.
+    AtPublish,
+}
+
+/// Deliver a recorded server sound log to a Sunrise [`ServerHost`]. See the
+/// module docs.
+///
+/// **Outside a transaction**, every deferred draw is replayed with
+/// `LevelRef::next_sound_seed` where Java drew it, and each sound plays with
+/// its seed through `LevelRef::play_seeded_sound` (positional) or
+/// `EntityRef::play_seeded_bound_sound` (entity-bound). A sound Sunrise cannot
+/// play faithfully is counted through `on_unbridged` after its seed is drawn,
+/// so the stream stays in step.
+///
+/// **Inside an open transaction**, Sunrise journals every level sound and an
+/// unseeded one draws its seed only when the outermost commit publishes it.
+/// So a draw made now with `next_sound_seed` would come before the draws of
+/// sounds Sunrise queued earlier in the transaction, the reverse of call
+/// order. Each deferred sound therefore goes through the unseeded
+/// `LevelRef::play_sound` / `EntityRef::play_bound_sound`, and Sunrise draws
+/// its seed at commit, in journal order, as for its own sounds (Java cannot
+/// read the value: module docs). A Java draw that cannot join the journal,
+/// because the call played nothing ([`SoundRecord::SeedDrawn`]) or its sound
+/// is refused, leaves the stream unknown: the SDK has no journaled bare draw.
+/// An entity-bound sound with an excluded player is refused there, since
+/// `play_bound_sound` takes no `except`. Explicit seeds play seeded either way.
+/// On abort Sunrise discards the journaled sounds, its documented contract for
+/// level effects inside a mod transaction (#4006); vanilla has no mod
+/// transactions to compare with.
+///
+/// A stream goes into `unknown` when Sunrise cannot make a draw Java made;
+/// every later deferred sound on it is then counted (outside a transaction it
+/// is still drawn, as Java's stream moved).
 pub(crate) fn apply_server_sounds(
     host: &mut dyn ServerHost,
     records: &[SoundRecord],
     unknown: &mut BTreeSet<String>,
     mut on_unbridged: impl FnMut(&str),
 ) {
+    let in_transaction = transaction_open_for(host, records);
     for record in records {
         match record {
+            SoundRecord::SeedDrawn { dimension } if in_transaction => {
+                // The call itself was counted when it ran.
+                note_unknown(unknown, &server_level_sound_stream(dimension));
+            }
             SoundRecord::SeedDrawn { dimension } => {
                 replay_server_draw(host, Some(dimension), unknown);
             }
             SoundRecord::Play(effect) => {
-                if let Err(reason) = deliver_server_sound(host, effect, unknown) {
+                if let Err(reason) = deliver_server_sound(host, effect, unknown, in_transaction) {
                     on_unbridged(reason);
                 }
             }
@@ -441,7 +505,8 @@ pub(crate) fn apply_server_sounds(
 /// A failed callback's recorded sounds are not played (they are counted
 /// through `on_unbridged` with `reason`), but the seeds Java drew for them are
 /// drawn from Sunrise all the same, in call order, so the stream stays in
-/// step.
+/// step. Inside an open transaction no bare draw can join the journal, so a
+/// deferred one leaves the stream unknown instead.
 pub(crate) fn replay_unplayed_server_sounds(
     host: &mut dyn ServerHost,
     records: &[SoundRecord],
@@ -449,14 +514,20 @@ pub(crate) fn replay_unplayed_server_sounds(
     mut on_unbridged: impl FnMut(&str),
     reason: &'static str,
 ) {
+    let in_transaction = transaction_open_for(host, records);
+    let mut draw = |host: &mut dyn ServerHost, dimension: Option<&str>| {
+        if in_transaction {
+            note_unknown(unknown, &server_stream(dimension));
+        } else {
+            replay_server_draw(host, dimension, unknown);
+        }
+    };
     for record in records {
         match record {
-            SoundRecord::SeedDrawn { dimension } => {
-                replay_server_draw(host, Some(dimension), unknown);
-            }
+            SoundRecord::SeedDrawn { dimension } => draw(host, Some(dimension)),
             SoundRecord::Play(effect) => {
                 if effect.side == SoundSide::Server && effect.seed == SoundSeed::HostDeferred {
-                    replay_server_draw(host, effect.dimension.as_deref(), unknown);
+                    draw(host, effect.dimension.as_deref());
                 }
                 on_unbridged(reason);
             }
@@ -468,15 +539,25 @@ fn deliver_server_sound(
     host: &mut dyn ServerHost,
     effect: &LevelSoundEffect,
     unknown: &mut BTreeSet<String>,
+    in_transaction: bool,
 ) -> Result<(), &'static str> {
     if effect.side != SoundSide::Server {
         return Err("level sound wrong side for server host");
     }
-    // The seed first, where Java drew it: before anything below can refuse the sound.
+    let dimension = effect.dimension.as_deref();
+    let stream = server_stream(dimension);
     let seed = match effect.seed {
+        SoundSeed::HostDeferred if in_transaction => {
+            if !sound_stream_known_in(unknown, &stream) {
+                return Err(
+                    "level sound seed stream position unknown: an earlier seed never reached Sunrise",
+                );
+            }
+            SeedPlan::AtPublish
+        }
+        // Outside a transaction the seed comes first, where Java drew it: before anything below
+        // can refuse the sound.
         SoundSeed::HostDeferred => {
-            let dimension = effect.dimension.as_deref();
-            let stream = server_stream(dimension);
             let Some(seed) = draw_server_seed(host, dimension) else {
                 note_unknown(unknown, &stream);
                 return Err("level sound seed: no Sunrise level to draw it on");
@@ -488,14 +569,29 @@ fn deliver_server_sound(
                     "level sound seed stream position unknown: an earlier seed never reached Sunrise",
                 );
             }
-            seed
+            SeedPlan::Given(seed)
         }
         // `playSeededSound`'s own seed, or one Decaf's seeded copy of the stream drew: exact,
         // and Sunrise plays it as given without drawing.
         SoundSeed::Explicit(seed)
         | SoundSeed::LevelSeedGenerator(seed)
-        | SoundSeed::LevelRandom(seed) => seed,
+        | SoundSeed::LevelRandom(seed) => SeedPlan::Given(seed),
     };
+    let played = play_server_sound(host, effect, seed);
+    if played.is_err() && matches!(seed, SeedPlan::AtPublish) {
+        // Java drew this seed; Sunrise draws only for a sound it publishes.
+        note_unknown(unknown, &stream);
+    }
+    played
+}
+
+/// Play one server sound with `seed`'s plan. The refusals are the same either
+/// way, except that an unseeded entity-bound play cannot leave a player out.
+fn play_server_sound(
+    host: &mut dyn ServerHost,
+    effect: &LevelSoundEffect,
+    seed: SeedPlan,
+) -> Result<(), &'static str> {
     if effect.fixed_range.is_some() {
         return Err("level sound fixed range unsupported by Sunrise ServerHost");
     }
@@ -517,17 +613,34 @@ fn deliver_server_sound(
             let Some(level) = host.level(dimension) else {
                 return Err("level sound missing Sunrise level");
             };
-            if !level.play_seeded_sound(
-                host,
-                &effect.sound_id,
-                pos,
-                source,
-                effect.volume,
-                effect.pitch,
-                except,
-                seed,
-            ) {
-                return Err("level sound refused by Sunrise LevelRef::play_seeded_sound");
+            let queued = match seed {
+                SeedPlan::Given(seed) => level.play_seeded_sound(
+                    host,
+                    &effect.sound_id,
+                    pos,
+                    source,
+                    effect.volume,
+                    effect.pitch,
+                    except,
+                    seed,
+                ),
+                SeedPlan::AtPublish => level.play_sound(
+                    host,
+                    &effect.sound_id,
+                    pos,
+                    source,
+                    effect.volume,
+                    effect.pitch,
+                    except,
+                ),
+            };
+            if !queued {
+                return Err(match seed {
+                    SeedPlan::Given(_) => {
+                        "level sound refused by Sunrise LevelRef::play_seeded_sound"
+                    }
+                    SeedPlan::AtPublish => "level sound refused by Sunrise LevelRef::play_sound",
+                });
             }
         }
         SoundTarget::Entity { entity_id, .. } => {
@@ -544,16 +657,38 @@ fn deliver_server_sound(
             {
                 return Err("level sound entity dimension mismatch");
             }
-            if !entity.play_seeded_bound_sound(
-                host,
-                &effect.sound_id,
-                source,
-                effect.volume,
-                effect.pitch,
-                except,
-                seed,
-            ) {
-                return Err("level sound refused by Sunrise EntityRef::play_seeded_bound_sound");
+            let queued = match seed {
+                SeedPlan::Given(seed) => entity.play_seeded_bound_sound(
+                    host,
+                    &effect.sound_id,
+                    source,
+                    effect.volume,
+                    effect.pitch,
+                    except,
+                    seed,
+                ),
+                SeedPlan::AtPublish if except.is_some() => {
+                    return Err(
+                        "level sound entity-bound except player inside a transaction: EntityRef::play_bound_sound takes none",
+                    );
+                }
+                SeedPlan::AtPublish => entity.play_bound_sound(
+                    host,
+                    &effect.sound_id,
+                    source,
+                    effect.volume,
+                    effect.pitch,
+                ),
+            };
+            if !queued {
+                return Err(match seed {
+                    SeedPlan::Given(_) => {
+                        "level sound refused by Sunrise EntityRef::play_seeded_bound_sound"
+                    }
+                    SeedPlan::AtPublish => {
+                        "level sound refused by Sunrise EntityRef::play_bound_sound"
+                    }
+                });
             }
         }
     }
@@ -724,7 +859,7 @@ mod tests {
     use mod_api::__private::game::BackendMutRefOf;
     use mod_api::prelude::{
         EffectsClientHost, EntitiesHost, EntityActionsBackendMut, LevelEffectsBackendMut,
-        PlayersHost,
+        ModStateServerHost, PlayersHost,
     };
     use mod_api::testing::FakeHost;
     use mod_api::{
@@ -829,20 +964,37 @@ mod tests {
 
     /// Sunrise's own `FakeHost` (its overworld, players, entities and `sounds` list), plus the
     /// three sound-seed calls of #5102, which the SDK's `FakeHost` does not implement (they
-    /// panic there as unimplemented):
+    /// panic there as unimplemented), and Sunrise's level-transaction rules for sounds, which
+    /// the SDK's `FakeHost` does not model (its `level_play_sound` sends at the call):
     /// - `next_sound_seed` draws one server-wide stream (as Sunrise's does), the real 26.3
-    ///   `ThreadSafeLegacyRandomSource` LCG seeded with 42, so its draws are [`SOUND_SEEDS_42`];
-    /// - `play_seeded_sound` / `play_seeded_bound_sound` take the seed as given and draw nothing;
-    ///   a positional play goes through `FakeHost::level_play_sound` (its checks, and its
-    ///   `sounds` record), and an entity-bound one refuses what that refuses (an entity or a
-    ///   stale `except` the fake does not have).
+    ///   `ThreadSafeLegacyRandomSource` LCG seeded with 42, so its draws are [`SOUND_SEEDS_42`].
+    ///   It draws at the call, inside a transaction too (`Game::level_next_sound_seed`).
+    /// - `play_seeded_sound` / `play_seeded_bound_sound` take the seed as given and draw nothing.
+    ///   `play_sound` / `play_bound_sound` draw the next seed when the sound is published.
+    /// - A sound is published at the call outside a transaction. Inside one ([`Self::begin`]) it
+    ///   waits in the journal until [`Self::commit`], which publishes in journal order (an
+    ///   unseeded one drawing then), or [`Self::rollback`], which discards it: Sunrise's
+    ///   `emit_level_effect` / `publish_level_effect` (`journal_level_write.rs` at 3d34bbe63d).
+    /// - A published positional sound goes through `FakeHost::level_play_sound` (its `sounds`
+    ///   record). A play is refused, at the call, for another level, an entity or a stale
+    ///   `except` the fake does not have.
     ///
-    /// The unseeded `play_sound` / `play_bound_sound` are not offered: the server bridge must not
-    /// call them any more, and a call would panic.
+    /// Outside a transaction the server bridge must play every sound seeded: an unseeded play
+    /// there panics.
     struct SeededFakeHost {
         fake: FakeHost,
         stream: Lcg,
         log: Vec<HostSound>,
+        /// The open transaction's journal, in call order.
+        journal: Option<Vec<Queued>>,
+    }
+
+    /// A sound queued with Sunrise: what it plays, and its seed (`None` draws at publish).
+    struct Queued {
+        sound: HostSound,
+        seed: Option<i64>,
+        level: LevelRef,
+        except: Option<PlayerRef>,
     }
 
     impl SeededFakeHost {
@@ -853,7 +1005,148 @@ mod tests {
                 fake,
                 stream: Lcg::new(42),
                 log: Vec::new(),
+                journal: None,
             }
+        }
+
+        /// Open a level transaction.
+        fn begin(&mut self) {
+            assert!(self.journal.is_none(), "one transaction at a time here");
+            self.journal = Some(Vec::new());
+        }
+
+        /// Commit it: publish what it holds, in journal order.
+        fn commit(&mut self) {
+            for queued in self.journal.take().expect("an open transaction") {
+                self.publish(queued);
+            }
+        }
+
+        /// Abort it: what it holds is discarded and draws nothing.
+        fn rollback(&mut self) {
+            self.journal.take().expect("an open transaction");
+        }
+
+        fn draw(&mut self, level: LevelRef) -> i64 {
+            let seed = self.stream.next_long();
+            self.log.push(HostSound::Draw {
+                dimension: level.dimension_id().to_owned(),
+                seed,
+            });
+            seed
+        }
+
+        fn queue(&mut self, queued: Queued) -> bool {
+            match &mut self.journal {
+                Some(journal) => journal.push(queued),
+                None => {
+                    assert!(
+                        queued.seed.is_some(),
+                        "outside a transaction the bridge plays every sound seeded"
+                    );
+                    self.publish(queued);
+                }
+            }
+            true
+        }
+
+        fn publish(&mut self, queued: Queued) {
+            let Queued {
+                mut sound,
+                seed,
+                level,
+                except,
+            } = queued;
+            let seed = seed.unwrap_or_else(|| self.draw(level));
+            match &mut sound {
+                HostSound::Pos {
+                    sound: id,
+                    at,
+                    source,
+                    volume,
+                    pitch,
+                    seed: slot,
+                    ..
+                } => {
+                    *slot = seed;
+                    assert!(LevelEffectsBackendMut::level_play_sound(
+                        &mut self.fake,
+                        level,
+                        id,
+                        *at,
+                        *source,
+                        *volume,
+                        *pitch,
+                        except,
+                    ));
+                }
+                HostSound::Bound { seed: slot, .. } => *slot = seed,
+                HostSound::Draw { .. } => unreachable!(),
+            }
+            self.log.push(sound);
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn queue_pos(
+            &mut self,
+            level: LevelRef,
+            sound: &str,
+            at: [f64; 3],
+            source: ApiSoundSource,
+            volume: f32,
+            pitch: f32,
+            except: Option<PlayerRef>,
+            seed: Option<i64>,
+        ) -> bool {
+            if level != self.fake.level.level() || !self.except_ok(except) {
+                return false;
+            }
+            self.queue(Queued {
+                sound: HostSound::Pos {
+                    dimension: level.dimension_id().to_owned(),
+                    sound: sound.to_owned(),
+                    at,
+                    source,
+                    volume,
+                    pitch,
+                    except: except.map(PlayerRef::uuid),
+                    seed: 0,
+                },
+                seed,
+                level,
+                except,
+            })
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn queue_bound(
+            &mut self,
+            entity: EntityRef,
+            sound: &str,
+            source: ApiSoundSource,
+            volume: f32,
+            pitch: f32,
+            except: Option<PlayerRef>,
+            seed: Option<i64>,
+        ) -> bool {
+            if self.fake.entity(entity.id()) != Some(entity) || !self.except_ok(except) {
+                return false;
+            }
+            let level = self.fake.level.level();
+            self.queue(Queued {
+                sound: HostSound::Bound {
+                    entity_id: entity.id(),
+                    sound: sound.to_owned(),
+                    source,
+                    volume,
+                    pitch,
+                    except: except.map(PlayerRef::uuid),
+                    seed: 0,
+                },
+                seed,
+                level,
+                except,
+            })
         }
 
         /// The seeds the host's stream gave out, in order.
@@ -899,26 +1192,18 @@ mod tests {
     impl LevelEffectsBackendMut for SeededFakeHost {
         fn level_play_sound(
             &mut self,
-            _: LevelRef,
-            _: &str,
-            _: [f64; 3],
-            _: ApiSoundSource,
-            _: f32,
-            _: f32,
-            _: Option<PlayerRef>,
+            level: LevelRef,
+            sound: &str,
+            at: [f64; 3],
+            source: ApiSoundSource,
+            volume: f32,
+            pitch: f32,
+            except: Option<PlayerRef>,
         ) -> bool {
-            panic!("the server bridge plays every sound seeded");
+            self.queue_pos(level, sound, at, source, volume, pitch, except, None)
         }
         fn level_next_sound_seed(&mut self, level: LevelRef) -> Option<i64> {
-            if level != self.fake.level.level() {
-                return None;
-            }
-            let seed = self.stream.next_long();
-            self.log.push(HostSound::Draw {
-                dimension: level.dimension_id().to_owned(),
-                seed,
-            });
-            Some(seed)
+            (level == self.fake.level.level()).then(|| self.draw(level))
         }
         fn level_play_seeded_sound(
             &mut self,
@@ -931,34 +1216,20 @@ mod tests {
             except: Option<PlayerRef>,
             seed: i64,
         ) -> bool {
-            // `FakeHost`'s own positional play: its checks, and its `sounds` record. It draws no
-            // seed (the fake has no stream), so the seed is kept here.
-            if !LevelEffectsBackendMut::level_play_sound(
-                &mut self.fake,
-                level,
-                sound,
-                at,
-                source,
-                volume,
-                pitch,
-                except,
-            ) {
-                return false;
-            }
-            self.log.push(HostSound::Pos {
-                dimension: level.dimension_id().to_owned(),
-                sound: sound.to_owned(),
-                at,
-                source,
-                volume,
-                pitch,
-                except: except.map(PlayerRef::uuid),
-                seed,
-            });
-            true
+            self.queue_pos(level, sound, at, source, volume, pitch, except, Some(seed))
         }
     }
     impl EntityActionsBackendMut for SeededFakeHost {
+        fn entity_play_bound_sound(
+            &mut self,
+            entity: EntityRef,
+            sound: &str,
+            source: ApiSoundSource,
+            volume: f32,
+            pitch: f32,
+        ) -> bool {
+            self.queue_bound(entity, sound, source, volume, pitch, None, None)
+        }
         fn entity_play_seeded_bound_sound(
             &mut self,
             entity: EntityRef,
@@ -969,19 +1240,7 @@ mod tests {
             except: Option<PlayerRef>,
             seed: i64,
         ) -> bool {
-            if self.fake.entity(entity.id()) != Some(entity) || !self.except_ok(except) {
-                return false;
-            }
-            self.log.push(HostSound::Bound {
-                entity_id: entity.id(),
-                sound: sound.to_owned(),
-                source,
-                volume,
-                pitch,
-                except: except.map(PlayerRef::uuid),
-                seed,
-            });
-            true
+            self.queue_bound(entity, sound, source, volume, pitch, except, Some(seed))
         }
     }
     mod_api::impl_backend_mut_areas!(SeededFakeHost, except(entity_actions, level_effects));
@@ -991,7 +1250,16 @@ mod tests {
             Some(BackendMutRef::of(self))
         }
     }
-    mod_api::impl_server_host_areas!(SeededFakeHost);
+    impl ModStateServerHost for SeededFakeHost {
+        fn transaction_lifecycle(&self) -> TransactionLifecycle {
+            if self.journal.is_some() {
+                TransactionLifecycle::Open
+            } else {
+                TransactionLifecycle::None
+            }
+        }
+    }
+    mod_api::impl_server_host_areas!(SeededFakeHost, except(mod_state));
 
     fn plays(effects: &[LevelSoundEffect]) -> Vec<SoundRecord> {
         effects.iter().cloned().map(SoundRecord::Play).collect()
@@ -1997,5 +2265,194 @@ mod tests {
             ]
         );
         assert_eq!(callback_unknowns(&java), vec![0]);
+    }
+
+    /// Queue a sound with Sunrise the way the game's own code (or another native mod) does:
+    /// unseeded, drawing its seed when published.
+    fn native_bell(host: &mut SeededFakeHost, at: [f64; 3]) {
+        let level = host.fake.level.level();
+        assert!(level.play_sound(
+            host,
+            "minecraft:block.bell.use",
+            at,
+            ApiSoundSource::Blocks,
+            1.0,
+            1.0,
+            None,
+        ));
+    }
+
+    fn native_pos(at: [f64; 3], seed: i64) -> HostSound {
+        tick_pos(
+            "minecraft:block.bell.use",
+            at,
+            ApiSoundSource::Blocks,
+            [1.0, 1.0],
+            seed,
+        )
+    }
+
+    /// Inside an open Sunrise transaction, a native sound queued before a Java callback, the
+    /// callback's sounds, and a native sound after it draw their seeds at commit in call order:
+    /// the Java sound is played unseeded, so Sunrise draws it in journal order (a draw now would
+    /// have given it the first seed). The explicit seed is journaled with its seed.
+    #[test]
+    fn transaction_sounds_draw_their_seeds_at_commit_in_call_order() {
+        let java = java_with([tick_sound_jar(
+            "soundtx",
+            "level.playSeededSound(null, 4.0, 65.0, -2.0, ok, SoundSource.BLOCKS, 0.8f, 1.2f, 1234L); \
+             level.playSound(null, new BlockPos(4, 65, -2), ok, SoundSource.BLOCKS, 0.8f, 1.2f);",
+        )]);
+        let mut host = SeededFakeHost::new();
+        host.begin();
+        native_bell(&mut host, [0.5, 64.5, 0.5]);
+        fire_level_tick(&java, &mut host);
+        native_bell(&mut host, [9.5, 64.5, 9.5]);
+        // Nothing is published, and nothing drawn, before the commit.
+        assert!(host.log.is_empty(), "{:?}", host.log);
+        host.commit();
+        let seeds = SOUND_SEEDS_42;
+        assert_eq!(host.draws(), seeds[..3].to_vec());
+        assert_eq!(
+            host.plays(),
+            vec![
+                native_pos([0.5, 64.5, 0.5], seeds[0]),
+                tick_pos(
+                    "demo:bell",
+                    [4.0, 65.0, -2.0],
+                    ApiSoundSource::Blocks,
+                    [0.8, 1.2],
+                    1234,
+                ),
+                tick_pos(
+                    "demo:bell",
+                    [4.5, 65.5, -1.5],
+                    ApiSoundSource::Blocks,
+                    [0.8, 1.2],
+                    seeds[1],
+                ),
+                native_pos([9.5, 64.5, 9.5], seeds[2]),
+            ]
+        );
+        assert_eq!(callback_unknowns(&java), vec![0]);
+        assert!(
+            java.lock().jars[0]
+                .host
+                .sound_stream_known("game/level/minecraft:overworld")
+        );
+    }
+
+    /// A rolled-back transaction discards its sounds, the Java callback's with Sunrise's own,
+    /// and draws nothing for them (Sunrise's documented rule for level effects inside a mod
+    /// transaction, #4006). The stream stays known: the next sound outside a transaction is
+    /// drawn and played seeded, with the stream's first seed.
+    #[test]
+    fn transaction_rollback_discards_java_sounds_and_draws_nothing() {
+        let java = java_with([tick_sound_jar(
+            "soundrollback",
+            "level.playSound(null, new BlockPos(4, 65, -2), ok, SoundSource.BLOCKS, 0.8f, 1.2f);",
+        )]);
+        let mut host = SeededFakeHost::new();
+        host.begin();
+        native_bell(&mut host, [0.5, 64.5, 0.5]);
+        fire_level_tick(&java, &mut host);
+        host.rollback();
+        assert!(host.log.is_empty(), "{:?}", host.log);
+        assert!(host.fake.sounds.is_empty());
+        assert_eq!(callback_unknowns(&java), vec![0]);
+
+        fire_level_tick(&java, &mut host);
+        assert_eq!(host.draws(), SOUND_SEEDS_42[..1].to_vec());
+        assert_eq!(
+            host.plays(),
+            vec![tick_pos(
+                "demo:bell",
+                [4.5, 65.5, -1.5],
+                ApiSoundSource::Blocks,
+                [0.8, 1.2],
+                SOUND_SEEDS_42[0],
+            )]
+        );
+    }
+
+    /// Inside a transaction a Java draw that cannot join the journal (a refused sound) is
+    /// counted and leaves the stream unknown, since the SDK has no journaled bare draw: every
+    /// later deferred sound, this jar's or another's, is counted too.
+    #[test]
+    fn transaction_refused_sound_is_counted_and_leaves_the_stream_unknown() {
+        let first = tick_sound_jar(
+            "soundtxfirst",
+            "level.playSound(null, new BlockPos(4, 65, -2), ok, SoundSource.BLOCKS, 0.8f, 1.2f); \
+             level.playSound(null, new BlockPos(0, 64, 0), fixed, SoundSource.BLOCKS, 1.0f, 1.0f);",
+        );
+        let second = tick_sound_jar(
+            "soundtxsecond",
+            "level.playSound(null, new BlockPos(7, 70, 7), ok, SoundSource.AMBIENT, 1.0f, 1.0f);",
+        );
+        let java = java_with([first, second]);
+        let mut host = SeededFakeHost::new();
+        host.begin();
+        fire_level_tick(&java, &mut host);
+        host.commit();
+        // Only jar A's first bell reached the journal; it drew at commit.
+        assert_eq!(host.draws(), SOUND_SEEDS_42[..1].to_vec());
+        assert_eq!(
+            host.plays(),
+            vec![tick_pos(
+                "demo:bell",
+                [4.5, 65.5, -1.5],
+                ApiSoundSource::Blocks,
+                [0.8, 1.2],
+                SOUND_SEEDS_42[0],
+            )]
+        );
+        assert_eq!(callback_unknowns(&java), vec![1, 1]);
+        for jar in &java.lock().jars {
+            assert!(
+                !jar.host
+                    .sound_stream_known("game/level/minecraft:overworld")
+            );
+        }
+    }
+
+    /// The other two shapes of a draw that cannot join a transaction's journal: a call that
+    /// drew and played nothing, and an entity-bound sound that leaves a player out
+    /// (`play_bound_sound` takes no `except`). Both leave the stream unknown; nothing draws.
+    #[test]
+    fn transaction_bare_draw_and_bound_except_leave_the_stream_unknown() {
+        let pos = server_pos_effect("demo:a", [1.0, 2.0, 3.0], RuntimeSoundSource::Blocks, None);
+        let bound_except = LevelSoundEffect {
+            target: SoundTarget::Entity {
+                entity_id: 10,
+                position: None,
+            },
+            except_player: Some(0xa1),
+            ..pos.clone()
+        };
+        let drawn_only = SoundRecord::SeedDrawn {
+            dimension: "minecraft:overworld".into(),
+        };
+        for first in [drawn_only, SoundRecord::Play(bound_except)] {
+            let mut host = SeededFakeHost::new();
+            host.begin();
+            let mut unknown = BTreeSet::new();
+            let mut refused = Vec::new();
+            apply_server_sounds(
+                &mut host,
+                &[first.clone(), SoundRecord::Play(pos.clone())],
+                &mut unknown,
+                |reason| refused.push(reason.to_owned()),
+            );
+            host.commit();
+            assert!(host.log.is_empty(), "{first:?}: {:?}", host.log);
+            assert!(unknown.contains("game/level/*"), "{first:?}: {unknown:?}");
+            assert_eq!(
+                refused.last().map(String::as_str),
+                Some(
+                    "level sound seed stream position unknown: an earlier seed never reached Sunrise"
+                ),
+                "{first:?}"
+            );
+        }
     }
 }
