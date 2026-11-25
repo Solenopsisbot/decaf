@@ -32,6 +32,7 @@ mod array_deque;
 mod array_store;
 mod array_views;
 mod attachment_codec;
+mod base64_codec;
 mod bigdecimal_slice;
 mod block_entity_types;
 mod block_item_id;
@@ -181,6 +182,7 @@ mod java_nbt;
 mod java_numbers;
 mod java_regex;
 mod java_tostring;
+mod jdk_base64;
 mod jdk_call;
 mod jdk_character;
 mod jdk_character_table;
@@ -29497,6 +29499,12 @@ impl<H: Host> Runtime<'_, H> {
             )? {
                 return Ok(Some(value));
             }
+            // `Base64.getEncoder()::encodeToString`, `Base64.Decoder::decode`: the encoder's
+            // or decoder's own model, as the direct call runs it (`jdk_base64.rs`).
+            if let Some(value) = jdk_base64::invoke(self, &callback.target, Some(&receiver), &rest)?
+            {
+                return Ok(Some(value));
+            }
             if let Some(value) =
                 dfu_codec::runtime_instance_call(self, &callback.target, Some(&receiver), &rest)?
             {
@@ -39659,6 +39667,15 @@ impl<H: Host> Runtime<'_, H> {
                         && let Some(value) = invoke_or_catch!(
                             at,
                             self.dispatch_counted_string_call(&r, receiver.as_ref(), &args)
+                        )
+                    {
+                        dispatched = Some(value);
+                    }
+                    // `java.util.Base64` and the encoders and decoders it makes (`jdk_base64.rs`).
+                    if dispatched.is_none()
+                        && let Some(value) = invoke_or_catch!(
+                            at,
+                            jdk_base64::invoke(self, &r, receiver.as_ref(), &args)
                         )
                     {
                         dispatched = Some(value);

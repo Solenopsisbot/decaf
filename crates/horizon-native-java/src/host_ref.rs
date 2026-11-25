@@ -330,6 +330,10 @@ pub enum HostKind {
     ExecutorCallable,
     /// `Executors.defaultThreadFactory()`: key its allocation marker.
     ThreadFactory,
+    /// A `java.util.Base64.Encoder` (`jdk_base64.rs`): key its configuration or allocation key.
+    Base64Encoder,
+    /// A `java.util.Base64.Decoder`: key its variant (`basic`, `url`, `mime`).
+    Base64Decoder,
     /// A `ServiceLoader`: key its service and load serial (`host_services.rs`).
     ServiceLoader,
     /// A `ServiceLoader` iterator: key its serial.
@@ -1775,6 +1779,27 @@ const KINDS: &[KindInfo] = &[
         // One per `defaultThreadFactory()` call.
         canonical: always_canonical,
         methods: &crate::host_executors::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Base64Encoder,
+        tag: "b64enc",
+        class: ClassRule::Unknown {
+            declared: crate::jdk_base64::encoder_types,
+        },
+        // One per key: the three shared encoders have their own keys, every other encoder
+        // is allocated per call.
+        canonical: always_canonical,
+        methods: &crate::jdk_base64::OBJECT_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::Base64Decoder,
+        tag: "b64dec",
+        class: ClassRule::Unknown {
+            declared: crate::jdk_base64::decoder_types,
+        },
+        // The three decoders are shared.
+        canonical: always_canonical,
+        methods: &crate::jdk_base64::OBJECT_METHODS,
     },
     KindInfo {
         kind: HostKind::ServiceLoader,
