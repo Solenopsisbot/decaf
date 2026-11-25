@@ -50,6 +50,11 @@ pub(crate) struct StreamPlan {
     sized: std::collections::BTreeSet<String>,
 }
 
+/// `String.CASE_INSENSITIVE_ORDER`: one comparator object, as the JDK's is.
+pub(crate) fn case_insensitive_order() -> Value {
+    comparator("case-insensitive", &[])
+}
+
 /// A comparator the runtime makes: a callback composite (`callback_marker`)
 /// whose operation is `cmp.<op>` over `operands`. An operand-free one is a
 /// singleton (one key), as the JDK's are.
@@ -376,6 +381,19 @@ impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
         let operand = |at: usize| operands.get(at).cloned().unwrap_or(Value::Ref(None));
         match op.as_str() {
             "natural" => self.natural_order(a, b),
+            "case-insensitive" => match crate::runtime::string_ignore_case::case_insensitive_order(a, b)? {
+                Some(order) => Ok(order),
+                // A marker or a host handle has no text to compare: counted as
+                // the `String` method it would run, answering "equal".
+                None => {
+                    self.host.unknown_operand_call(&MethodRef {
+                        owner: "java/lang/String".into(),
+                        name: "compareToIgnoreCase".into(),
+                        descriptor: "(Ljava/lang/String;)I".into(),
+                    })?;
+                    Ok(0)
+                }
+            },
             "reverse-natural" => self.natural_order(b, a),
             "reverse" => self.compare_with(&operand(0), b, a),
             "key" => {

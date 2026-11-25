@@ -289,6 +289,7 @@ mod stream_codec_tests;
 mod stream_pipeline;
 mod string_code_points;
 mod string_constructors;
+mod string_ignore_case;
 mod synchronized_views;
 mod thread_local;
 mod tim_sort;
@@ -9826,6 +9827,13 @@ impl Host for StdHost {
         if let Some(value) = jdk_character::unicode_block_static(r) {
             return Ok(value);
         }
+        // `String.CASE_INSENSITIVE_ORDER`, one comparator object (`string_ignore_case.rs`).
+        if r.owner == "java/lang/String"
+            && r.name == "CASE_INSENSITIVE_ORDER"
+            && r.descriptor == "Ljava/util/Comparator;"
+        {
+            return Ok(jdk_stream::case_insensitive_order());
+        }
         // `CompoundTag.CODEC`, the root of a modelled attachment codec (`attachment_codec.rs`).
         if let Some(value) = commons_lang::static_field(r) {
             return Ok(value);
@@ -14948,13 +14956,63 @@ impl Host for StdHost {
                         as i32,
                 ))
             }
+            // A receiver or argument that is a jar-object marker (`String#n`) or a
+            // host handle has no text to compare: counted, never answered from
+            // its key text (`string_ignore_case.rs`).
+            ("java/lang/String", "equalsIgnoreCase", "(Ljava/lang/String;)Z")
+            | ("java/lang/String", "compareToIgnoreCase", "(Ljava/lang/String;)I")
+            | (
+                "java/lang/String",
+                "regionMatches",
+                "(ZILjava/lang/String;II)Z" | "(ILjava/lang/String;II)Z",
+            ) if string_ignore_case::unreadable(receiver)
+                || args.iter().any(string_ignore_case::unreadable) =>
+            {
+                self.unknown_host_call(r)
+            }
             ("java/lang/String", "equalsIgnoreCase", "(Ljava/lang/String;)Z") => {
                 let other = Self::argument(r, args, 0)?;
                 Ok(Value::Int(
                     (expect_ref(other).is_some()
-                        && expect_string(receiver).eq_ignore_ascii_case(expect_string(other)))
-                        as i32,
+                        && string_ignore_case::equals_ignore_case(
+                            expect_string(receiver),
+                            expect_string(other),
+                        )) as i32,
                 ))
+            }
+            ("java/lang/String", "compareToIgnoreCase", "(Ljava/lang/String;)I") => {
+                let other = Self::argument(r, args, 0)?;
+                string_ignore_case::compare_strings(
+                    Some(expect_string(receiver)),
+                    expect_ref(other).map(String::as_str),
+                )
+                .map(Value::Int)
+            }
+            (
+                "java/lang/String",
+                "regionMatches",
+                "(ZILjava/lang/String;II)Z" | "(ILjava/lang/String;II)Z",
+            ) => {
+                // The `ignoreCase` flag leads only the first overload.
+                let (ignore_case, rest) = match args.split_first() {
+                    Some((flag, rest)) if r.descriptor.starts_with("(Z") => {
+                        (expect_int(r, flag)? != 0, rest)
+                    }
+                    _ => (false, args),
+                };
+                let toffset = expect_int(r, Self::argument(r, rest, 0)?)?;
+                let other = Self::argument(r, rest, 1)?;
+                let ooffset = expect_int(r, Self::argument(r, rest, 2)?)?;
+                let len = expect_int(r, Self::argument(r, rest, 3)?)?;
+                string_ignore_case::region_matches(
+                    ignore_case,
+                    expect_string(receiver),
+                    toffset,
+                    expect_ref(other).map(String::as_str),
+                    ooffset,
+                    len,
+                )
+                .map(|matches| Value::Int(matches as i32))
             }
             ("java/lang/String", "hashCode", "()I") => {
                 Ok(Value::Int(stable_hash(expect_string(receiver))))
