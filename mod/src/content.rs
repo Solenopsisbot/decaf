@@ -57,8 +57,13 @@ pub(crate) enum PlacementContentOutcome {
     State(String, BTreeMap<String, String>),
     /// Java returned a non-null state whose block could not be decoded (e.g. unregistered).
     UnknownState,
-    /// One or more unmodelled / unknown-placer calls were hit during execution.
+    /// One or more unmodelled / unknown-placer calls were hit during execution. This wins over
+    /// every other outcome: a counted call's placeholder answer may have steered the result.
     CountedUnknown(usize),
+    /// Java threw out of `getStateForPlacement` (the thrown class's binary name) with no counted
+    /// call: a real Java throw, such as the NullPointerException a `DirectionalPlaceContext`'s
+    /// `getNearestLookingVerticalDirection` raises because it has no player.
+    Threw(String),
 }
 
 pub(crate) fn state_for_placement_content(
@@ -73,10 +78,16 @@ pub(crate) fn state_for_placement_content(
         .unknown_host_call_count()
         .saturating_sub(unknown_before);
     jar.row.callback_unknown_host_calls += unknown_delta;
-    let state = result?;
     if unknown_delta > 0 {
         return Ok(PlacementContentOutcome::CountedUnknown(unknown_delta));
     }
+    let state = match result {
+        Ok(state) => state,
+        Err(runtime::NativeError::UncaughtException { class, .. }) => {
+            return Ok(PlacementContentOutcome::Threw(class));
+        }
+        Err(error) => return Err(error),
+    };
     let Some(state) = state else {
         return Ok(PlacementContentOutcome::Refused);
     };
