@@ -97,8 +97,12 @@ with each mod beside its declared dependencies. Definitions: [docs/unmodelled-ca
 - Run the most common Mixins through Sunrise's named hooks instead of weaving them. Most of the
   top targets are library mods re-firing their own events.
 - Finish one mod's blocks and screens in game: block state properties from the mod's own
-  `createBlockStateDefinition` (#581, makes Runes' altar render), its item-combiner menu run by the
-  interpreter (#584), then a generic Java-menu to Sunrise-menu bridge and the recipe types it needs.
+  `createBlockStateDefinition` (#581, makes Runes' altar render) and its item-combiner menu run by
+  the interpreter (#584, #652) are in, and so is the server half of the Java-menu to Sunrise-menu
+  bridge (`mod/src/live_menu.rs`: the menu type declared by the bake, opens, clicks, ticks and
+  closes run by the Java menu and mirrored on Sunrise). Left: the client screen for a Java menu
+  (`MenuScreens.register` → a Sunrise screen factory), without which a Sunrise client shows no
+  window for it.
 - Drive one mod set (the RPG series) end to end in a real game.
 
 The tables are rewritten after every merge batch from that batch's census
