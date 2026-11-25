@@ -38,6 +38,8 @@ pub(crate) struct Tally {
     pub(crate) menus_opened: usize,
     pub(crate) menus_refused: usize,
     pub(crate) refusals: BTreeMap<String, usize>,
+    /// Live-menu calls (clicks, ticks, validity checks, closes) run on a held Java menu.
+    pub(crate) menu_calls: usize,
 }
 
 impl Tally {
@@ -57,6 +59,7 @@ impl Tally {
             "menus_opened": self.menus_opened,
             "menus_refused": self.menus_refused,
             "refusals": self.refusals,
+            "menu_calls": self.menu_calls,
         })
     }
 }
@@ -72,7 +75,7 @@ impl JavaBlockUsePart {
         Self { state, block_id }
     }
 
-    fn dispatch(
+    pub(crate) fn dispatch(
         &self,
         host: &mut dyn ServerHost,
         state_val: mod_api::BlockState,
@@ -89,10 +92,36 @@ impl JavaBlockUsePart {
         } else {
             "useWithoutItem"
         };
-        let applied = match &outcome {
-            Ok(outcome) => apply_menu_effects(host, click.player, &outcome.menu_effects),
+        let openings: Vec<Opening> = match &outcome {
+            Ok(outcome) => {
+                let mut guard = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard
+                    .jars
+                    .get(jar_index)
+                    .is_some_and(|jar| jar.row.id == jar_id)
+                    .then(|| {
+                        crate::live_menu::opening_check(
+                            &mut guard,
+                            jar_index,
+                            click.player,
+                            &outcome.live_effects,
+                        )
+                    })
+                    .flatten()
+                    .into_iter()
+                    .collect()
+            }
             Err(_) => Vec::new(),
         };
+        let applied = match &outcome {
+            Ok(outcome) => apply_menu_effects(host, click.player, &outcome.menu_effects, &openings),
+            Err(_) => Vec::new(),
+        };
+        let opening_counted =
+            self.show_opened_menu(host, jar_index, &jar_id, click.player, &applied);
 
         let mut guard = self
             .state
@@ -118,6 +147,9 @@ impl JavaBlockUsePart {
                 }
                 for applied in applied {
                     record_menu_outcome(jar, click.player, applied);
+                }
+                for tag in opening_counted {
+                    jar.host.note_unknown_game_hook(tag);
                 }
                 if let Some(failure) = &outcome.failure {
                     // The hook threw (vanilla's use would fail too); what it did to menus before
@@ -185,6 +217,32 @@ impl JavaBlockUsePart {
         }
     }
 
+    /// A window Sunrise shows, after a use's effects, for the Java menu the jar now holds: its
+    /// layout checked and what the Java menu holds shown
+    /// (`live_menu::opened_window_contents`, `live_menu::show_contents`). The hook tags to
+    /// count.
+    fn show_opened_menu(
+        &self,
+        host: &mut dyn ServerHost,
+        jar_index: usize,
+        jar_id: &str,
+        uuid: u128,
+        applied: &[MenuApplied],
+    ) -> Vec<&'static str> {
+        let contents = {
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            crate::live_menu::opened_window_contents(
+                &mut guard, &*host, jar_index, jar_id, uuid, applied,
+            )
+        };
+        contents
+            .map(|contents| crate::live_menu::show_contents(host, jar_id, uuid, contents))
+            .unwrap_or_default()
+    }
+
     /// Run the jar's `useItemOn`/`useWithoutItem` for this click under the state lock: the
     /// jar's index and id, and its outcome or why it has none (an error or a panic).
     fn run_java(
@@ -239,6 +297,28 @@ impl JavaBlockUsePart {
             .position(|jar| jar.host.registered_block(&self.block_id).is_some())?;
 
         let jar = &mut guard.jars[jar_index];
+
+        // `ServerPlayer.containerCounter` is Sunrise's (`PlayerRef::container_counter`), so the
+        // id Java hands `createMenu` is the one Sunrise's open takes next: the two can't drift.
+        if let Some(counter) = player_ref.and_then(|player| player.container_counter(&*host)) {
+            jar.host
+                .server_player_container_opened(click.player, Some(counter));
+        }
+        // The player as Sunrise has them, so a menu this use opens runs `initMenu` exactly
+        // (its listener and synchronizer read the player's inventory slots).
+        let facts = player_ref.map(|player| {
+            crate::live_menu::read_player(
+                &*host,
+                &mut jar.host,
+                incarnation,
+                player,
+                None,
+                container,
+                None,
+            )
+            .facts
+        });
+        jar.host.set_player_menu_facts(click.player, facts);
 
         // A held stack whose item the host cannot name has no Java form: the use fails and is
         // counted rather than run with an empty hand Java would not see.
@@ -432,13 +512,31 @@ pub(crate) enum MenuApplied {
     Orphaned { container_id: i32 },
     /// After all of a call's effects: the window Sunrise shows the player.
     Shown(PlayerContainer),
+    /// Java advanced `containerCounter` to `container_id` for a `createMenu` that answered
+    /// `null`; Sunrise advanced its own to `sunrise` (`PlayerRef::next_container_counter`).
+    CounterAdvanced {
+        container_id: i32,
+        sunrise: Option<i32>,
+    },
 }
 
-/// Carry a use's menu effects out on Sunrise, in order, without the state lock.
+/// A Java menu a call left held, checked before its window opens (`live_menu::opening_check`):
+/// the data slot values it opens with, or why it must not open (its live layout is not its
+/// type's declared one, its initial data isn't known).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Opening {
+    pub(crate) container_id: i32,
+    pub(crate) data: Result<Vec<i32>, String>,
+}
+
+/// Carry a use's menu effects out on Sunrise, in order, without the state lock. An open only
+/// goes out for a menu `openings` checked; any other is refused, never a window whose layout
+/// nothing compared with its type's.
 pub(crate) fn apply_menu_effects(
     host: &mut dyn ServerHost,
     player_uuid: u128,
     effects: &[MenuEffect],
+    openings: &[Opening],
 ) -> Vec<MenuApplied> {
     deliver_menu_effects(
         &mut SunriseMenus {
@@ -446,18 +544,22 @@ pub(crate) fn apply_menu_effects(
             player: player_uuid,
         },
         effects,
+        openings,
     )
 }
 
 /// Where a call's menu effects go: Sunrise ([`SunriseMenus`]), or a test's recorder.
 pub(crate) trait MenuSink {
-    /// Open Java's menu as a Sunrise mod menu, replacing the open one
-    /// ([`MenuReplace::CloseFirst`]: its close, then the open, as vanilla's packets go).
-    fn open(&mut self, effect: &OpenMenuEffect) -> SunriseMenuAttempt;
+    /// Open Java's menu as a Sunrise mod menu with its initial data slot values, replacing the
+    /// open one ([`MenuReplace::CloseFirst`]: its close, then the open, as vanilla's packets go).
+    fn open(&mut self, effect: &OpenMenuEffect, data: Vec<i32>) -> SunriseMenuAttempt;
     /// Close window `container_id`, if it is the one shown.
     fn close(&mut self, container_id: i32) -> bool;
     /// The window shown now.
     fn shown(&mut self) -> PlayerContainer;
+    /// Advance the player's container counter with no window, as `ServerPlayer.openMenu` does
+    /// before a `createMenu` that answers `null`: the new counter.
+    fn advance_counter(&mut self) -> Option<i32>;
 }
 
 /// The player's menus on Sunrise.
@@ -467,8 +569,8 @@ struct SunriseMenus<'a> {
 }
 
 impl MenuSink for SunriseMenus<'_> {
-    fn open(&mut self, effect: &OpenMenuEffect) -> SunriseMenuAttempt {
-        try_open_sunrise_menu(self.host, self.player, effect)
+    fn open(&mut self, effect: &OpenMenuEffect, data: Vec<i32>) -> SunriseMenuAttempt {
+        try_open_sunrise_menu(self.host, self.player, effect, data)
     }
 
     fn close(&mut self, container_id: i32) -> bool {
@@ -486,6 +588,11 @@ impl MenuSink for SunriseMenus<'_> {
         let player = self.host.player(self.player);
         player_container(&*self.host, player)
     }
+
+    fn advance_counter(&mut self) -> Option<i32> {
+        let player = self.host.player(self.player)?;
+        player.next_container_counter(self.host)
+    }
 }
 
 /// The delivery order. Java's `closeContainer` sends its close packet before anything of the
@@ -497,12 +604,29 @@ impl MenuSink for SunriseMenus<'_> {
 /// - followed by an open Sunrise refuses or a mod cancels (which leaves Sunrise's old window
 ///   as it was), it is closed right after that attempt, which itself changed nothing;
 /// - followed by no open, it is closed then.
-fn deliver_menu_effects(sink: &mut dyn MenuSink, effects: &[MenuEffect]) -> Vec<MenuApplied> {
+fn deliver_menu_effects(
+    sink: &mut dyn MenuSink,
+    effects: &[MenuEffect],
+    openings: &[Opening],
+) -> Vec<MenuApplied> {
     let mut applied = Vec::new();
     for (index, effect) in effects.iter().enumerate() {
         match effect {
             MenuEffect::Opened(open) => {
-                let attempt = sink.open(open);
+                let checked = openings
+                    .iter()
+                    .find(|opening| opening.container_id == open.container_id)
+                    .map(|opening| opening.data.clone())
+                    .unwrap_or_else(|| {
+                        Err("the menu's layout was not compared with its type's".to_owned())
+                    });
+                let attempt = match checked {
+                    Ok(data) => sink.open(open, data),
+                    Err(reason) => SunriseMenuAttempt::Refused {
+                        hook_tag: "sunrise#openModMenu:layout_unverified",
+                        reason: format!("openMenu: not opened: {reason}"),
+                    },
+                };
                 let replaced = matches!(attempt, SunriseMenuAttempt::Opened(_));
                 applied.push(MenuApplied::Opened {
                     container_id: open.container_id,
@@ -521,6 +645,12 @@ fn deliver_menu_effects(sink: &mut dyn MenuSink, effects: &[MenuEffect]) -> Vec<
             MenuEffect::Orphaned { container_id } => applied.push(MenuApplied::Orphaned {
                 container_id: *container_id,
             }),
+            MenuEffect::CounterAdvanced { container_id } => {
+                applied.push(MenuApplied::CounterAdvanced {
+                    container_id: *container_id,
+                    sunrise: sink.advance_counter(),
+                })
+            }
             MenuEffect::Closed { container_id } => {
                 // Carried out by (or after) the open that follows.
                 if matches!(effects.get(index + 1), Some(MenuEffect::Opened(_))) {
@@ -598,6 +728,22 @@ pub(crate) fn record_menu_outcome(jar: &mut LoadedJar, player_uuid: u128, applie
                 jar.row.id
             );
         }
+        MenuApplied::CounterAdvanced {
+            container_id,
+            sunrise,
+        } => {
+            if sunrise != Some(container_id) {
+                jar.host
+                    .note_unknown_game_hook("sunrise#nextContainerCounter:mismatch");
+                log::warn!(
+                    "{LOG}: {}: Java advanced the container counter to {container_id}, Sunrise to {sunrise:?}",
+                    jar.row.id
+                );
+            }
+            // Sunrise's counter is the `ServerPlayer`'s now.
+            jar.host
+                .server_player_container_opened(player_uuid, sunrise);
+        }
         MenuApplied::Shown(shown) => {
             // The jar holds a menu vanilla still has installed (its `removed` threw after the
             // close packet went out) while Sunrise shows no window for it.
@@ -629,27 +775,49 @@ pub(crate) fn menu_closed(
     player_uuid: u128,
     window: i32,
 ) {
+    // A player Sunrise can still read: the live close, with their facts.
+    if crate::live_menu::close_held(java, host, player_uuid, window) {
+        return;
+    }
     let closes = {
         let mut state = java.lock();
         run_menu_closes(&mut state, &*host, player_uuid, window)
     };
-    let delivered: Vec<(usize, String, Vec<MenuApplied>)> = closes
+    let delivered: Vec<(usize, String, Vec<MenuApplied>, Vec<&'static str>)> = closes
         .into_iter()
-        .map(|(index, id, effects)| {
-            let applied = apply_menu_effects(host, player_uuid, &effects);
-            (index, id, applied)
+        .map(|(index, id, effects, openings)| {
+            let applied = apply_menu_effects(host, player_uuid, &effects, &openings);
+            // A menu the `removed` opened shows what Java put in it, as a block use's does.
+            let contents = crate::live_menu::opened_window_contents(
+                &mut java.lock(),
+                &*host,
+                index,
+                &id,
+                player_uuid,
+                &applied,
+            );
+            let counted = contents
+                .map(|contents| crate::live_menu::show_contents(host, &id, player_uuid, contents))
+                .unwrap_or_default();
+            (index, id, applied, counted)
         })
         .collect();
-    if delivered.iter().all(|(_, _, applied)| applied.is_empty()) {
+    if delivered
+        .iter()
+        .all(|(_, _, applied, counted)| applied.is_empty() && counted.is_empty())
+    {
         return;
     }
     let mut state = java.lock();
-    for (index, id, applied) in delivered {
+    for (index, id, applied, counted) in delivered {
         let Some(jar) = state.jars.get_mut(index).filter(|jar| jar.row.id == id) else {
             continue;
         };
         for applied in applied {
             record_menu_outcome(jar, player_uuid, applied);
+        }
+        for tag in counted {
+            jar.host.note_unknown_game_hook(tag);
         }
     }
 }
@@ -661,7 +829,7 @@ fn run_menu_closes(
     host: &dyn ServerHost,
     player_uuid: u128,
     window: i32,
-) -> Vec<(usize, String, Vec<MenuEffect>)> {
+) -> Vec<(usize, String, Vec<MenuEffect>, Vec<Opening>)> {
     let holders: Vec<usize> = state
         .jars
         .iter()
@@ -739,7 +907,12 @@ fn run_menu_closes(
                         jar.row.id
                     );
                 }
-                effects.push((index, jar.row.id.clone(), outcome.menu_effects));
+                effects.push((
+                    index,
+                    jar.row.id.clone(),
+                    outcome.menu_effects,
+                    outcome.live_effects,
+                ));
             }
             Ok(Ok(None)) => {}
             Ok(Err(error)) => {
@@ -758,7 +931,24 @@ fn run_menu_closes(
             }
         }
     }
+    // A `removed` that opened another menu: checked against its type before its window opens,
+    // with the initial data its `initMenu` sent.
     effects
+        .into_iter()
+        .map(|(index, id, effects, live_effects)| {
+            let opens = effects
+                .iter()
+                .any(|effect| matches!(effect, MenuEffect::Opened(_)));
+            let openings = if opens {
+                crate::live_menu::opening_check(state, index, player_uuid, &live_effects)
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (index, id, effects, openings)
+        })
+        .collect()
 }
 
 /// `player_container_open`: a menu opened for the player (any opener). Its container id is the
@@ -788,6 +978,7 @@ fn try_open_sunrise_menu(
     host: &mut dyn ServerHost,
     player_uuid: u128,
     effect: &OpenMenuEffect,
+    data: Vec<i32>,
 ) -> SunriseMenuAttempt {
     let Some(menu_id) = effect.menu_type_id.as_deref() else {
         return SunriseMenuAttempt::Refused {
@@ -804,7 +995,7 @@ fn try_open_sunrise_menu(
             hook_tag: "sunrise#openModMenu:unregistered_menu_type",
             reason: format!(
                 "openMenu: menu type `{menu_id}` is not registered with Sunrise \
-                 (blockless/processing mod menus require upstream #4007/#4008)"
+                 (the bake declares a jar's menu types it can lay out exactly)"
             ),
         };
     };
@@ -837,9 +1028,10 @@ fn try_open_sunrise_menu(
         };
     };
 
-    // No opening bytes, no live data values (Decaf's menus declare none), no opening hand (a
-    // block opened it), and the old window closed first: `ModMenuOpen::new`'s defaults.
+    // No opening bytes and no opening hand (a block opened it), the Java menu's initial data
+    // slot values, and the old window closed first.
     let mut request = ModMenuOpen::new(menu_key, title_text);
+    request.data = data;
     request.pos = effect.access_pos;
     request.replace = MenuReplace::CloseFirst;
     let result = player_ref.open_mod_menu(host, request);
@@ -858,9 +1050,7 @@ fn classify_open_mod_menu_result(
         },
         Err(OpenMenuError::NotModMenu) => SunriseMenuAttempt::Refused {
             hook_tag: "sunrise#openModMenu:not_mod_menu",
-            reason: format!(
-                "openMenu: `{menu_id}` is not a Sunrise content mod menu (NotModMenu; #4007/#4008)"
-            ),
+            reason: format!("openMenu: `{menu_id}` is not a Sunrise content mod menu (NotModMenu)"),
         },
         Err(OpenMenuError::PlayerUnavailable) => SunriseMenuAttempt::Refused {
             hook_tag: "sunrise#openModMenu:player_unavailable",
@@ -869,6 +1059,10 @@ fn classify_open_mod_menu_result(
         Err(OpenMenuError::TooLarge) => SunriseMenuAttempt::Refused {
             hook_tag: "sunrise#openModMenu:extra_too_large",
             reason: format!("openMenu: extra menu payload too large for `{menu_id}`"),
+        },
+        Err(OpenMenuError::DataCountMismatch) => SunriseMenuAttempt::Refused {
+            hook_tag: "sunrise#openModMenu:data_count_mismatch",
+            reason: format!("openMenu: `{menu_id}` declares another number of data slots"),
         },
         Err(OpenMenuError::Title(error)) => SunriseMenuAttempt::Refused {
             hook_tag: "sunrise#openModMenu:title_error",
@@ -938,7 +1132,10 @@ mod tests {
             Ok(Some(Text::literal(json)))
         }
     }
-    mod_api::impl_host_areas!(BlockUseTestHost, except(block_states, keys, players, text));
+    mod_api::impl_host_areas!(
+        BlockUseTestHost,
+        except(block_states, keys, living, players, text)
+    );
 
     impl ServerHost for BlockUseTestHost {
         fn backend_mut(&mut self) -> Option<mod_api::BackendMutRef<'_>> {
@@ -963,12 +1160,63 @@ mod tests {
         fn player_is_spectator(&self, _player: PlayerRef) -> Option<bool> {
             Some(false)
         }
+        fn player_has_infinite_materials(&self, _player: PlayerRef) -> Option<bool> {
+            Some(false)
+        }
     }
-    /// The player has only their inventory menu open (container 0).
+    /// The player has only their inventory menu open (container 0), and opened five windows
+    /// before.
     impl mod_api::prelude::PlayerMenusBackend for BlockUseTestHost {
         fn player_container_menu(&self, player: PlayerRef) -> Option<mod_api::MenuRef> {
             (player.uuid() == self.player_uuid)
                 .then(|| mod_api::__private::game::menu_ref(player, 0, 1))
+        }
+        fn player_container_counter(&self, player: PlayerRef) -> Option<i32> {
+            (player.uuid() == self.player_uuid).then_some(5)
+        }
+    }
+    /// An empty inventory, the first hotbar slot selected.
+    impl mod_api::prelude::PlayerInventoryBackend for BlockUseTestHost {
+        fn player_selected_slot(&self, _player: PlayerRef) -> Option<usize> {
+            Some(0)
+        }
+        fn player_inventory_slots(
+            &self,
+            _player: PlayerRef,
+            read: &mut dyn for<'a> FnMut(mod_api::InventoryView<'a>),
+        ) -> Option<()> {
+            let metadata = |_slot: u32| None;
+            let project =
+                |_slot: u32, _: (mod_api::ItemKey, std::num::NonZeroU32, Option<u32>)| None;
+            read(mod_api::InventoryView::new(0..43, &metadata, &project));
+            Some(())
+        }
+    }
+    /// What the live-menu facts read of the player's body: no level, no living handle, so
+    /// only the inventory is known.
+    impl mod_api::prelude::EntitySightBackend for BlockUseTestHost {
+        fn entity_eye_position(&self, _entity: EntityRef) -> Option<[f64; 3]> {
+            None
+        }
+    }
+    impl mod_api::prelude::EntityLifetimeBackend for BlockUseTestHost {
+        fn entity_tick_count(&self, _entity: EntityRef) -> Option<i32> {
+            None
+        }
+    }
+    impl mod_api::prelude::EntityIdentityBackend for BlockUseTestHost {
+        fn entity_level(&self, _entity: EntityRef) -> Option<mod_api::LevelRef> {
+            None
+        }
+    }
+    impl mod_api::prelude::EntityPositionBackend for BlockUseTestHost {
+        fn entity_position(&self, _entity: EntityRef) -> Option<[f64; 3]> {
+            None
+        }
+    }
+    impl mod_api::prelude::LivingHost for BlockUseTestHost {
+        fn living(&self, _entity: EntityRef) -> Option<mod_api::LivingRef> {
+            None
         }
     }
     impl mod_api::prelude::MenusBackend for BlockUseTestHost {
@@ -981,7 +1229,12 @@ mod tests {
         BlockUseTestHost,
         except(
             player_session,
+            entity_identity,
+            entity_lifetime,
+            entity_position,
+            entity_sight,
             entity_stance,
+            player_inventory,
             player_modes,
             player_menus,
             menus
@@ -1135,6 +1388,7 @@ mod tests {
                 MenuEffect::Closed { container_id: 1 },
                 MenuEffect::Orphaned { container_id: 2 },
             ],
+            &[],
         );
         assert_eq!(
             applied,
@@ -1151,7 +1405,7 @@ mod tests {
                 MenuApplied::Shown(PlayerContainer::Inventory),
             ]
         );
-        assert!(apply_menu_effects(&mut host, uuid, &[]).is_empty());
+        assert!(apply_menu_effects(&mut host, uuid, &[], &[]).is_empty());
     }
 
     /// A Sunrise stand-in that records each call and opens or refuses as told.
@@ -1162,8 +1416,9 @@ mod tests {
     }
 
     impl MenuSink for RecordingSink {
-        fn open(&mut self, effect: &OpenMenuEffect) -> SunriseMenuAttempt {
-            self.calls.push(format!("open {}", effect.container_id));
+        fn open(&mut self, effect: &OpenMenuEffect, data: Vec<i32>) -> SunriseMenuAttempt {
+            self.calls
+                .push(format!("open {} data {data:?}", effect.container_id));
             if self.accept {
                 // `CloseFirst`: the shown window closes, then this one opens.
                 self.shown = PlayerContainer::Open(effect.container_id);
@@ -1187,6 +1442,11 @@ mod tests {
 
         fn shown(&mut self) -> PlayerContainer {
             self.shown
+        }
+
+        fn advance_counter(&mut self) -> Option<i32> {
+            self.calls.push("advance".to_owned());
+            None
         }
     }
 
@@ -1218,8 +1478,9 @@ mod tests {
         let applied = deliver_menu_effects(
             &mut sink,
             &[MenuEffect::Closed { container_id: 1 }, opened_effect(2)],
+            &[checked(2)],
         );
-        assert_eq!(sink.calls, ["open 2", "close 1"]);
+        assert_eq!(sink.calls, ["open 2 data [3]", "close 1"]);
         assert_eq!(
             applied,
             vec![
@@ -1251,8 +1512,9 @@ mod tests {
         let applied = deliver_menu_effects(
             &mut sink,
             &[MenuEffect::Closed { container_id: 1 }, opened_effect(2)],
+            &[checked(2)],
         );
-        assert_eq!(sink.calls, ["open 2"]);
+        assert_eq!(sink.calls, ["open 2 data [3]"]);
         assert_eq!(
             applied,
             vec![
@@ -1269,9 +1531,52 @@ mod tests {
             accept: true,
             shown: PlayerContainer::Open(2),
         };
-        deliver_menu_effects(&mut sink, &[MenuEffect::Closed { container_id: 2 }]);
+        deliver_menu_effects(&mut sink, &[MenuEffect::Closed { container_id: 2 }], &[]);
         assert_eq!(sink.calls, ["close 2"]);
         assert_eq!(sink.shown, PlayerContainer::Inventory);
+    }
+
+    /// A checked opening: the window opens with the menu's initial data slot values.
+    fn checked(container_id: i32) -> Opening {
+        Opening {
+            container_id,
+            data: Ok(vec![3]),
+        }
+    }
+
+    /// An open nothing checked (or whose check failed: a layout not its type's, data unknown) is
+    /// refused before Sunrise is asked, and the window it would have replaced still closes.
+    #[test]
+    fn an_unchecked_or_mismatched_open_is_refused_without_a_window() {
+        for openings in [
+            Vec::new(),
+            vec![Opening {
+                container_id: 2,
+                data: Err("the open menu's layout is not its type's declared one".to_owned()),
+            }],
+        ] {
+            let mut sink = RecordingSink {
+                calls: Vec::new(),
+                accept: true,
+                shown: PlayerContainer::Open(1),
+            };
+            let applied = deliver_menu_effects(
+                &mut sink,
+                &[MenuEffect::Closed { container_id: 1 }, opened_effect(2)],
+                &openings,
+            );
+            assert_eq!(sink.calls, ["close 1"]);
+            assert!(matches!(
+                &applied[0],
+                MenuApplied::Opened {
+                    container_id: 2,
+                    attempt: SunriseMenuAttempt::Refused {
+                        hook_tag: "sunrise#openModMenu:layout_unverified",
+                        ..
+                    },
+                }
+            ));
+        }
     }
 
     #[test]
@@ -1335,9 +1640,10 @@ mod tests {
         let item_answer = part.dispatch(&mut server_host, block_state, &click, true);
         assert_eq!(item_answer, Some(InteractionResult::TryWithEmptyHand));
 
-        // 2. use_without_item -> Consume. Java opened `runes:crafting` (only `initMenu` is
-        //    counted); Sunrise has no such content menu yet, so the named refusal is counted and
-        //    the jar stops holding the menu at once.
+        // 2. use_without_item -> Consume. Java opened `runes:crafting`, and its `initMenu` ran
+        //    exactly on the player Sunrise describes (an empty inventory); this host declares no
+        //    such content menu, so the named refusal is counted and the jar stops holding the
+        //    menu at once.
         let empty_answer = part.dispatch(&mut server_host, block_state, &click, false);
         assert_eq!(empty_answer, Some(InteractionResult::Consume));
         {
@@ -1345,10 +1651,7 @@ mod tests {
             let loaded = &guard.jars[0];
             assert_eq!(loaded.row.block_use.uses_ran, 2);
             assert_eq!(loaded.row.block_use.uses_failed, 0);
-            assert_eq!(
-                loaded.row.block_use.unknown_host_calls, 1,
-                "ServerPlayer.initMenu"
-            );
+            assert_eq!(loaded.row.block_use.unknown_host_calls, 0);
             assert_eq!(loaded.row.block_use.menus_opened, 0);
             assert_eq!(loaded.row.block_use.menus_refused, 1);
             let (reason, count) = loaded
@@ -1360,7 +1663,7 @@ mod tests {
                 .expect("one refusal");
             assert_eq!(*count, 1);
             assert!(
-                reason.contains("runes:crafting") && reason.contains("#4007/#4008"),
+                reason.contains("runes:crafting") && reason.contains("not registered with Sunrise"),
                 "unexpected refusal: {reason}"
             );
             assert!(loaded.host.player_open_menu(player_uuid).is_none());
@@ -1368,8 +1671,9 @@ mod tests {
         }
 
         // 3. N more right-clicks: every one refused, and still no menu held and no retain hold
-        //    left behind (#629 review P1 1). The counter is unknown after a refusal (Java
-        //    advanced it, Sunrise didn't), so each later open counts it.
+        //    left behind (#629 review P1 1). Java advanced its counter at each refusal while
+        //    Sunrise's didn't move, but each use starts from Sunrise's (`container_counter`), so
+        //    the counter is never unknown and `nextContainerCounter` never counts (#629's gap).
         for _ in 0..8 {
             let answer = part.dispatch(&mut server_host, block_state, &click, false);
             assert_eq!(answer, Some(InteractionResult::Consume));
@@ -1379,16 +1683,14 @@ mod tests {
         assert_eq!(loaded.row.block_use.menus_refused, 9);
         assert!(loaded.host.player_open_menu(player_uuid).is_none());
         assert_eq!(loaded.host.retained_count(), baseline);
+        assert_eq!(loaded.row.block_use.unknown_host_calls, 0);
         assert_eq!(
             loaded
                 .host
                 .unknown_host_calls()
                 .into_iter()
                 .find(|(key, _)| key.ends_with("#nextContainerCounter()V")),
-            Some((
-                "net/minecraft/server/level/ServerPlayer#nextContainerCounter()V".to_owned(),
-                8
-            ))
+            None
         );
     }
 }

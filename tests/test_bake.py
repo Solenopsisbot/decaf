@@ -125,6 +125,39 @@ class BakeTests(unittest.TestCase):
         report = BAKE_MODULE.bake_directory(self.mods, self.game, probe=self.probe)
         return report.as_json()
 
+    def test_menu_types_bake_into_sunrise_menu_declarations(self):
+        """A jar's own menu types become `data/<ns>/sunrise/menu/<path>.json` beside its blocks
+        and items (the live-menu bridge opens them as Sunrise owned menus); a menu type sharing a
+        block's id is its own declaration; one whose layout the runtime can't declare is left
+        out with the runtime's reason."""
+        layout = {"slots": 3, "owned_slots": [99, 99, 99], "inputs": [0, 1], "player_inventory": True}
+        report_text = json.loads(declarations())
+        report_text["content"]["menus"] = [
+            {"id": "ruby_mod:ruby_block", "file": layout},
+        ]
+        report_text["content"]["menu_refusals"] = [
+            {"id": "ruby_mod:odd", "reason": "slot 0 is a ruby_mod/OddSlot"},
+        ]
+        self.probe = fake_probe(self.root, json.dumps(report_text))
+        make_jar(self.mods / "ruby_mod.jar", ruby_jar())
+        report = self.bake()
+
+        package = self.game / "sunrise-mods" / "ruby_mod.smod"
+        with zipfile.ZipFile(package) as archive:
+            names = archive.namelist()
+            menu = archive.read("data/ruby_mod/sunrise/menu/ruby_block.json")
+        self.assertIn("data/ruby_mod/sunrise/block/ruby_block.json", names)
+        self.assertEqual(
+            menu,
+            b'{"inputs":[0,1],"owned_slots":[99,99,99],"player_inventory":true,"slots":3}\n',
+        )
+        self.assertNotIn("data/ruby_mod/sunrise/menu/odd.json", names)
+        skipped = {entry["reason"]: entry["paths"] for entry in report["jars"][0]["skipped"]}
+        self.assertEqual(
+            skipped["menu type whose layout is not a declaration: slot 0 is a ruby_mod/OddSlot"],
+            ["ruby_mod:odd"],
+        )
+
     def test_assets_data_and_declarations_bake_into_the_namespace_package(self):
         make_jar(self.mods / "ruby_mod.jar", ruby_jar())
         report = self.bake()

@@ -212,8 +212,10 @@ mod list_equality;
 mod live_menu;
 mod map_compute;
 mod menu_models;
+mod menu_structure;
 pub use live_menu::{
-    ContainerInput, LiveMenuEffect, LiveMenuOutcome, MenuClick, MenuPlayerFacts, Prediction,
+    ContainerInput, LiveMenuEffect, LiveMenuOutcome, MenuClick, MenuLayout, MenuPlayerFacts,
+    MenuSlotRole, MenuTypeDeclaration, Prediction,
 };
 mod method_handles;
 mod mixin_class_loading;
@@ -8419,6 +8421,9 @@ impl Host for StdHost {
     fn menu_field(&mut self, receiver: &Value, r: &MethodRef) -> Option<Value> {
         if jar_object::spells_key(receiver) {
             return None;
+        }
+        if let Some(value) = live_menu::player_field(self, receiver, r) {
+            return Some(value);
         }
         menu_models::field(&self.menu_states, receiver, r)
     }

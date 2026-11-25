@@ -14,7 +14,14 @@ javac -XDignore.symbol.file -cp "$CP" -d out demo/*.java oracle/demo/Types.java 
 java -cp "out:$CP" LiveMenuOracle script.txt | sed 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' > java25.txt
 java -cp "out:$CP" CaptureItemHooks | sed 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' \
   > ../../../src/live_menu_item_hooks_java25.txt
+java -cp "out:$CP" MenuLayoutOracle | sed 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' \
+  | grep -E '^(slot|data_slots)' > layout_java25.txt
 ```
+
+`layout_java25.txt` is the layout of the menu the bench's `MenuType` supplier builds
+(`new BenchMenu(id, inventory)`): each slot's class, its container's class, its container slot and
+`Slot.getMaxStackSize()`, then the data slot count. `menu_type_declaration_is_the_java25_layout`
+checks `NativeJar::menu_type_declarations` against it.
 
 `types/Types.java` builds the menu's `MenuType` for the Decaf fixture; the plain server jar keeps
 that constructor private (Fabric's access widener opens it for mods), so the oracle compiles

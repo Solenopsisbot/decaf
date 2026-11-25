@@ -156,6 +156,8 @@ pub struct MenuPlayerFacts {
     pub instabuild: Option<bool>,
     /// `Entity.getEyePosition()`, for `Player.isWithinBlockInteractionRange`.
     pub eye_position: Option<[f64; 3]>,
+    /// `Entity.position()`: what the player's `getX()`, `getY()` and `getZ()` answer.
+    pub position: Option<[f64; 3]>,
     /// `Player.blockInteractionRange()` (the `minecraft:block_interaction_range` attribute).
     pub block_interaction_range: Option<f64>,
     /// The block at the menu's `ContainerLevelAccess` position (`Level.getBlockState`), as a
@@ -168,6 +170,15 @@ pub struct MenuPlayerFacts {
     pub disconnected: bool,
     /// `LivingEntity.isDeadOrDying()`.
     pub dead: bool,
+    /// The player's `Entity.tickCount`. A jar's `getfield tickCount` on the live player (the
+    /// field `Entity` declares, read through any class of the player's hierarchy) answers it;
+    /// `None` leaves that read counted.
+    pub tick_count: Option<i32>,
+    /// The held menu's cursor as the embedder shows it (`AbstractContainerMenu.carried`), when
+    /// the embedder moved it itself: e.g. a window close that already put the cursor stack back
+    /// into the inventory before the menu's `removed` runs. The call then starts from this
+    /// stack (an unchanged stack keeps its Java object). `None` keeps the menu's own.
+    pub carried: Option<Value>,
 }
 
 /// What a live-menu call did, in bytecode order, for the embedder to carry out.
@@ -240,6 +251,11 @@ pub enum LiveMenuEffect {
     /// `ServerPlayer.closeContainer()` (from a tick whose `stillValid` failed) sent the client
     /// `ClientboundContainerClosePacket(containerId)`.
     Closed { container_id: i32 },
+    /// `Slot.onTake(player, stack)` ran on menu slot `slot` (`Slot.index`; `None` for a jar
+    /// `Slot` Decaf keeps no state for), once per call (a vanilla body's, a jar method's on a
+    /// vanilla slot, or a jar override `vcall` dispatched to): the moment an embedder's own take
+    /// notice (Sunrise's `menu_slot_take`) is heard. Nothing is sent for it.
+    SlotTaken { slot: Option<i32> },
 }
 
 /// A click the client sent for the menu it shows: `ServerboundContainerClickPacket`.
@@ -1004,7 +1020,22 @@ fn vcall<H: Host>(
     let op = if site == Site::Interface { 0xb9 } else { 0xb6 };
     let before = rt.host.counted_unknown_calls();
     if let Some(body_owner) = rt.jvm_selected_jar_body(&r, op, Some(receiver))? {
-        let value = rt.invoke(&body_owner, name, descriptor, Some(receiver.clone()), args)?;
+        // A jar `Slot.onTake` override is a take, told once: its own direct `super.onTake`,
+        // which runs in the override's frame (one deeper than this call), isn't told again.
+        let take = owner == SLOT && name == "onTake" && descriptor == D_PLAYER_STACK_V;
+        if take {
+            note_take(rt, receiver)?;
+            let frame = rt.depth + 1;
+            std_host(rt)?
+                .block_use
+                .taking
+                .push((receiver.clone(), frame));
+        }
+        let value = rt.invoke(&body_owner, name, descriptor, Some(receiver.clone()), args);
+        if take && let Some(host) = rt.host.as_std_host_mut() {
+            host.block_use.taking.pop();
+        }
+        let value = value?;
         if rt.host.counted_unknown_calls() != before {
             return Err(counted());
         }
@@ -1489,6 +1520,7 @@ fn run<H: Host>(rt: &mut Runtime<'_, H>, body: Body, this: &Value, args: &[Value
         SlotOnTake => {
             #[inline(never)]
             fn arm(rt: &mut Runtime<'_, impl Host>, this: &Value, _args: &[Value]) -> R<Value> {
+                note_take(rt, this)?;
                 // 26.3 `Slot.onTake` offsets 0-4: `setChanged()`.
                 vcall(rt, Site::Virtual, SLOT, "setChanged", "()V", this, &[])?;
                 Ok(Value::Void)
@@ -1630,6 +1662,7 @@ fn run<H: Host>(rt: &mut Runtime<'_, H>, body: Body, this: &Value, args: &[Value
         ResultSlotOnTake => {
             #[inline(never)]
             fn arm(rt: &mut Runtime<'_, impl Host>, this: &Value, args: &[Value]) -> R<Value> {
+                note_take(rt, this)?;
                 // 26.3 `ItemCombinerMenu$3.onTake` offsets 0-9: `this$0.onTake(player, stack)`.
                 let menu = slot_menu(rt, this)?;
                 vcall(
@@ -2360,6 +2393,32 @@ fn facts(rt: &mut Runtime<'_, impl Host>) -> R<MenuPlayerFacts> {
     with_active(rt, |active| active.facts.clone().ok_or_else(counted))
 }
 
+/// The classes a jar can name the server player's `tickCount` through: `Entity` declares the
+/// field (`public int tickCount`, `server-26.3.jar`), and javac names the static type of the
+/// receiver expression, so a Mixin on `Player` reads `getfield Player.tickCount:I`.
+const TICK_COUNT_OWNERS: &[&str] = &[
+    "net/minecraft/world/entity/Entity",
+    "net/minecraft/world/entity/LivingEntity",
+    "net/minecraft/world/entity/Avatar",
+    "net/minecraft/world/entity/player/Player",
+    SERVER_PLAYER,
+];
+
+/// A `getfield` on the server player of the running block use or live-menu call that the
+/// embedder's facts answer: `Entity.tickCount` ([`MenuPlayerFacts::tick_count`]). `None`
+/// leaves the read to the host's ordinary (counted) path.
+#[inline(never)]
+pub(crate) fn player_field(host: &StdHost, receiver: &Value, r: &MethodRef) -> Option<Value> {
+    if r.name != "tickCount" || r.descriptor != "I" || !TICK_COUNT_OWNERS.contains(&&*r.owner) {
+        return None;
+    }
+    let active = host.block_use.active_use.as_ref()?;
+    if active.side != BlockUseSide::Server || *receiver != active.player {
+        return None;
+    }
+    active.facts.as_ref()?.tick_count.map(Value::Int)
+}
+
 /// `Player.hasInfiniteMaterials()`: `abilities.instabuild`.
 fn has_infinite_materials(rt: &mut Runtime<'_, impl Host>, player: &Value) -> R<bool> {
     server_player(rt, player)?;
@@ -2494,12 +2553,42 @@ fn slot_set_changed(rt: &mut Runtime<'_, impl Host>, slot: &Value) -> R<()> {
     vcall(rt, Site::Virtual, SLOT, "setChanged", "()V", slot, &[]).map(drop)
 }
 
+/// `Slot.onTake` began on `slot`: report the take ([`LiveMenuEffect::SlotTaken`]) unless it is
+/// the direct `super.onTake` of a jar override already reported: the vanilla body running on
+/// that slot in the override's own frame (`BlockUseHostState::taking`). Any other `onTake`
+/// inside the override is a take of its own and is told: one on another slot, or the override
+/// taking from its own slot again (a nested `onTake` runs in a deeper frame, so its
+/// `super.onTake` is told). Every vanilla body's take, and a jar
+/// method's `slot.onTake(...)` on a vanilla slot, reaches the vanilla arms; a jar override is
+/// reported where `vcall` dispatches to it. (A jar override a jar method calls directly runs in
+/// the interpreter and is not seen here; a menu with a jar `Slot` class gets no Sunrise
+/// declaration, so the bridge never shows one.)
+fn note_take(rt: &mut Runtime<'_, impl Host>, slot: &Value) -> R<()> {
+    let depth = rt.depth;
+    let super_call = std_host(rt)?
+        .block_use
+        .taking
+        .iter()
+        .any(|(taking, frame)| taking == slot && *frame == depth);
+    if super_call {
+        return Ok(());
+    }
+    // No active call (a jar calling `onTake` outside one): nothing to tell.
+    if std_host(rt)?.block_use.active_use.is_none() {
+        return Ok(());
+    }
+    let index = slot_index(rt, slot).ok();
+    record(rt, LiveMenuEffect::SlotTaken { slot: index })
+}
+
 fn slot_on_take(
     rt: &mut Runtime<'_, impl Host>,
     slot: &Value,
     player: &Value,
     stack: &Value,
 ) -> R<()> {
+    // The take is reported where `onTake` runs (`note_take`): in the vanilla bodies' arms, or
+    // at `vcall`'s dispatch to a jar override.
     vcall(
         rt,
         Site::Virtual,
@@ -5751,6 +5840,12 @@ impl NativeJar {
         let level = game_object::server_value(format!("game/level/{dimension}"));
         let player_value = block_use::server_player_value(player);
         fill_inventory(host, &inventory, facts);
+        // The embedder's cursor, when it moved the stack itself (a close that already put it
+        // back into the inventory): whether a non-empty Java cursor was replaced.
+        let carried_replaced = facts
+            .carried
+            .as_ref()
+            .is_some_and(|carried| replace_carried(host, &menu, carried));
         // The block at the menu's access position, for `stillValid`'s `getBlockState`.
         let block = access_pos.and_then(|pos| {
             let (id, properties) = facts.access_block.as_ref()?;
@@ -5788,6 +5883,19 @@ impl NativeJar {
         }
         let mut handled = false;
         let call_result = self.with_persistent_runtime_with_budget(host, &roots, budget, |rt| {
+            // A close whose cursor the embedder already put back: vanilla's `removed` would put
+            // it back itself (`AbstractContainerMenu.removed` offsets 0-38), which the embedder
+            // did, so the menu's own `removed` is exact. A jar `removed` override could read the
+            // cursor before `super.removed` and see it empty where Java's would not: counted.
+            if closing
+                && carried_replaced
+                && rt
+                    .jvm_selected_jar_body(&mref(ACM, "removed", D_PLAYER_V), 0xb6, Some(&menu))?
+                    .is_some()
+            {
+                rt.host
+                    .unknown_operand_call(&mref(SERVER_PLAYER, "doCloseContainer", "()V"))?;
+            }
             handled = run_call(rt, &menu, &player_value, call)?;
             Ok(Value::Void)
         });
@@ -5822,6 +5930,303 @@ impl NativeJar {
             failure: call_result.err().map(|error| error.to_string()),
         }))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Menu-type declarations (the layout an embedder's menu type needs)
+// ---------------------------------------------------------------------------
+
+/// The size `Container.getMaxStackSize()` answers (`server-26.3.jar`: `bipush 99`), which
+/// `SimpleContainer`, `ResultContainer` and the combiner's anonymous containers inherit, and
+/// which `Slot.getMaxStackSize()` returns for each of their slots.
+const CONTAINER_MAX_STACK_SIZE: i64 = 99;
+
+/// What one menu slot shows, as an embedder lays a menu type out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuSlotRole {
+    /// A slot of the menu's own vanilla container (`SimpleContainer`, `ResultContainer`, the
+    /// combiner's), holding `Slot.getMaxStackSize()` (99); `input` for a combiner input slot
+    /// (`ItemCombinerMenu$2`).
+    Owned { input: bool },
+    /// The player's `Inventory` slot `.0`.
+    Player(i32),
+}
+
+/// A menu's slot layout and data slot count, for a menu type's declaration or a live menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MenuLayout {
+    pub slots: Vec<MenuSlotRole>,
+    pub data_slots: usize,
+}
+
+impl MenuLayout {
+    /// The menu's own slots (the owned ones come first).
+    pub fn owned_slots(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|role| matches!(role, MenuSlotRole::Owned { .. }))
+            .count()
+    }
+
+    /// As a Sunrise content menu declaration (`data/<ns>/sunrise/menu/<path>.json`): one owned
+    /// slot per container slot, the standard player group when the menu has it, the combiner's
+    /// input slots as `inputs`, and the data slots. No `results`: a declared result makes Sunrise
+    /// return the inputs itself on close, where the Java menu's own `removed` decides that.
+    pub fn declaration(&self) -> serde_json::Value {
+        let owned = self.owned_slots();
+        let inputs: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, role)| matches!(role, MenuSlotRole::Owned { input: true }))
+            .map(|(index, _)| index)
+            .collect();
+        let mut file = serde_json::Map::new();
+        file.insert("slots".into(), owned.into());
+        if owned > 0 {
+            file.insert(
+                "owned_slots".into(),
+                vec![CONTAINER_MAX_STACK_SIZE; owned].into(),
+            );
+        }
+        if !inputs.is_empty() {
+            file.insert("inputs".into(), inputs.into());
+        }
+        file.insert("player_inventory".into(), (self.slots.len() > owned).into());
+        if self.data_slots > 0 {
+            file.insert("data_slots".into(), self.data_slots.into());
+        }
+        serde_json::Value::Object(file)
+    }
+}
+
+/// One `MenuType` a jar registered, as an embedder needs to declare it before any menu opens:
+/// the layout every menu its `MenuSupplier` builds has.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuTypeDeclaration {
+    /// The registry id (`minecraft:menu`).
+    pub id: String,
+    /// The layout ([`MenuLayout::declaration`] is its Sunrise file), or why it can't be declared.
+    pub layout: Result<MenuLayout, String>,
+}
+
+/// Classify a built `menu`'s slots, whose player slots show `inventory`. Exact only for vanilla
+/// slot and container classes (`Slot` and the combiner's own, `SimpleContainer`,
+/// `ResultContainer`): a jar `Slot` or `Container` can answer its own stack size and rules. The
+/// container slots come first, then the player's 36 in `addStandardInventorySlots` order (27
+/// main, then the hotbar), the order Sunrise appends them in, so a Java slot index is the
+/// embedder's slot index.
+fn classify_layout(host: &StdHost, menu: &Value, inventory: &Value) -> Result<MenuLayout, String> {
+    let Some(menu_models::Object::Menu(state)) =
+        expect_ref(menu).and_then(|key| host.menu_states.get(key))
+    else {
+        return Err("its menu is not one Decaf models".to_owned());
+    };
+    let data_slots = state.live.data_slots.len();
+    let slots = menu_models::menu_broadcast_slots(&host.menu_states, menu)
+        .ok_or_else(|| "its slots are not ones Decaf models".to_owned())?;
+    let mut roles = Vec::with_capacity(slots.len());
+    let mut player = Vec::new();
+    let mut storages = std::collections::BTreeSet::new();
+    for slot in &slots {
+        let slot_class = jar_object::object_class(&slot.slot).unwrap_or("?");
+        if !matches!(slot_class, SLOT | ICM_INPUT_SLOT | ICM_RESULT_SLOT) {
+            return Err(format!(
+                "slot {} is a {slot_class}, whose own rules a declaration can't carry",
+                slot.index
+            ));
+        }
+        if slot.container == *inventory {
+            player.push(slot.container_slot);
+            roles.push(MenuSlotRole::Player(slot.container_slot));
+            continue;
+        }
+        if !player.is_empty() {
+            return Err(format!(
+                "container slot {} comes after player inventory slots",
+                slot.index
+            ));
+        }
+        let container_class = jar_object::object_class(&slot.container).unwrap_or("?");
+        if !matches!(
+            container_class,
+            SIMPLE_CONTAINER | RESULT_CONTAINER | ICM_INPUT_CONTAINER | ICM_RESULT_CONTAINER
+        ) {
+            return Err(format!(
+                "slot {} shows a {container_class}, whose stack size a declaration can't carry",
+                slot.index
+            ));
+        }
+        if !storages.insert((format!("{:?}", slot.container), slot.container_slot)) {
+            return Err(format!(
+                "slot {} shows storage another slot already shows",
+                slot.index
+            ));
+        }
+        roles.push(MenuSlotRole::Owned {
+            input: slot_class == ICM_INPUT_SLOT,
+        });
+    }
+    let standard: Vec<i32> = (9..36).chain(0..9).collect();
+    if !player.is_empty() && player != standard {
+        return Err("its player slots are not vanilla's 27 main slots then the hotbar".to_owned());
+    }
+    Ok(MenuLayout {
+        slots: roles,
+        data_slots,
+    })
+}
+
+impl StdHost {
+    /// The layout of the Java menu Decaf holds for `uuid` (what [`MenuLayout::declaration`]
+    /// declares for a menu type), read from Decaf's own state: an embedder compares it with the
+    /// menu type it declared before showing the menu. `Err` when no menu is held or its layout
+    /// isn't one a declaration carries.
+    pub fn held_menu_layout(&self, uuid: u128) -> Result<MenuLayout, String> {
+        let entry = self
+            .block_use
+            .players
+            .get(&uuid)
+            .ok_or_else(|| "no menu is held".to_owned())?;
+        let open = entry
+            .open
+            .as_ref()
+            .ok_or_else(|| "no menu is held".to_owned())?;
+        let inventory = entry
+            .inventory
+            .as_ref()
+            .ok_or_else(|| "the menu's inventory is unknown".to_owned())?;
+        classify_layout(self, &open.menu, inventory)
+    }
+}
+
+impl NativeJar {
+    /// Each `MenuType` the jar registered under its own namespace, with the layout every menu its
+    /// `MenuSupplier` builds has: declared only when `menu_structure` proves from the bytecode that
+    /// the layout can't depend on the player, inventory, level or static state, and then read
+    /// off one construction (`MenuType.create(0, inventory)`, as a server player's). Every other
+    /// type gets the reason it can't be declared, never a guessed layout.
+    pub fn menu_type_declarations(&self, host: &mut StdHost) -> Vec<MenuTypeDeclaration> {
+        let types: Vec<(String, Value)> = host
+            .registrations()
+            .iter()
+            .filter(|entry| entry.registry == "minecraft:menu")
+            .filter(|entry| !entry.id.starts_with("minecraft:"))
+            .map(|entry| (entry.id.clone(), entry.value.clone()))
+            .collect();
+        types
+            .into_iter()
+            .map(|(id, menu_type)| MenuTypeDeclaration {
+                layout: self.menu_type_layout(host, menu_type),
+                id,
+            })
+            .collect()
+    }
+
+    fn menu_type_layout(&self, host: &mut StdHost, menu_type: Value) -> Result<MenuLayout, String> {
+        let before = host.unknown_host_call_count();
+        let (menu, inventory) = self.build_menu_for_declaration(host, menu_type)?;
+        if host.unknown_host_call_count() != before {
+            return Err("building its menu leaned on an unmodelled call".to_owned());
+        }
+        if menu == Value::Ref(None) {
+            return Err("its MenuSupplier returned null".to_owned());
+        }
+        classify_layout(host, &menu, &inventory)
+    }
+
+    /// `MenuType.create(0, inventory)` (26.3 offsets 0-11: the type's `MenuSupplier`) for a
+    /// server player of no one in particular, in the overworld, once `menu_structure` found its
+    /// layout fixed: the menu and the `Inventory` its player slots show. A server player's, since
+    /// that is the menu the live-menu bridge runs and a constructor may read
+    /// `inventory.player.level()` (Runes' does), which only the server side of a block use
+    /// answers here.
+    fn build_menu_for_declaration(
+        &self,
+        host: &mut StdHost,
+        menu_type: Value,
+    ) -> Result<(Value, Value), String> {
+        let player_data = BlockUsePlayerData {
+            uuid: 0,
+            name: "Player".to_owned(),
+            entity_id: None,
+            incarnation: None,
+            container: PlayerContainer::Inventory,
+            sneaking: false,
+            spectator: false,
+            main_hand: None,
+            off_hand: None,
+        };
+        let dimension = "minecraft:overworld";
+        let level = game_object::server_value(format!("game/level/{dimension}"));
+        let player = block_use::server_player_value(&player_data);
+        let inventory = menu_models::allocate_inventory(
+            &mut host.menu_states,
+            &mut host.next_menu_object,
+            player.clone(),
+        );
+        let previous_active = host.block_use.active_use.replace(ActiveBlockUse {
+            side: BlockUseSide::Server,
+            dimension: dimension.to_owned(),
+            level: level.clone(),
+            block: None,
+            player: player.clone(),
+            player_data,
+            player_inventory: inventory.clone(),
+            container: PlayerContainer::Inventory,
+            menu_effects: Vec::new(),
+            facts: None,
+            live_effects: Vec::new(),
+        });
+        let roots = [menu_type.clone(), level, player, inventory.clone()];
+        let mut refusal = None;
+        let built = self.with_persistent_runtime(host, &roots, |runtime| {
+            if let Err(reason) = crate::runtime::menu_structure::check(runtime, &menu_type) {
+                refusal = Some(reason);
+                return Ok(Value::Ref(None));
+            }
+            let create = mref(
+                menu_models::MENU_TYPE,
+                "create",
+                "(ILnet/minecraft/world/entity/player/Inventory;)Lnet/minecraft/world/inventory/AbstractContainerMenu;",
+            );
+            runtime
+                .invoke_menu_model(&create, &menu_type, &[Value::Int(0), inventory.clone()])?
+                .ok_or_else(|| {
+                    NativeError::Metadata("MenuType was not constructed with a MenuSupplier".into())
+                })
+        });
+        host.block_use.active_use = previous_active;
+        if let Some(reason) = refusal {
+            return Err(reason);
+        }
+        let menu =
+            built.map_err(|error| format!("its MenuSupplier did not build a menu: {error}"))?;
+        Ok((menu, inventory))
+    }
+}
+
+/// Start the held `menu` from the embedder's cursor `carried` ([`MenuPlayerFacts::carried`]): a
+/// stack equal to the menu's own keeps the menu's Java object. Answers whether a non-empty
+/// cursor was replaced by a different stack.
+fn replace_carried(host: &mut StdHost, menu: &Value, carried: &Value) -> bool {
+    let Some(key) = expect_ref(menu).cloned() else {
+        return false;
+    };
+    let old = match host.menu_states.get(&key) {
+        Some(menu_models::Object::Menu(state)) => state.live.carried.clone(),
+        _ => return false,
+    };
+    if same_stack(host, &old, carried) {
+        return false;
+    }
+    // An opaque or unmodelled old cursor counts as non-empty: it may have held something.
+    let old_non_empty =
+        recipe_models::extract_stack_components(host, &old).is_none_or(|stack| stack.count > 0);
+    if let Some(menu_models::Object::Menu(state)) = host.menu_states.get_mut(&key) {
+        state.live.carried = carried.clone();
+    }
+    old_non_empty
 }
 
 /// The held menu's carried stack and slot contents, read from Decaf's own state (a slot or

@@ -1041,7 +1041,9 @@ fn block_use_counts_unmodelled_calls_and_unmodelled_superclasses() {
     assert_eq!(plain.unknown_host_call_count, 0);
     assert_eq!(plain.result, Some(InteractionResultValue::Pass));
 
-    // 4. Null provider or provider.createMenu returning null returns OptionalInt.empty() with 0 effects & 0 unknowns.
+    // 4. A null provider returns OptionalInt.empty() before anything (offsets 0-7); a
+    //    `createMenu` returning null does too, after advancing the counter (offsets 23-73), which
+    //    is its one effect (`CounterAdvanced`, for the embedder's counter). 0 unknowns.
     let null_menu = fixture
         .jar
         .block_use_without_item(
@@ -1050,7 +1052,14 @@ fn block_use_counts_unmodelled_calls_and_unmodelled_superclasses() {
         )
         .unwrap();
     assert_eq!(null_menu.unknown_host_call_count, 0);
-    assert!(null_menu.menu_effects.is_empty());
+    assert!(
+        matches!(
+            null_menu.menu_effects.as_slice(),
+            [MenuEffect::CounterAdvanced { .. }]
+        ),
+        "{:?}",
+        null_menu.menu_effects
+    );
     assert_eq!(null_menu.result, Some(InteractionResultValue::Pass));
 }
 
@@ -1758,6 +1767,7 @@ fn effect_trace(effects: &[MenuEffect]) -> Vec<String> {
             MenuEffect::Closed { container_id } => format!("C{container_id}"),
             MenuEffect::Opened(open) => format!("O{}", open.container_id),
             MenuEffect::Orphaned { container_id } => format!("X{container_id}"),
+            MenuEffect::CounterAdvanced { container_id } => format!("A{container_id}"),
         })
         .collect()
 }

@@ -544,6 +544,31 @@ pub(crate) fn register_block_parts(
             attached.len()
         );
     }
+    // Each menu type a jar registered: its clicks run the Java menu (`live_menu.rs`). The bake
+    // declares the Sunrise menu type from the same registration; a type Sunrise doesn't know is
+    // never opened, so its part is never asked.
+    let mut menus = BTreeSet::new();
+    for jar in &guard.jars {
+        for entry in jar.host.registrations() {
+            if entry.registry != "minecraft:menu" {
+                continue;
+            }
+            let id = entry.id.as_str();
+            if !usable_id(id) || !(owns(&owned, id) || owns_assets(context, id)) {
+                continue;
+            }
+            if !menus.insert(id.to_owned()) {
+                continue;
+            }
+            registrar.menu_part(id, crate::live_menu::JavaMenuPart::new(Arc::clone(state)));
+        }
+    }
+    if !menus.is_empty() {
+        log::info!(
+            "{LOG}: attached the Java live-menu part to {} menu type(s)",
+            menus.len()
+        );
+    }
 }
 
 /// Whether an installed content package owns the id's namespace, and so supplies that content's

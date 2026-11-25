@@ -290,6 +290,11 @@ pub enum MenuEffect {
     /// assignment: vanilla's server forgets it with no `removed` and no close packet, while the
     /// client still shows its window.
     Orphaned { container_id: i32 },
+    /// `ServerPlayer.openMenu` advanced `containerCounter` to `container_id`
+    /// (`nextContainerCounter`, offsets 23-24) and the provider's `createMenu` answered `null`
+    /// (offsets 43-73): no window opens, but the next menu takes the id after this one. The
+    /// embedder advances its own counter the same way.
+    CounterAdvanced { container_id: i32 },
 }
 
 /// Result of running a block's `useItemOn` or `useWithoutItem` hook.
@@ -322,7 +327,9 @@ impl BlockUseOutcome {
     pub fn open_menus(&self) -> impl Iterator<Item = &OpenMenuEffect> {
         self.menu_effects.iter().filter_map(|effect| match effect {
             MenuEffect::Opened(open) => Some(open),
-            MenuEffect::Closed { .. } | MenuEffect::Orphaned { .. } => None,
+            MenuEffect::Closed { .. }
+            | MenuEffect::Orphaned { .. }
+            | MenuEffect::CounterAdvanced { .. } => None,
         })
     }
 }
@@ -334,6 +341,10 @@ pub struct MenuCloseOutcome {
     pub container_id: i32,
     /// What its `removed` did to the player's menus, in order: a `removed` may open another.
     pub menu_effects: Vec<MenuEffect>,
+    /// What its `removed` did in the order it did it, as a block use's
+    /// [`BlockUseOutcome::live_effects`]: a menu it opened sent its initial data
+    /// (`LiveMenuEffect::InitialData`) here.
+    pub live_effects: Vec<crate::runtime::live_menu::LiveMenuEffect>,
     /// Unmodelled host calls its close made.
     pub unknown_host_calls: BTreeMap<String, usize>,
     pub unknown_host_call_count: usize,
@@ -413,6 +424,10 @@ pub(crate) struct BlockUseHostState {
     /// Each player's current `ServerPlayer` object's menu state, by UUID. At most one entry
     /// (and so at most one held menu) per player: a newer object's entry replaces an older's.
     pub(crate) players: BTreeMap<u128, PlayerMenus>,
+    /// The slots whose jar `Slot.onTake` override `vcall` dispatched and is running, with the
+    /// interpreter depth of the override's frame, so its direct `super.onTake` (run in that
+    /// frame) isn't told as a second take, while a nested take is (`live_menu::note_take`).
+    pub(crate) taking: Vec<(Value, usize)>,
     pub(crate) next_id: u64,
     /// What the embedder told Decaf of each player for their next block use
     /// ([`StdHost::set_player_menu_facts`]).
@@ -498,6 +513,9 @@ impl BlockUseHostState {
         }
         // A held menu (`PlayerMenus::open`) is kept through `StdHost::retain`, so only the
         // running call's own values are roots here.
+        for (slot, _) in &self.taking {
+            push_val(slot, out);
+        }
         if let Some(active) = &self.active_use {
             push_val(&active.level, out);
             if let Some((state, _)) = &active.block {
@@ -1596,6 +1614,19 @@ fn active_player_call(
             Ok(Value::Int(i32::from(p.sneaking)))
         }
         ("isSpectator", "()Z") => Ok(Value::Int(i32::from(p.spectator))),
+        // `Entity.getX/getY/getZ()` (final: `position.x` / `.y` / `.z`), from the embedder's
+        // facts for a live player; unknown without them.
+        ("getX" | "getY" | "getZ", "()D") => {
+            let axis = match r.name.as_str() {
+                "getX" => 0,
+                "getY" => 1,
+                _ => 2,
+            };
+            match active.facts.as_ref().and_then(|facts| facts.position) {
+                Some(position) => Ok(Value::Float(position[axis])),
+                None => host.unknown_host_call(r),
+            }
+        }
         ("getMainHandItem", "()Lnet/minecraft/world/item/ItemStack;") => match &p.main_hand {
             Some(stack) => Ok(stack.clone()),
             None => host.unknown_host_call(r),
@@ -1902,6 +1933,17 @@ fn invoke_player_open_menu<H: Host>(
         &[Value::Int(container_id), inventory, receiver.clone()],
     )?;
     if menu == Value::Ref(None) {
+        // The counter moved all the same: the embedder's must too, or the next window's id
+        // drifts from the one Java hands the next `createMenu`.
+        if let Some(active) = runtime
+            .host
+            .as_std_host_mut()
+            .and_then(|host| host.block_use.active_use.as_mut())
+        {
+            active
+                .menu_effects
+                .push(MenuEffect::CounterAdvanced { container_id });
+        }
         if spectator {
             // Offsets 54-67: `sendOverlayMessage(Component.translatable(
             // "container.spectatorCantOpen").withStyle(RED))`, a message Decaf can't send.
@@ -2608,11 +2650,13 @@ impl NativeJar {
         host.rewind_call_log(mark);
         let (unknown_host_calls, unknown_host_call_count) =
             unknown_calls_since(host, &unknowns_before);
+        let (menu_effects, live_effects) = finished_active
+            .map(|active| (active.menu_effects, active.live_effects))
+            .unwrap_or_default();
         Ok(Some(MenuCloseOutcome {
             container_id,
-            menu_effects: finished_active
-                .map(|active| active.menu_effects)
-                .unwrap_or_default(),
+            menu_effects,
+            live_effects,
             unknown_host_calls,
             unknown_host_call_count,
             failure: call_result.err().map(|error| error.to_string()),
