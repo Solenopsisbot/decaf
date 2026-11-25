@@ -159,8 +159,10 @@ What it does today:
   `RegisterCommandsEvent`) become typed mod API commands; running one calls its Java
   `Command.run` and sends its `sendSuccess` lines through the mod API's command-source feedback
   (with the same broadcast-to-admins flag) and its `sendFailure` lines as the source's red
-  failure lines. Literal, `word`/`text` and `integer` nodes only: anything else is refused by
-  name and logged.
+  failure lines. A `source.sendSystemMessage` reaches the player a command block executes as,
+  is dropped inside a function (vanilla's silent stack), and is counted where the bridge can't
+  tell whether the source is silent. Literal, `word`/`text` and `integer` nodes only: anything
+  else is refused by name and logged.
 
 A native mod is one flat crate, so the runtime is copied into `mod/src/runtime/` by
 `tools/vendor.py` (which rewrites `crate::` to `crate::runtime::`). A Sunrise package carries only
