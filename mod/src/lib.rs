@@ -1285,19 +1285,20 @@ impl Hooks for HorizonJava {
     /// A player's data was copied to their new player (Fabric's `COPY_FROM`, NeoForge's
     /// `PlayerEvent.Clone`); `was_death` says a death caused it.
     fn player_clone(&self, host: &mut dyn ServerHost, event: &mut PlayerCloneEvent<'_>) {
-        // The old `ServerPlayer` goes (`Player.remove`: `KILLED` after a death, the End's return
-        // a dimension change): a Java menu still held for it closes first (`live_menu.rs`).
-        // A death's close drops at the old player (`event.original`: Sunrise's handle names the
-        // new one); the End's return places back into the new player's inventory.
-        let (removal, original) = if event.was_death {
-            let original = event
-                .original
-                .level()
-                .map(|level| (level, event.original.position()));
-            (live_menu::Removal::Killed, original)
+        // The old `ServerPlayer` goes (`PlayerList.respawn` removes it before it builds the new
+        // one: `KILLED` after a death, `CHANGED_DIMENSION` for the End's return): a Java menu
+        // still held for it closes first (`live_menu.rs`), as that old player, in its level and
+        // where it stood (`event.original`: Sunrise's handle names the new one). A death's close
+        // drops there; the End's return places back into the inventory the new player kept.
+        let removal = if event.was_death {
+            live_menu::Removal::Killed
         } else {
-            (live_menu::Removal::Live, None)
+            live_menu::Removal::ChangedDimension
         };
+        let original = event
+            .original
+            .level()
+            .map(|level| (level, event.original.position()));
         live_menu::close_for_removal(self, &mut *host, event.player, removal, original);
         // `PlayerList.respawn` built a new `ServerPlayer` with the old id: its life.
         self.next_life(event.player, false);

@@ -161,8 +161,19 @@ const STUBS: &[(&str, &str)] = &[
          import net.minecraft.world.item.ItemStack;\n\
          public class Slot {\n\
            public final Container container = null;\n\
+           public Slot(Container container, int index, int x, int y) {}\n\
            public ItemStack getItem() { return null; }\n\
            public void onTake(Player player, ItemStack stack) {}\n\
+         }",
+    ),
+    (
+        "net/minecraft/world/SimpleContainer.java",
+        "package net.minecraft.world;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         public class SimpleContainer implements Container {\n\
+           public SimpleContainer(int size) {}\n\
+           public ItemStack getItem(int slot) { return null; }\n\
+           public void setItem(int slot, ItemStack stack) {}\n\
          }",
     ),
     (
@@ -184,6 +195,7 @@ const STUBS: &[(&str, &str)] = &[
            protected AbstractContainerMenu(MenuType<?> type, int id) {}\n\
            public void removed(Player player) {}\n\
            public Slot getSlot(int index) { return null; }\n\
+           protected Slot addSlot(Slot slot) { return slot; }\n\
            public ItemStack getCarried() { return null; }\n\
            protected DataSlot addDataSlot(DataSlot slot) { return slot; }\n\
            public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) { return true; }\n\
@@ -763,6 +775,8 @@ const BRIDGE_SOURCES: &[(&str, &str)] = &[
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"late_slot\"), new MenuType<LateSlotMenu>(LateSlotMenu::new, FeatureFlags.VANILLA_SET));\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"static_def\"), StaticDefMenu.TYPE);\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"take_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 4));\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"slot_take_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 5));\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"nested_take_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 6));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"tick_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 0));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"null_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 1));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"removed_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 2));\n\
@@ -789,7 +803,7 @@ const BRIDGE_SOURCES: &[(&str, &str)] = &[
            @Override protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n\
              if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
              int kind = this.kind;\n\
-             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> kind == 0 ? new TickMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 1 ? null : kind == 2 ? new RemovedMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 3 ? new DataMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : new TakeMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> kind == 0 ? new TickMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 1 ? null : kind == 2 ? new RemovedMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 3 ? new DataMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 4 ? new TakeMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : new SlotTakeMenu(id, inventory, ContainerLevelAccess.create(level, pos), kind == 6), Component.translatable(\"container.demo.bench\")));\n\
              return InteractionResult.CONSUME;\n\
            }\n\
          }",
@@ -850,6 +864,40 @@ const BRIDGE_SOURCES: &[(&str, &str)] = &[
              ItemStack stack = slot.getItem();\n\
              slot.onTake(player, stack);\n\
              return ItemStack.EMPTY;\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/SlotTakeMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         /** The bench with one more slot after the player's: a jar `Slot` with its own `onTake`. */\n\
+         public class SlotTakeMenu extends BenchMenu {\n\
+           public SlotTakeMenu(int id, Inventory inventory, ContainerLevelAccess access, boolean nested) {\n\
+             super(id, inventory, access);\n\
+             addSlot(new TakeSlot(new SimpleContainer(1), nested));\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/TakeSlot.java",
+        "package demo;\n\
+         import net.minecraft.world.Container;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         /** A slot whose `onTake` calls `super.onTake`; a `nested` one first takes from itself again,\n\
+          *  once: a second, real take inside the first. */\n\
+         public class TakeSlot extends Slot {\n\
+           private final boolean nested;\n\
+           private boolean again;\n\
+           public TakeSlot(Container container, boolean nested) { super(container, 0, 0, 0); this.nested = nested; }\n\
+           @Override public void onTake(Player player, ItemStack stack) {\n\
+             System.out.println(\"mod: slot onTake\");\n\
+             if (nested && !again) { again = true; onTake(player, stack); }\n\
+             super.onTake(player, stack);\n\
            }\n\
          }",
     ),
@@ -1386,6 +1434,80 @@ fn a_data_slot_menu_opens_with_its_initial_value_and_its_declared_layout() {
             .layout
             .unwrap();
         assert_eq!(host.held_menu_layout(UUID), Ok(declared));
+    });
+}
+
+/// A jar `Slot.onTake` override is one take however it reaches vanilla's: its direct
+/// `super.onTake` is the same take, not a second. One that takes from its own slot again inside
+/// the first (a nested `onTake`, then its `super.onTake`) is a second take, and is told.
+#[test]
+fn a_jar_slot_take_is_told_once_and_a_nested_take_again() {
+    on_big_stack("live-menu-slot-takes", || {
+        for (block, takes, ran) in [
+            ("demo:slot_take_bench", 1, 1),
+            ("demo:nested_take_bench", 2, 2),
+        ] {
+            let (fixture, mut host) = bridge_host("live_menu_slot_takes");
+            let mut inventory = vec![StdHost::empty_item_stack(); 43];
+            inventory[0] = host.make_item_stack_for_id("minecraft:cobblestone", 10, false);
+            let opened = use_block(
+                &fixture,
+                &mut host,
+                block,
+                facts(inventory.clone(), 7.5, false),
+            );
+            let window = opened.open_menus().next().unwrap().container_id;
+            inventory = opened.inventory.unwrap();
+            // The cobblestone picked up, one right-clicked into the jar slot (index 39, after
+            // the bench's three and the player's 36), the rest put back.
+            for (slot, button) in [(30, 0), (39, 1), (30, 0)] {
+                let outcome = click_menu(
+                    &fixture,
+                    &mut host,
+                    window,
+                    &facts(inventory.clone(), 7.5, false),
+                    slot,
+                    button,
+                    ContainerInput::Pickup,
+                );
+                assert_eq!(
+                    outcome.unknown_host_call_count, 0,
+                    "{block}: {:?}",
+                    outcome.unknown_host_calls
+                );
+                inventory = outcome.inventory.unwrap();
+            }
+            host.take_stdout();
+            let taken = click_menu(
+                &fixture,
+                &mut host,
+                window,
+                &facts(inventory.clone(), 7.5, false),
+                39,
+                0,
+                ContainerInput::Pickup,
+            );
+            assert_eq!(
+                taken.unknown_host_call_count, 0,
+                "{block}: {:?}",
+                taken.unknown_host_calls
+            );
+            assert_eq!(
+                host.take_stdout().matches("mod: slot onTake").count(),
+                ran,
+                "{block}: the slot's onTake ran"
+            );
+            let told: Vec<&LiveMenuEffect> = taken
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, LiveMenuEffect::SlotTaken { .. }))
+                .collect();
+            assert_eq!(
+                told,
+                vec![&LiveMenuEffect::SlotTaken { slot: Some(39) }; takes],
+                "{block}"
+            );
+        }
     });
 }
 

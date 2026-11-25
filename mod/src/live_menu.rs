@@ -30,7 +30,10 @@
 //! Java menu's layout is compared with that declaration (built here the same way, once per jar
 //! and type), and its initial data slot values (`sendInitialData`) are what the window opens
 //! with: a mismatch, or data Decaf doesn't know, refuses the open (counted), never a mismatched
-//! window.
+//! window. Every window a Java call opens (a block use's, a click's, a tick's, a close's) then
+//! shows what the Java menu holds when the call ends, its slots and cursor, as vanilla's
+//! `initMenu` sends them (`sendAllDataToRemote`) before the call's own `broadcastChanges`
+//! ([`opened_window_contents`], [`show_contents`]).
 //!
 //! # The player
 //!
@@ -67,7 +70,17 @@
 //! player to drop from. Sunrise already put the cursor back (or dropped it), so the call starts
 //! from an empty one ([`runtime::MenuPlayerFacts::carried`]). A logout or respawn that reaches
 //! this mod while a Java menu is still held closes it the same way first, so the player's new
-//! `ServerPlayer` never loses what the old one's menu held.
+//! `ServerPlayer` never loses what the old one's menu held: a respawn's close runs as the old
+//! player, in its level and where it stood (`event.original`), removed with `KILLED` after a
+//! death and with `CHANGED_DIMENSION` for the End's return ([`Removal::ChangedDimension`]).
+//!
+//! # Drops
+//!
+//! A Java drop goes out as the player's own throw (`drop_stack`). A throw Sunrise refuses (a mod
+//! cancelled the toss, or the player died or left since the call read them) comes back, and is
+//! put back as `Inventory.placeItemBackInInventory` would ([`place_back`]), or, with no live
+//! player or no room, spawned where the player stood: a refused drop never loses items
+//! (`sunrise#live_menu:drop_refused`, and `drop_refused_spawned` for a spawn).
 //!
 //! Nothing here names a mod.
 
@@ -121,9 +134,14 @@ pub(crate) struct Seen {
 /// `RemovalReason`, `hasDisconnected`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Removal {
-    /// The player closed it, walked away, opened another, or changed dimension
-    /// (`CHANGED_DIMENSION` places back too): the inputs go back to the inventory.
+    /// The player closed it, walked away or opened another: the inputs go back to the
+    /// inventory.
     Live,
+    /// The old `ServerPlayer` of the End's return went (`PlayerList.respawn` removes it with
+    /// `CHANGED_DIMENSION` before it builds the new one): removed, but for a dimension change,
+    /// so the inputs go back to its inventory, which the new player copies (`restoreFrom` with
+    /// `keepEverything`).
+    ChangedDimension,
     /// The player died (`Player.remove(KILLED)`): the inputs drop.
     Killed,
     /// The player left (`hasDisconnected()`): the inputs drop.
@@ -210,7 +228,7 @@ impl MenuPart for JavaMenuPart {
             }
             return Flow::Cancel;
         };
-        let applied = apply(host, &prepared);
+        let applied = apply_and_show(host, &prepared, || self.lock());
         let mut state = self.lock();
         record(&mut state, prepared, applied);
         Flow::Cancel
@@ -454,6 +472,7 @@ fn departed_read(
             eye_position: seen.eye,
             position: seen.position,
             removed: removal != Removal::Live,
+            removed_for_dimension_change: removal == Removal::ChangedDimension,
             disconnected: removal == Removal::Disconnected,
             carried: Some(StdHost::empty_item_stack()),
             ..MenuPlayerFacts::default()
@@ -503,8 +522,13 @@ pub(crate) fn prepare(
         .access_pos;
     let gone = departed.is_some() || host.player(uuid).is_none();
     let read = match (host.player(uuid), &call) {
-        // The old `ServerPlayer` of a respawn, where it was (`event.original`).
-        (_, Call::Close(removal)) if departed.is_some() => {
+        // The old `ServerPlayer` of a respawn, where it was (`event.original`). The End's
+        // return keeps everything (`restoreFrom(old, true)`): the new player's inventory is the
+        // old one's, read live below.
+        (player, Call::Close(removal))
+            if departed.is_some()
+                && (*removal != Removal::ChangedDimension || player.is_none()) =>
+        {
             departed_read(departed.as_ref()?, uuid, incarnation, *removal)
         }
         (Some(player), _) => {
@@ -535,13 +559,28 @@ pub(crate) fn prepare(
             match call {
                 // `Player.remove(KILLED)`: removed, for a reason other than a dimension change.
                 Call::Close(Removal::Killed) => read.facts.removed = true,
+                // `Player.remove(CHANGED_DIMENSION)` of the old player, in its level and where
+                // it stood (`event.original`); what it throws is spawned there.
+                Call::Close(Removal::ChangedDimension) => {
+                    read.facts.removed = true;
+                    read.facts.removed_for_dimension_change = true;
+                    if let Some(original) = &departed {
+                        read.facts.position = original.position;
+                        read.facts.eye_position = original.eye;
+                        read.dimension = Some(original.dimension.clone());
+                        read.seen = Some(original.clone());
+                    }
+                }
                 Call::Close(Removal::Disconnected) => {
                     read.facts.removed = true;
                     read.facts.disconnected = true;
                 }
                 _ => {}
             }
-            if let Some(seen) = read.seen.clone() {
+            // Where the old player stood is not where the new one is seen.
+            if departed.is_none()
+                && let Some(seen) = read.seen.clone()
+            {
                 state.live_menus.seen.insert(uuid, seen);
             }
             read
@@ -900,7 +939,20 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
                 ) {
                     Dropped::Thrown => {}
                     Dropped::Spawned => counted.push("sunrise#live_menu:drop_without_player_throw"),
-                    Dropped::Refused => counted.push("sunrise#live_menu:drop_refused"),
+                    Dropped::Refused(back) => {
+                        counted.push("sunrise#live_menu:drop_refused");
+                        let left = player
+                            .filter(|player| alive(&*host, *player))
+                            .map_or(Some(back.clone()), |player| {
+                                place_back(host, tx, player, &back)
+                            });
+                        if let Some(left) = left {
+                            match spawn_where_seen(host, prepared.seen.as_ref(), &left) {
+                                true => counted.push("sunrise#live_menu:drop_refused_spawned"),
+                                false => counted.push("sunrise#live_menu:drop_lost"),
+                            }
+                        }
+                    }
                     Dropped::Nowhere => counted.push("sunrise#live_menu:drop_lost"),
                 },
                 SideEffect::AwardStat {
@@ -947,8 +999,11 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
 enum Dropped {
     /// The player threw it (`drop_stack`).
     Thrown,
-    /// Sunrise refused the throw (a mod cancelled the toss, `item_toss`): it stays refused.
-    Refused,
+    /// Sunrise refused the throw and handed the stack back, untouched (`drop_stack`'s
+    /// `Some`): a mod cancelled the toss (`item_toss`), or the player died, went stale or left
+    /// the level in place since the call was read. The caller puts it back
+    /// ([`place_back`]), so a refused drop never loses items.
+    Refused(ItemStack),
     /// The player is dead or gone, so nothing can throw it: spawned where they were.
     Spawned,
     /// Nowhere to put it.
@@ -956,12 +1011,13 @@ enum Dropped {
 }
 
 /// `ServerPlayer.drop(stack, false, SERVER_ONLY)` for a Java drop. A live player throws it
-/// through Sunrise's `drop_stack` (`player` given), and a refusal (a cancelled toss) is left
-/// refused. A dead or departed player (`player` `None`) has no throw: vanilla's
-/// `createItemStackToDrop` would give the item a velocity from the player's rotation and three
-/// `nextFloat`s of the player's random, which no fact here carries, so it is spawned at the
-/// player's last known `(x, eyeY - 0.3, z)` with the 40-tick pickup delay a player's throw has,
-/// its own motion (counted by the caller), so nothing is lost.
+/// through Sunrise's `drop_stack` (`player` given); what Sunrise refuses comes back
+/// ([`Dropped::Refused`]) for the caller to put back. A dead or departed player (`player`
+/// `None`) has no throw: vanilla's `createItemStackToDrop` would give the item a velocity from
+/// the player's rotation and three `nextFloat`s of the player's random, which no fact here
+/// carries, so it is spawned at the player's last known `(x, eyeY - 0.3, z)` with the 40-tick
+/// pickup delay a player's throw has, its own motion (counted by the caller), so nothing is
+/// lost.
 fn drop_in_world(
     host: &mut dyn ServerHost,
     player: Option<PlayerRef>,
@@ -972,26 +1028,109 @@ fn drop_in_world(
     if let Some(player) = player {
         return match player.drop_stack(host, stack.clone(), retain_ownership) {
             Ok(None) => Dropped::Thrown,
-            _ => Dropped::Refused,
+            Ok(Some(back)) => Dropped::Refused(back),
+            // `drop_stack` refuses only with the stack back; an error is put back as the stack
+            // the drop was given, which Sunrise did not take.
+            Err(_) => Dropped::Refused(stack.clone()),
         };
     }
+    if spawn_where_seen(host, seen, stack) {
+        Dropped::Spawned
+    } else {
+        Dropped::Nowhere
+    }
+}
+
+/// Spawn `stack` at the player's last known `(x, eyeY - 0.3, z)` with a player throw's 40-tick
+/// pickup delay (see [`drop_in_world`]). False when where they were is unknown or Sunrise
+/// refuses the spawn.
+fn spawn_where_seen(host: &mut dyn ServerHost, seen: Option<&Seen>, stack: &ItemStack) -> bool {
     let Some((level, position, eye)) =
         seen.and_then(|seen| Some((seen.level, seen.position?, seen.eye?)))
     else {
-        return Dropped::Nowhere;
+        return false;
     };
-    match level.spawn_item(
-        host,
-        position[0],
-        eye[1] - 0.3,
-        position[2],
-        stack.clone(),
-        40,
-    ) {
-        Ok(Some(_)) => Dropped::Spawned,
-        _ => Dropped::Nowhere,
-    }
+    matches!(
+        level.spawn_item(
+            host,
+            position[0],
+            eye[1] - 0.3,
+            position[2],
+            stack.clone(),
+            40
+        ),
+        Ok(Some(_))
+    )
 }
+
+/// Whether `player` is on the server and alive: a stack Sunrise refused to throw for them can
+/// go back into their inventory. A dead player's inventory has already dropped its loot, so
+/// a refused drop of theirs is spawned where they were instead.
+fn alive(host: &dyn ServerHost, player: PlayerRef) -> bool {
+    host.living(player.entity())
+        .and_then(|living| living.health(host))
+        .is_some_and(|health| health > 0.0)
+}
+
+/// `ItemPlace::PlayerSlot`'s number for the off hand (`Inventory` slot 40).
+const OFFHAND_PLACE: i32 = -106;
+
+/// `Inventory.placeItemBackInInventory(stack)` for a drop Sunrise refused: the stack joins the
+/// first stack with room for it (`getSlotWithRemainingSpace`: the selected hotbar slot, the off
+/// hand, then main slots 0..36, each only when it holds the same item and components with room
+/// left), then the first empty main slot (`getFreeSlot`), until it is all placed. The joins go
+/// through Sunrise's item places, so the stack size and component rules are Sunrise's. What
+/// fits nowhere is returned: vanilla throws it (`player.drop(stack, false)`), which is the toss
+/// Sunrise just refused, so the caller spawns it where the player stands instead (counted).
+fn place_back(
+    host: &mut dyn ServerHost,
+    tx: &TransactionContext,
+    player: PlayerRef,
+    stack: &ItemStack,
+) -> Option<ItemStack> {
+    let resource = ItemResource::of(stack);
+    let mut left = stack.count();
+    let uuid = player.uuid();
+    let selected = player
+        .selected_slot(&*host)
+        .and_then(|slot| i32::try_from(slot).ok());
+    let joining = selected
+        .into_iter()
+        .chain([OFFHAND_PLACE])
+        .chain(0..MAIN_SLOTS);
+    for slot in joining {
+        if left == 0 {
+            break;
+        }
+        let place = ItemPlace::PlayerSlot { player: uuid, slot };
+        let joins = place
+            .with_stack(host, |view| view.project())
+            .flatten()
+            .is_some_and(|held| resource.matches(&held));
+        if joins {
+            left -= place
+                .insert(host, tx, &resource, left)
+                .unwrap_or(0)
+                .min(left);
+        }
+    }
+    for slot in 0..MAIN_SLOTS {
+        if left == 0 {
+            break;
+        }
+        let place = ItemPlace::PlayerSlot { player: uuid, slot };
+        if place.amount(host) == 0 {
+            left -= place
+                .insert(host, tx, &resource, left)
+                .unwrap_or(0)
+                .min(left);
+        }
+    }
+    (left > 0).then(|| resource.to_stack(left)).flatten()
+}
+
+/// `Inventory.items`' size: the main slots `placeItemBackInInventory` fills (0..9 the hotbar).
+const MAIN_SLOTS: i32 = 36;
 
 /// Make `place` hold `desired`: take out what is there (unless it is already that stack), then
 /// put the stack in. A write Sunrise takes only in part is counted.
@@ -1028,6 +1167,101 @@ fn write_place(
             counted.push("sunrise#live_menu:slot_write_refused");
         }
     }
+}
+
+/// [`apply`], then what a window the call's opens showed must hold ([`opened_window_contents`],
+/// [`show_contents`]). `lock` takes the state lock, which neither step holds while Sunrise runs
+/// (its writes and closes fire hooks this mod listens to).
+fn apply_and_show<G: std::ops::DerefMut<Target = State>>(
+    host: &mut dyn ServerHost,
+    prepared: &Prepared,
+    lock: impl Fn() -> G,
+) -> Applied {
+    let mut applied = apply(host, prepared);
+    let contents = opened_window_contents(
+        &mut lock(),
+        &*host,
+        prepared.jar_index,
+        &prepared.jar_id,
+        prepared.uuid,
+        &applied.menu_applied,
+    );
+    if let Some(contents) = contents {
+        applied.counted.extend(show_contents(
+            host,
+            &prepared.jar_id,
+            prepared.uuid,
+            contents,
+        ));
+    }
+    applied
+}
+
+/// Under the state lock: what a window Sunrise just opened for the Java menu the jar now holds
+/// must show. Vanilla's `openMenu` runs `initMenu`, whose `setSynchronizer` sends everything
+/// (`sendAllDataToRemote`: every slot, the carried stack, every data slot); the data slots went
+/// with the open ([`block_use::Opening`]), and the slots and cursor are these: what the Java
+/// menu holds when the call ends, which is what the client has once the call's own
+/// `broadcastChanges` follow the initial send. `None` when no open of the call went out, or
+/// the window shown is not the jar's held menu.
+pub(crate) fn opened_window_contents(
+    state: &mut State,
+    host: &dyn ServerHost,
+    jar_index: usize,
+    jar_id: &str,
+    uuid: u128,
+    applied: &[MenuApplied],
+) -> Option<(Prepared, Vec<MenuSlotRole>)> {
+    let opened = applied.iter().any(|applied| {
+        matches!(
+            applied,
+            MenuApplied::Opened {
+                attempt: block_use::SunriseMenuAttempt::Opened(_),
+                ..
+            }
+        )
+    });
+    let Some(MenuApplied::Shown(PlayerContainer::Open(window))) = applied.last() else {
+        return None;
+    };
+    if !opened {
+        return None;
+    }
+    let jar = state
+        .jars
+        .get_mut(jar_index)
+        .filter(|jar| jar.row.id == jar_id)?;
+    opening_contents(jar, host, jar_index, uuid, *window)
+}
+
+/// Without the state lock: check that Sunrise's new window lays the Java menu out as Java does
+/// (the bake declared it from the same constructor; a mismatch closes the window, whose close
+/// then runs the Java close), then write what the Java menu holds into it
+/// ([`opened_window_contents`]). The hook tags to count.
+pub(crate) fn show_contents(
+    host: &mut dyn ServerHost,
+    jar_id: &str,
+    uuid: u128,
+    (prepared, roles): (Prepared, Vec<MenuSlotRole>),
+) -> Vec<&'static str> {
+    let window = prepared.window;
+    let menu = host
+        .player(uuid)
+        .and_then(|player| player.container_menu(&*host))
+        .filter(|menu| menu.container_id(&*host) == Some(window));
+    if !menu.is_some_and(|menu| window_matches(&*host, menu, &roles)) {
+        log::warn!(
+            "{LOG}: {jar_id}: Sunrise's window {window} does not lay out the Java menu's {} slots as Java does; closing it",
+            roles.len()
+        );
+        if let Some(menu) = menu {
+            menu.close_container(host);
+        }
+        return vec!["sunrise#openModMenu:layout_mismatch"];
+    }
+    let mut counted = prepared.counted.clone();
+    counted.extend(apply(host, &prepared).counted);
+    counted
 }
 
 /// Record a carried-out call on its jar: tallies, counted calls and hooks, and what Sunrise did
@@ -1100,7 +1334,7 @@ fn run_held(java: &crate::HorizonJava, host: &mut dyn ServerHost, uuid: u128, ca
         prepare(&mut state, &*host, uuid, window, call, None)
     };
     if let Some(prepared) = prepared {
-        let applied = apply(host, &prepared);
+        let applied = apply_and_show(host, &prepared, || java.lock());
         record(&mut java.lock(), prepared, applied);
     }
     true
@@ -1262,7 +1496,7 @@ pub(crate) fn close_held(
         prepare(&mut state, &*host, uuid, window, Call::Close(removal), None)
     };
     if let Some(prepared) = prepared {
-        let applied = apply(host, &prepared);
+        let applied = apply_and_show(host, &prepared, || java.lock());
         record(&mut java.lock(), prepared, applied);
     }
     true
@@ -1307,7 +1541,7 @@ pub(crate) fn close_for_removal(
             departed,
         );
         if let Some(prepared) = prepared {
-            let applied = apply(host, &prepared);
+            let applied = apply_and_show(host, &prepared, || java.lock());
             record(&mut java.lock(), prepared, applied);
         }
     }

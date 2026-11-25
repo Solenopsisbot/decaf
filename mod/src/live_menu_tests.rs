@@ -81,6 +81,17 @@ struct World {
     spawned: Vec<(ItemStack, [f64; 3])>,
 }
 
+/// Why `drop_stack` hands a toss back (see `MenuTestHost::toss_refusal`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TossRefusal {
+    /// A mod cancelled it (`item_toss`).
+    Cancel,
+    /// The player died after the call read them alive.
+    Die,
+    /// The player left (a stale handle) after the call read them.
+    Vanish,
+}
+
 struct MenuTestHost {
     fake: FakeHost,
     world: World,
@@ -91,8 +102,8 @@ struct MenuTestHost {
     /// Whether the player is on the server's list (`false` once they left).
     present: bool,
     health: f32,
-    /// Whether a mod cancels the player's tosses (`item_toss`): `drop_stack` hands them back.
-    cancel_tosses: bool,
+    /// How `drop_stack` refuses the player's tosses, if it does: the stack comes back.
+    toss_refusal: Option<TossRefusal>,
     /// The block at every position, as `/setblock` spells it.
     block: String,
     tick_count: i32,
@@ -129,7 +140,7 @@ impl MenuTestHost {
                 .collect(),
             present: true,
             health: 20.0,
-            cancel_tosses: false,
+            toss_refusal: None,
             block: String::new(),
             tick_count: 1200,
             eye: [12.5, 66.62, -5.5],
@@ -158,6 +169,35 @@ impl MenuTestHost {
 
     fn cursor(&self) -> String {
         self.text(&self.world.menu.as_ref().expect("a menu is open").cursor)
+    }
+
+    /// How many of item `id` exist anywhere: the inventory, the open menu's slots and cursor,
+    /// thrown drops and spawned items. A refused drop must leave it unchanged.
+    fn total(&self, id: &str) -> u32 {
+        let count = |stack: &Option<ItemStack>| match stack {
+            Some(stack) if stack.item().id(self).is_some_and(|item| item == id) => stack.count(),
+            _ => 0,
+        };
+        let menu = self.world.menu.iter().flat_map(|open| {
+            open.owned
+                .iter()
+                .map(count)
+                .chain(std::iter::once(count(&open.cursor)))
+        });
+        self.world.inventory.iter().map(count).sum::<u32>()
+            + menu.sum::<u32>()
+            + self
+                .world
+                .drops
+                .iter()
+                .map(|stack| count(&Some(stack.clone())))
+                .sum::<u32>()
+            + self
+                .world
+                .spawned
+                .iter()
+                .map(|(stack, _)| count(&Some(stack.clone())))
+                .sum::<u32>()
     }
 
     /// The non-empty inventory slots, sorted.
@@ -339,6 +379,9 @@ impl MenuTestHost {
                 }
             }
             ItemPlace::PlayerCursor { menu } => Some(self.menu_is(*menu)?.cursor.clone()),
+            ItemPlace::PlayerSlot { slot, .. } => {
+                Some(self.world.inventory.get(inventory_index(*slot)?)?.clone())
+            }
             _ => None,
         }
     }
@@ -363,6 +406,15 @@ impl MenuTestHost {
                 }
                 None => false,
             },
+            ItemPlace::PlayerSlot { slot, .. } => {
+                match inventory_index(*slot).and_then(|index| self.world.inventory.get_mut(index)) {
+                    Some(held) => {
+                        *held = stack;
+                        true
+                    }
+                    None => false,
+                }
+            }
             _ => false,
         }
     }
@@ -514,7 +566,8 @@ impl mod_api::prelude::LevelBlocksBackend for MenuTestHost {
 }
 impl mod_api::prelude::LivingBackend for MenuTestHost {
     fn living_health(&self, _living: LivingRef) -> Option<f32> {
-        Some(self.health)
+        // A player who left has no living entity to read.
+        self.present.then_some(self.health)
     }
     fn living_attribute_value(&self, _living: LivingRef, id: &str) -> Option<f64> {
         (id == "minecraft:block_interaction_range").then_some(4.5)
@@ -680,6 +733,17 @@ impl mod_api::prelude::ItemsBackendMut for MenuTestHost {
         })
     }
 }
+/// `ItemPlace::PlayerSlot`'s number as an `Inventory` index: main 0..36, armour 100..=103 as
+/// 36..40, the off hand -106 as 40.
+fn inventory_index(slot: i32) -> Option<usize> {
+    match slot {
+        0..36 => Some(slot as usize),
+        100..=103 => Some(slot as usize - 64),
+        -106 => Some(40),
+        _ => None,
+    }
+}
+
 impl mod_api::prelude::PlayerInventoryBackendMut for MenuTestHost {
     fn player_drop_stack(
         &mut self,
@@ -687,8 +751,14 @@ impl mod_api::prelude::PlayerInventoryBackendMut for MenuTestHost {
         stack: ItemStack,
         _thrown_by_player: bool,
     ) -> Result<Option<ItemStack>, StackWriteError> {
-        // A dead player throws nothing, and a cancelled toss isn't thrown: the stack comes back.
-        if self.health <= 0.0 || self.cancel_tosses {
+        // A dead player throws nothing, and a refused toss isn't thrown: the stack comes back.
+        match self.toss_refusal {
+            Some(TossRefusal::Cancel) => return Ok(Some(stack)),
+            Some(TossRefusal::Die) => self.health = 0.0,
+            Some(TossRefusal::Vanish) => self.present = false,
+            None => {}
+        }
+        if self.health <= 0.0 || !self.present {
             return Ok(Some(stack));
         }
         self.world.drops.push(stack);
@@ -949,6 +1019,7 @@ pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
          import net.minecraft.world.level.block.state.BlockBehaviour;\n\
          public final class Probe implements ModInitializer {\n\
            public static Block BENCH;\n\
+           public static Block CHAIN_BENCH;\n\
            @Override public void onInitialize() {\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"bench\"), BenchMenu.TYPE);\n\
              BENCH = new Bench(BlockBehaviour.Properties.of());\n\
@@ -957,6 +1028,8 @@ pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"data\"), DataMenu.TYPE);\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"data_bench\"), new DataBench(BlockBehaviour.Properties.of()));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"odd_bench\"), new OddBench(BlockBehaviour.Properties.of()));\n\
+             CHAIN_BENCH = new ChainBench(BlockBehaviour.Properties.of());\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"chain_bench\"), CHAIN_BENCH);\n\
            }\n\
          }",
     ),
@@ -979,6 +1052,55 @@ pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
              if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
              player.openMenu(new SimpleMenuProvider((id, inventory, p) -> new BenchMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
              return InteractionResult.CONSUME;\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/ChainBench.java",
+        "package demo;\n\
+         import net.minecraft.core.BlockPos;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.InteractionResult;\n\
+         import net.minecraft.world.SimpleMenuProvider;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.level.Level;\n\
+         import net.minecraft.world.level.block.Block;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         import net.minecraft.world.phys.BlockHitResult;\n\
+         public class ChainBench extends Block {\n\
+           public ChainBench(Properties properties) { super(properties); }\n\
+           @Override protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n\
+             if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> new ChainMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
+             return InteractionResult.CONSUME;\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/ChainMenu.java",
+        "package demo;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.SimpleMenuProvider;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         /** The bench whose shift-click on the base opens a fresh bench and moves the base into it:\n\
+          *  the new window opens holding what the click's Java put there. */\n\
+         public class ChainMenu extends BenchMenu {\n\
+           public ChainMenu(int id, Inventory inventory, ContainerLevelAccess access) { super(id, inventory, access); }\n\
+           @Override protected boolean isValidBlock(BlockState state) { return state.is(Probe.CHAIN_BENCH); }\n\
+           @Override public ItemStack quickMoveStack(Player player, int index) {\n\
+             if (index != 0) return ItemStack.EMPTY;\n\
+             ItemStack base = inputSlots.getItem(0);\n\
+             inputSlots.setItem(0, ItemStack.EMPTY);\n\
+             ContainerLevelAccess where = access;\n\
+             ChainMenu[] next = new ChainMenu[1];\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> next[0] = new ChainMenu(id, inventory, where), Component.translatable(\"container.demo.bench\")));\n\
+             next[0].inputSlots.setItem(0, base);\n\
+             return ItemStack.EMPTY;\n\
            }\n\
          }",
     ),
@@ -1421,10 +1543,12 @@ pub(crate) const STUBS: &[(&str, &str)] = &[
          public abstract class ItemCombinerMenu extends AbstractContainerMenu {\n\
            protected final Container inputSlots = null;\n\
            protected final ResultContainer resultSlots = null;\n\
+           protected final ContainerLevelAccess access = null;\n\
            public ItemCombinerMenu(MenuType<?> type, int id, Inventory inv, ContainerLevelAccess access, ItemCombinerMenuSlotDefinition def) {\n\
              super(type, id);\n\
            }\n\
            protected abstract void onTake(Player player, ItemStack stack);\n\
+           public ItemStack quickMoveStack(Player player, int index) { return null; }\n\
            protected abstract boolean isValidBlock(BlockState state);\n\
            public abstract void createResult();\n\
          }",
@@ -1724,6 +1848,56 @@ fn a_block_change_during_the_players_tick_is_counted_and_closes_at_do_tick() {
     });
 }
 
+/// A window a Java click opens shows what the click's Java put in its menu, as vanilla's
+/// `initMenu` sends it (`sendAllDataToRemote`): a shift-click on the chain bench's base opens
+/// a fresh bench and moves the base into it, so Sunrise's new window holds the base, and not a
+/// single item is lost or made on the way.
+#[test]
+fn a_menu_a_click_opens_shows_what_java_put_in_it() {
+    on_a_big_stack("live-menu-chain", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        let java = java_with(jar);
+        with_bridge(&java, BENCH_MENUS, || {
+            let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+            host.world.inventory[0] = Some(host.stack("minecraft:cobblestone", 5));
+            host.block = "demo:chain_bench".to_owned();
+            assert_eq!(
+                bench_part(&java, "demo:chain_bench").dispatch(
+                    &mut host,
+                    test_block_state(),
+                    &right_click(),
+                    false
+                ),
+                Some(InteractionResult::Consume)
+            );
+            let first = host.world.menu.as_ref().expect("the bench opened").window;
+            // Three cobblestone into the base (all picked up, three right-clicked in, the rest
+            // put back).
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            for _ in 0..3 {
+                assert!(host.click(0, 1, 0));
+            }
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            assert_eq!(host.owned()[0], "3 minecraft:cobblestone");
+            // Shift-click the base: a new bench opens with it.
+            assert!(host.click(0, 0, 1));
+            let second = host
+                .world
+                .menu
+                .as_ref()
+                .expect("the next bench opened")
+                .window;
+            assert_ne!(second, first);
+            assert_eq!(held_window(&java), Some(second));
+            assert_eq!(host.owned(), ["3 minecraft:cobblestone", "empty", "empty"]);
+            assert_eq!(host.cursor(), "empty");
+            assert_eq!(host.held(), ["2 minecraft:cobblestone"]);
+            assert_eq!(host.total("minecraft:cobblestone"), 5);
+            assert!(counted(&java).is_empty(), "{:?}", counted(&java));
+        });
+    });
+}
+
 /// A menu with a data slot opens with the values `sendInitialData` sent (`ModMenuOpen::data`;
 /// Sunrise refuses another count with `DataCountMismatch`). A menu whose live layout is not its
 /// type's declared one (a provider building a one-input menu of the bench's type) never opens.
@@ -1858,46 +2032,142 @@ fn a_disconnect_or_a_death_drops_what_the_menu_held() {
     });
 }
 
-/// A live player's drop is thrown through `drop_stack`; one a mod cancels (`item_toss`) stays
-/// cancelled: nothing is spawned in its place, and the refusal is counted.
+/// The End's return replaces the player (`PlayerList.respawn` removes the old one with
+/// `CHANGED_DIMENSION` first): the Java menu closes as that old player, removed but for a
+/// dimension change, so what it held goes back into the inventory the new player kept, and
+/// nothing drops.
 #[test]
-fn a_cancelled_toss_stays_cancelled() {
+fn the_ends_return_places_back_as_the_old_player() {
+    on_a_big_stack("live-menu-end-return", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        let java = java_with(jar);
+        with_bridge(&java, BENCH_MENUS, || {
+            let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+            open_bench(&java, &mut host);
+            // One cobblestone into the base, the rest back.
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            assert!(host.click(0, 1, 0));
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            host.tick();
+            let level = host
+                .player_ref()
+                .entity()
+                .level(&host)
+                .expect("the player's level");
+            crate::live_menu::close_for_removal(
+                &java,
+                &mut host,
+                UUID,
+                crate::live_menu::Removal::ChangedDimension,
+                Some((level, [100.5, 70.0, 100.5])),
+            );
+            assert_eq!(held_window(&java), None);
+            host.close_window();
+            host.deliver_closes();
+            assert_eq!(
+                host.held(),
+                ["3 minecraft:amethyst_shard", "5 minecraft:cobblestone"]
+            );
+            assert!(host.world.spawned.is_empty());
+            assert!(host.world.drops.is_empty());
+            assert!(counted(&java).is_empty(), "{:?}", counted(&java));
+        });
+    });
+}
+
+/// A throw Sunrise refuses (`drop_stack` handing the stack back) never loses items: a cancelled
+/// toss (`item_toss`) puts it back as `Inventory.placeItemBackInInventory` would, joining the
+/// stack it came from, and a player who died or left since the call read them has it spawned
+/// where they stood. The total count of the item stays what it was.
+#[test]
+fn a_refused_toss_keeps_every_item() {
     on_a_big_stack("live-menu-toss", || {
         let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
-        for cancel in [false, true] {
+        let refusals = [
+            None,
+            Some(TossRefusal::Cancel),
+            Some(TossRefusal::Die),
+            Some(TossRefusal::Vanish),
+        ];
+        for refusal in refusals {
             let java = java_with(Arc::clone(&jar));
             with_bridge(&java, BENCH_MENUS, || {
                 let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
-                host.cancel_tosses = cancel;
                 open_bench(&java, &mut host);
+                // A tick, so the bridge has seen the player where they stand.
+                host.tick();
+                let before = host.total("minecraft:cobblestone");
+                assert_eq!(before, 5);
                 // One cobblestone into the base, the rest back; then throw it (`THROW`, Q).
                 assert!(host.click(hotbar(3, 0), 0, 0));
                 assert!(host.click(0, 1, 0));
                 assert!(host.click(hotbar(3, 0), 0, 0));
+                host.toss_refusal = refusal;
                 assert!(host.click(0, 0, 4));
-                assert_eq!(host.owned()[0], "empty");
-                assert!(host.world.spawned.is_empty(), "nothing spawned");
+                assert_eq!(host.owned()[0], "empty", "{refusal:?}");
+                assert_eq!(
+                    host.total("minecraft:cobblestone"),
+                    before,
+                    "{refusal:?}: no item lost or made"
+                );
                 let tags: Vec<String> = counted(&java).into_iter().map(|(tag, _)| tag).collect();
-                if cancel {
-                    assert!(host.world.drops.is_empty());
-                    assert_eq!(
-                        tags,
-                        [
-                            "game-hook re-entry: sunrise#live_menu:drop",
-                            "game-hook re-entry: sunrise#live_menu:drop_refused",
-                            SLOT_TAKE,
-                        ]
-                    );
-                } else {
-                    assert_eq!(host.world.drops.len(), 1);
-                    assert_eq!(
-                        host.text(&Some(host.world.drops[0].clone())),
-                        "1 minecraft:cobblestone"
-                    );
-                    assert_eq!(
-                        tags,
-                        ["game-hook re-entry: sunrise#live_menu:drop", SLOT_TAKE]
-                    );
+                let spawned: Vec<String> = host
+                    .world
+                    .spawned
+                    .iter()
+                    .map(|(stack, at)| {
+                        format!("{} at y {:.2}", host.text(&Some(stack.clone())), at[1])
+                    })
+                    .collect();
+                match refusal {
+                    None => {
+                        assert_eq!(host.world.drops.len(), 1);
+                        assert_eq!(
+                            host.text(&Some(host.world.drops[0].clone())),
+                            "1 minecraft:cobblestone"
+                        );
+                        assert!(spawned.is_empty());
+                        assert_eq!(
+                            tags,
+                            ["game-hook re-entry: sunrise#live_menu:drop", SLOT_TAKE]
+                        );
+                    }
+                    Some(TossRefusal::Cancel) => {
+                        // Back onto the four it came from, in the selected hotbar slot.
+                        assert!(host.world.drops.is_empty());
+                        assert!(spawned.is_empty());
+                        assert_eq!(
+                            host.text(&host.world.inventory[0]),
+                            "5 minecraft:cobblestone"
+                        );
+                        assert_eq!(
+                            tags,
+                            [
+                                "game-hook re-entry: sunrise#live_menu:drop",
+                                "game-hook re-entry: sunrise#live_menu:drop_refused",
+                                SLOT_TAKE,
+                            ]
+                        );
+                    }
+                    Some(_) => {
+                        // No live player to take it back: where they stood, as a dead player's
+                        // drop is.
+                        assert!(host.world.drops.is_empty());
+                        assert_eq!(spawned, ["1 minecraft:cobblestone at y 66.32"]);
+                        assert_eq!(
+                            host.text(&host.world.inventory[0]),
+                            "4 minecraft:cobblestone"
+                        );
+                        assert_eq!(
+                            tags,
+                            [
+                                "game-hook re-entry: sunrise#live_menu:drop",
+                                "game-hook re-entry: sunrise#live_menu:drop_refused",
+                                "game-hook re-entry: sunrise#live_menu:drop_refused_spawned",
+                                SLOT_TAKE,
+                            ]
+                        );
+                    }
                 }
             });
         }

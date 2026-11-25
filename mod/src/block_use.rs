@@ -217,10 +217,10 @@ impl JavaBlockUsePart {
         }
     }
 
-    /// A window Sunrise shows, after a use's effects, for the Java menu the jar now holds:
-    /// check Sunrise's layout is the Java menu's (the bake declared it from the same
-    /// constructor; a mismatch closes the window, whose close then runs the Java close), then
-    /// show what the Java menu holds (`ServerPlayer$1.sendInitialData`). The hook tags to count.
+    /// A window Sunrise shows, after a use's effects, for the Java menu the jar now holds: its
+    /// layout checked and what the Java menu holds shown
+    /// (`live_menu::opened_window_contents`, `live_menu::show_contents`). The hook tags to
+    /// count.
     fn show_opened_menu(
         &self,
         host: &mut dyn ServerHost,
@@ -229,44 +229,18 @@ impl JavaBlockUsePart {
         uuid: u128,
         applied: &[MenuApplied],
     ) -> Vec<&'static str> {
-        let Some(MenuApplied::Shown(PlayerContainer::Open(window))) = applied.last() else {
-            return Vec::new();
-        };
-        let window = *window;
-        let prepared = {
+        let contents = {
             let mut guard = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(jar) = guard
-                .jars
-                .get_mut(jar_index)
-                .filter(|jar| jar.row.id == jar_id)
-            else {
-                return Vec::new();
-            };
-            crate::live_menu::opening_contents(jar, &*host, jar_index, uuid, window)
+            crate::live_menu::opened_window_contents(
+                &mut guard, &*host, jar_index, jar_id, uuid, applied,
+            )
         };
-        let Some((prepared, roles)) = prepared else {
-            return Vec::new();
-        };
-        let menu = host
-            .player(uuid)
-            .and_then(|player| player.container_menu(&*host))
-            .filter(|menu| menu.container_id(&*host) == Some(window));
-        if !menu.is_some_and(|menu| crate::live_menu::window_matches(&*host, menu, &roles)) {
-            log::warn!(
-                "{LOG}: {jar_id}: Sunrise's window {window} does not lay out the Java menu's {} slots as Java does; closing it",
-                roles.len()
-            );
-            if let Some(menu) = menu {
-                menu.close_container(host);
-            }
-            return vec!["sunrise#openModMenu:layout_mismatch"];
-        }
-        let mut counted = prepared.counted.clone();
-        counted.extend(crate::live_menu::apply(host, &prepared).counted);
-        counted
+        contents
+            .map(|contents| crate::live_menu::show_contents(host, jar_id, uuid, contents))
+            .unwrap_or_default()
     }
 
     /// Run the jar's `useItemOn`/`useWithoutItem` for this click under the state lock: the
@@ -809,23 +783,41 @@ pub(crate) fn menu_closed(
         let mut state = java.lock();
         run_menu_closes(&mut state, &*host, player_uuid, window)
     };
-    let delivered: Vec<(usize, String, Vec<MenuApplied>)> = closes
+    let delivered: Vec<(usize, String, Vec<MenuApplied>, Vec<&'static str>)> = closes
         .into_iter()
         .map(|(index, id, effects, openings)| {
             let applied = apply_menu_effects(host, player_uuid, &effects, &openings);
-            (index, id, applied)
+            // A menu the `removed` opened shows what Java put in it, as a block use's does.
+            let contents = crate::live_menu::opened_window_contents(
+                &mut java.lock(),
+                &*host,
+                index,
+                &id,
+                player_uuid,
+                &applied,
+            );
+            let counted = contents
+                .map(|contents| crate::live_menu::show_contents(host, &id, player_uuid, contents))
+                .unwrap_or_default();
+            (index, id, applied, counted)
         })
         .collect();
-    if delivered.iter().all(|(_, _, applied)| applied.is_empty()) {
+    if delivered
+        .iter()
+        .all(|(_, _, applied, counted)| applied.is_empty() && counted.is_empty())
+    {
         return;
     }
     let mut state = java.lock();
-    for (index, id, applied) in delivered {
+    for (index, id, applied, counted) in delivered {
         let Some(jar) = state.jars.get_mut(index).filter(|jar| jar.row.id == id) else {
             continue;
         };
         for applied in applied {
             record_menu_outcome(jar, player_uuid, applied);
+        }
+        for tag in counted {
+            jar.host.note_unknown_game_hook(tag);
         }
     }
 }
@@ -915,7 +907,12 @@ fn run_menu_closes(
                         jar.row.id
                     );
                 }
-                effects.push((index, jar.row.id.clone(), outcome.menu_effects));
+                effects.push((
+                    index,
+                    jar.row.id.clone(),
+                    outcome.menu_effects,
+                    outcome.live_effects,
+                ));
             }
             Ok(Ok(None)) => {}
             Ok(Err(error)) => {
@@ -934,16 +931,16 @@ fn run_menu_closes(
             }
         }
     }
-    // A `removed` that opened another menu: checked against its type before its window opens
-    // (no facts ran its `initMenu` here, so a type with data slots stays refused).
+    // A `removed` that opened another menu: checked against its type before its window opens,
+    // with the initial data its `initMenu` sent.
     effects
         .into_iter()
-        .map(|(index, id, effects)| {
+        .map(|(index, id, effects, live_effects)| {
             let opens = effects
                 .iter()
                 .any(|effect| matches!(effect, MenuEffect::Opened(_)));
             let openings = if opens {
-                crate::live_menu::opening_check(state, index, player_uuid, &[])
+                crate::live_menu::opening_check(state, index, player_uuid, &live_effects)
                     .into_iter()
                     .collect()
             } else {
