@@ -32,6 +32,7 @@ use mod_api::{
     StackWriteError, StatType, Text, TransactionContext, TransactionScopeError,
     TransactionUnavailable, WorldEpoch,
 };
+use mod_api::{EntityTickListenedEvent, EntityTickPostEvent, EntityTickPreEvent, Players};
 use zip::write::SimpleFileOptions;
 
 use crate::block_use::JavaBlockUsePart;
@@ -60,6 +61,8 @@ struct OpenMenu {
     menu: String,
     owned: Vec<Option<ItemStack>>,
     cursor: Option<ItemStack>,
+    /// The data slot values the window opened with.
+    data: Vec<i32>,
 }
 
 /// Everything a transaction may change, so an abort can put it back.
@@ -72,15 +75,22 @@ struct World {
     menu: Option<OpenMenu>,
     stats: Vec<(StatType, String, i32)>,
     recipes: Vec<String>,
+    /// Stacks the player threw (`drop_stack`).
     drops: Vec<ItemStack>,
+    /// Stacks spawned in the level (`LevelRef::spawn_item`), and where.
+    spawned: Vec<(ItemStack, [f64; 3])>,
 }
 
 struct MenuTestHost {
     fake: FakeHost,
     world: World,
     journal: FakeJournal<World>,
-    /// Declared mod menu types and their owned slot count (`data/<ns>/sunrise/menu/*.json`).
-    menu_types: Vec<(String, usize)>,
+    /// Declared mod menu types, their owned slot count and their data slot count
+    /// (`data/<ns>/sunrise/menu/*.json`).
+    menu_types: Vec<(String, usize, usize)>,
+    /// Whether the player is on the server's list (`false` once they left).
+    present: bool,
+    health: f32,
     /// The block at every position, as `/setblock` spells it.
     block: String,
     tick_count: i32,
@@ -92,7 +102,7 @@ struct MenuTestHost {
 }
 
 impl MenuTestHost {
-    fn new(items: &[&str], menu_types: &[(&str, usize)]) -> Self {
+    fn new(items: &[&str], menu_types: &[(&str, usize, usize)]) -> Self {
         let mut fake = FakeHost::new();
         fake.registries
             .resolve_items(
@@ -102,7 +112,7 @@ impl MenuTestHost {
                     .collect::<Vec<_>>(),
             )
             .expect("resolve test items");
-        mod_api::__private::resolve_menus(menu_types.iter().map(|(id, _)| *id))
+        mod_api::__private::resolve_menus(menu_types.iter().map(|(id, _, _)| *id))
             .expect("resolve test menus");
         Self {
             fake,
@@ -113,8 +123,10 @@ impl MenuTestHost {
             journal: FakeJournal::default(),
             menu_types: menu_types
                 .iter()
-                .map(|(id, slots)| ((*id).to_owned(), *slots))
+                .map(|(id, slots, data)| ((*id).to_owned(), *slots, *data))
                 .collect(),
+            present: true,
+            health: 20.0,
             block: String::new(),
             tick_count: 1200,
             eye: [12.5, 66.62, -5.5],
@@ -225,7 +237,13 @@ impl MenuTestHost {
             return false;
         };
         if let Some(cursor) = open.cursor.clone() {
-            self.place_back(cursor);
+            // `MenuRemoval::drops_items`: a killed or disconnected player's cursor drops.
+            if self.present && self.health > 0.0 {
+                self.place_back(cursor);
+            } else {
+                let at = [self.eye[0], self.eye[1] - 0.3, self.eye[2]];
+                self.world.spawned.push((cursor, at));
+            }
         }
         self.closes
             .borrow_mut()
@@ -263,12 +281,48 @@ impl MenuTestHost {
         handled
     }
 
-    fn tick(&mut self) {
+    /// One server tick of the player: the level's entity tick (`entity_tick_pre`, the body of
+    /// `ServerPlayer.tick`, in which `between` runs as `gameMode.tick` would, `entity_tick_post`),
+    /// then the connection's `doTick` (`player_tick_post`), then queued closes.
+    fn tick_with(&mut self, between: impl FnOnce(&mut Self)) {
+        let mut listened = false;
+        mod_api::dispatch_entity_tick_listened(HostSide::Server(self), &mut listened);
+        if listened {
+            let mut canceled = Vec::new();
+            mod_api::dispatch_entity_tick_pre(
+                HostSide::Server(self),
+                "minecraft:overworld",
+                &[ENTITY_ID],
+                &["minecraft:player"],
+                &mut canceled,
+            );
+        }
+        between(self);
+        if listened {
+            mod_api::dispatch_entity_tick_post(
+                HostSide::Server(self),
+                "minecraft:overworld",
+                &[ENTITY_ID],
+                &["minecraft:player"],
+            );
+        }
         let player = self.player_ref();
         mod_api::dispatch_player_tick_post(
             HostSide::Server(self),
             mod_api::calls::PlayerTickPostCall { player },
         );
+        self.deliver_closes();
+    }
+
+    fn tick(&mut self) {
+        self.tick_with(|_| {});
+    }
+
+    /// The player disconnects: Sunrise takes them off the list, drops their cursor
+    /// (`MenuRemoval::Disconnected`), closes the window and tells `menu_closed` after.
+    fn disconnect(&mut self) {
+        self.present = false;
+        self.close_window();
         self.deliver_closes();
     }
 
@@ -333,7 +387,19 @@ impl mod_api::prelude::KeysHost for MenuTestHost {
 }
 impl mod_api::prelude::PlayersHost for MenuTestHost {
     fn player(&self, uuid: u128) -> Option<PlayerRef> {
-        (uuid == UUID).then(|| self.player_ref())
+        (uuid == UUID && self.present).then(|| self.player_ref())
+    }
+}
+
+/// The server's player list: the one player while they are on it.
+struct TestPlayers(Option<PlayerRef>);
+
+impl Players for TestPlayers {
+    fn server_players(&self) -> Vec<PlayerRef> {
+        self.0.into_iter().collect()
+    }
+    fn acting_player(&self) -> Option<PlayerRef> {
+        None
     }
 }
 impl mod_api::prelude::TextHost for MenuTestHost {
@@ -382,7 +448,23 @@ impl ServerHost for MenuTestHost {
         self.journal.matches(tx)
     }
 }
-mod_api::impl_server_host_areas!(MenuTestHost);
+impl mod_api::prelude::ServicesServerHost for MenuTestHost {
+    fn players(&self) -> &dyn Players {
+        // A list built for each ask, leaked once per distinct answer: the test host is short-lived.
+        if self.present {
+            static PRESENT: std::sync::OnceLock<TestPlayers> = std::sync::OnceLock::new();
+            PRESENT.get_or_init(|| {
+                TestPlayers(Some(mod_api::__private::game::player_ref(
+                    EntityRef::new(WorldEpoch::new(1), ENTITY_ID),
+                    UUID,
+                )))
+            })
+        } else {
+            &TestPlayers(None)
+        }
+    }
+}
+mod_api::impl_server_host_areas!(MenuTestHost, except(services));
 
 impl mod_api::prelude::KeysBackend for MenuTestHost {
     fn item_key_id(&self, key: ItemKey) -> Option<&str> {
@@ -429,7 +511,7 @@ impl mod_api::prelude::LevelBlocksBackend for MenuTestHost {
 }
 impl mod_api::prelude::LivingBackend for MenuTestHost {
     fn living_health(&self, _living: LivingRef) -> Option<f32> {
-        Some(20.0)
+        Some(self.health)
     }
     fn living_attribute_value(&self, _living: LivingRef, id: &str) -> Option<f64> {
         (id == "minecraft:block_interaction_range").then_some(4.5)
@@ -602,6 +684,10 @@ impl mod_api::prelude::PlayerInventoryBackendMut for MenuTestHost {
         stack: ItemStack,
         _thrown_by_player: bool,
     ) -> Result<Option<ItemStack>, StackWriteError> {
+        // A dead player throws nothing: the stack comes back.
+        if self.health <= 0.0 {
+            return Ok(Some(stack));
+        }
         self.world.drops.push(stack);
         Ok(None)
     }
@@ -629,12 +715,15 @@ impl mod_api::prelude::PlayerMenusBackendMut for MenuTestHost {
             .id(&*self)
             .map(|id| id.to_string())
             .ok_or(OpenMenuError::NotModMenu)?;
-        let slots = self
+        let (slots, data) = self
             .menu_types
             .iter()
-            .find(|(menu, _)| *menu == id)
-            .map(|(_, slots)| *slots)
+            .find(|(menu, _, _)| *menu == id)
+            .map(|(_, slots, data)| (*slots, *data))
             .ok_or(OpenMenuError::NotModMenu)?;
+        if request.data.len() != data {
+            return Err(OpenMenuError::DataCountMismatch);
+        }
         // The old window closes as a close does, before the new one is built.
         self.close_window();
         self.world.counter = self.world.counter % 100 + 1;
@@ -645,6 +734,7 @@ impl mod_api::prelude::PlayerMenusBackendMut for MenuTestHost {
             menu: id.clone(),
             owned: vec![None; slots],
             cursor: None,
+            data: request.data.clone(),
         });
         self.opens.push((id, request.pos));
         Ok(Some(self.world.counter))
@@ -687,10 +777,25 @@ impl mod_api::prelude::PlayerRecipesBackendMut for MenuTestHost {
         Some(recipes.len() as i32)
     }
 }
+impl mod_api::prelude::LevelEntitiesBackendMut for MenuTestHost {
+    fn level_spawn_item(
+        &mut self,
+        _level: LevelRef,
+        x: f64,
+        y: f64,
+        z: f64,
+        stack: ItemStack,
+        _pickup_delay: u32,
+    ) -> Result<Option<EntityRef>, StackWriteError> {
+        self.world.spawned.push((stack, [x, y, z]));
+        Ok(Some(EntityRef::new(WorldEpoch::new(1), 1000)))
+    }
+}
 mod_api::impl_backend_mut_areas!(
     MenuTestHost,
     except(
         items,
+        level_entities,
         menus,
         player_inventory,
         player_menus,
@@ -727,13 +832,25 @@ fn right_click<'a>() -> BlockClick<'a> {
 /// `player_tick_post`, and the `JavaMenuPart` its registration attaches to the menu type.
 struct BridgeMod {
     java: Arc<HorizonJava>,
-    menu: &'static str,
+    menus: &'static [&'static str],
 }
 
 #[mod_api::__subscriptions]
 impl Hooks for BridgeMod {
     fn register(&self, registrar: &mut dyn Registrar, _context: &RegistrationContext) {
-        registrar.menu_part(self.menu, JavaMenuPart::new(Arc::clone(&self.java.state)));
+        registrar.entity_tick_each("minecraft:player");
+        for menu in self.menus {
+            registrar.menu_part(menu, JavaMenuPart::new(Arc::clone(&self.java.state)));
+        }
+    }
+    fn entity_tick_listened(&self, host: HostSide<'_>, event: &mut EntityTickListenedEvent) {
+        Hooks::entity_tick_listened(&*self.java, host, event);
+    }
+    fn entity_tick_pre(&self, host: HostSide<'_>, event: &mut EntityTickPreEvent<'_>) {
+        Hooks::entity_tick_pre(&*self.java, host, event);
+    }
+    fn entity_tick_post(&self, host: HostSide<'_>, event: &mut EntityTickPostEvent<'_>) {
+        Hooks::entity_tick_post(&*self.java, host, event);
     }
     fn menu_closed(&self, host: &mut dyn ServerHost, event: &mut MenuClosedEvent) {
         Hooks::menu_closed(&*self.java, host, event);
@@ -777,12 +894,12 @@ fn java_with(jar: Arc<NativeJar>) -> Arc<HorizonJava> {
     java
 }
 
-fn with_bridge(java: &Arc<HorizonJava>, menu: &'static str, run: impl FnOnce()) {
+fn with_bridge(java: &Arc<HorizonJava>, menus: &'static [&'static str], run: impl FnOnce()) {
     let mods: mod_api::Mods = vec![ModEntry::new(
         "horizon_java",
         Box::new(BridgeMod {
             java: Arc::clone(java),
-            menu,
+            menus,
         }),
     )]
     .into();
@@ -834,6 +951,9 @@ pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
              BENCH = new Bench(BlockBehaviour.Properties.of());\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"bench\"), BENCH);\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"null_bench\"), new NullBench(BlockBehaviour.Properties.of()));\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"data\"), DataMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"data_bench\"), new DataBench(BlockBehaviour.Properties.of()));\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"odd_bench\"), new OddBench(BlockBehaviour.Properties.of()));\n\
            }\n\
          }",
     ),
@@ -926,6 +1046,98 @@ pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
            }\n\
            @Override public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) {\n\
              return slot.container != resultSlots && super.canTakeItemForPickAll(stack, slot);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/DataBench.java",
+        "package demo;\n\
+         import net.minecraft.core.BlockPos;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.InteractionResult;\n\
+         import net.minecraft.world.SimpleMenuProvider;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.level.Level;\n\
+         import net.minecraft.world.level.block.Block;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         import net.minecraft.world.phys.BlockHitResult;\n\
+         public class DataBench extends Block {\n\
+           public DataBench(Properties properties) { super(properties); }\n\
+           @Override protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n\
+             if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> new DataMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.data\")));\n\
+             return InteractionResult.CONSUME;\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/DataMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.inventory.DataSlot;\n\
+         import net.minecraft.world.inventory.ItemCombinerMenu;\n\
+         import net.minecraft.world.inventory.ItemCombinerMenuSlotDefinition;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         public class DataMenu extends ItemCombinerMenu {\n\
+           public static final MenuType<DataMenu> TYPE = new MenuType<>(DataMenu::new, FeatureFlags.VANILLA_SET);\n\
+           public DataMenu(int id, Inventory inventory) { this(id, inventory, ContainerLevelAccess.NULL); }\n\
+           public DataMenu(int id, Inventory inventory, ContainerLevelAccess access) {\n\
+             super(TYPE, id, inventory, access, slots());\n\
+             addDataSlot(DataSlot.standalone()).set(7);\n\
+           }\n\
+           private static ItemCombinerMenuSlotDefinition slots() {\n\
+             return ItemCombinerMenuSlotDefinition.create().withSlot(0, 27, 47, stack -> true).withSlot(1, 76, 47, stack -> true).withResultSlot(2, 134, 47).build();\n\
+           }\n\
+           @Override protected boolean isValidBlock(BlockState state) { return true; }\n\
+           @Override public void createResult() {}\n\
+           @Override protected void onTake(Player player, ItemStack stack) {}\n\
+         }",
+    ),
+    (
+        "demo/OddMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.inventory.ItemCombinerMenu;\n\
+         import net.minecraft.world.inventory.ItemCombinerMenuSlotDefinition;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         /** A menu of the bench's type with one input: not the layout the type declares. */\n\
+         public class OddMenu extends ItemCombinerMenu {\n\
+           public OddMenu(int id, Inventory inventory, ContainerLevelAccess access) {\n\
+             super(BenchMenu.TYPE, id, inventory, access, ItemCombinerMenuSlotDefinition.create().withSlot(0, 27, 47, stack -> true).withResultSlot(1, 134, 47).build());\n\
+           }\n\
+           @Override protected boolean isValidBlock(BlockState state) { return true; }\n\
+           @Override public void createResult() {}\n\
+           @Override protected void onTake(Player player, ItemStack stack) {}\n\
+         }",
+    ),
+    (
+        "demo/OddBench.java",
+        "package demo;\n\
+         import net.minecraft.core.BlockPos;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.InteractionResult;\n\
+         import net.minecraft.world.SimpleMenuProvider;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.level.Level;\n\
+         import net.minecraft.world.level.block.Block;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         import net.minecraft.world.phys.BlockHitResult;\n\
+         public class OddBench extends Block {\n\
+           public OddBench(Properties properties) { super(properties); }\n\
+           @Override protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n\
+             if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> new OddMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.odd\")));\n\
+             return InteractionResult.CONSUME;\n\
            }\n\
          }",
     ),
@@ -1118,6 +1330,9 @@ pub(crate) const STUBS: &[(&str, &str)] = &[
          import net.minecraft.world.MenuProvider;\n\
          public abstract class Player {\n\
            public int tickCount;\n\
+           public final double getX() { return 0; }\n\
+           public final double getY() { return 0; }\n\
+           public final double getZ() { return 0; }\n\
            public OptionalInt openMenu(MenuProvider provider) { return OptionalInt.empty(); }\n\
          }",
     ),
@@ -1149,10 +1364,23 @@ pub(crate) const STUBS: &[(&str, &str)] = &[
     (
         "net/minecraft/world/inventory/AbstractContainerMenu.java",
         "package net.minecraft.world.inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
          import net.minecraft.world.item.ItemStack;\n\
          public abstract class AbstractContainerMenu {\n\
            protected AbstractContainerMenu(MenuType<?> type, int id) {}\n\
+           public void removed(Player player) {}\n\
+           public ItemStack getCarried() { return null; }\n\
+           protected DataSlot addDataSlot(DataSlot slot) { return slot; }\n\
            public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) { return true; }\n\
+         }",
+    ),
+    (
+        "net/minecraft/world/inventory/DataSlot.java",
+        "package net.minecraft.world.inventory;\n\
+         public abstract class DataSlot {\n\
+           public static DataSlot standalone() { return null; }\n\
+           public abstract int get();\n\
+           public abstract void set(int value);\n\
          }",
     ),
     (
@@ -1280,53 +1508,75 @@ fn held_window(java: &HorizonJava) -> Option<i32> {
         .map(|open| open.container_id)
 }
 
+/// The bench fixture's host and bridge: the jar run, its player logged in, its menus installed.
+const BENCH_MENUS: &[&str] = &["demo:bench", "demo:data"];
+const BENCH_ITEMS: &[&str] = &[
+    "minecraft:cobblestone",
+    "minecraft:amethyst_shard",
+    "minecraft:stone_bricks",
+    "minecraft:dirt",
+];
+const BENCH_TYPES: &[(&str, usize, usize)] = &[("demo:bench", 3, 0), ("demo:data", 3, 1)];
+
+fn bench_part(java: &HorizonJava, block: &str) -> JavaBlockUsePart {
+    JavaBlockUsePart::new(Arc::clone(&java.state), block.to_owned())
+}
+
+/// Open the bench with 5 cobblestone and 3 amethyst shards in the hotbar: the open window.
+fn open_bench(java: &HorizonJava, host: &mut MenuTestHost) -> i32 {
+    host.world.inventory[0] = Some(host.stack("minecraft:cobblestone", 5));
+    host.world.inventory[1] = Some(host.stack("minecraft:amethyst_shard", 3));
+    host.block = "demo:bench".to_owned();
+    assert_eq!(
+        bench_part(java, "demo:bench").dispatch(host, test_block_state(), &right_click(), false),
+        Some(InteractionResult::Consume)
+    );
+    host.world
+        .menu
+        .as_ref()
+        .expect("Sunrise opened the menu")
+        .window
+}
+
+const SLOT_TAKE: &str = "game-hook re-entry: sunrise#live_menu:menu_slot_take_not_dispatched";
+
 /// The two-input combiner from end to end through the hooks: a provider whose `createMenu`
 /// answers `null` advances both counters; the bench opens as the Sunrise window the player's
 /// `containerCounter` names; inputs placed by click and shift-click compute the result; taking
-/// it consumes one of each input and awards the crafted stat; a tick keeps the menu; the close
-/// hands the inputs back. Nothing on the way is counted, so every Java answer was Java's (the
-/// take's `player.tickCount` read included: Sunrise's `tick_count` answers it).
+/// it consumes one of each input and awards the crafted stat (the take is the one counted
+/// thing: Sunrise's `menu_slot_take` can't be raised by a mod); a tick keeps the menu; the close
+/// hands the inputs back. A vanilla menu opened in between (no hook a mod hears moves the
+/// counter, as a crafting table's) doesn't make the next window drift. Everything else is exact:
+/// the take's `player.tickCount` read included (Sunrise's `tick_count` answers it).
 #[test]
 fn javac_bench_menu_opens_clicks_takes_and_closes_through_the_sunrise_hooks() {
     on_a_big_stack("live-menu-bench", || {
         let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
         let java = java_with(jar);
-        with_bridge(&java, "demo:bench", || {
-            let mut host = MenuTestHost::new(
-                &[
-                    "minecraft:cobblestone",
-                    "minecraft:amethyst_shard",
-                    "minecraft:stone_bricks",
-                    "minecraft:dirt",
-                ],
-                &[("demo:bench", 3)],
-            );
-            host.world.inventory[0] = Some(host.stack("minecraft:cobblestone", 5));
-            host.world.inventory[1] = Some(host.stack("minecraft:amethyst_shard", 3));
+        with_bridge(&java, BENCH_MENUS, || {
+            let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
             // The player opened 41 windows before: only Sunrise knows that.
             host.world.counter = 41;
 
             // 1. `createMenu` answers `null`: `ServerPlayer.openMenu` advanced the counter all
             //    the same, and Sunrise's follows (`next_container_counter`).
             host.block = "demo:null_bench".to_owned();
-            let null_bench =
-                JavaBlockUsePart::new(Arc::clone(&java.state), "demo:null_bench".to_owned());
             assert_eq!(
-                null_bench.dispatch(&mut host, test_block_state(), &right_click(), false),
+                bench_part(&java, "demo:null_bench").dispatch(
+                    &mut host,
+                    test_block_state(),
+                    &right_click(),
+                    false
+                ),
                 Some(InteractionResult::Consume)
             );
             assert_eq!(host.world.counter, 42);
             assert!(host.world.menu.is_none());
 
             // 2. The bench opens window 43 on both sides; `initMenu` ran on Sunrise's facts.
-            host.block = "demo:bench".to_owned();
-            let bench = JavaBlockUsePart::new(Arc::clone(&java.state), "demo:bench".to_owned());
-            assert_eq!(
-                bench.dispatch(&mut host, test_block_state(), &right_click(), false),
-                Some(InteractionResult::Consume)
-            );
-            let open = host.world.menu.clone().expect("Sunrise opened the menu");
-            assert_eq!((open.window, open.menu.as_str()), (43, "demo:bench"));
+            let window = open_bench(&java, &mut host);
+            let open = host.world.menu.clone().unwrap();
+            assert_eq!((window, open.menu.as_str()), (43, "demo:bench"));
             assert_eq!(host.opens, [("demo:bench".to_owned(), Some(POS))]);
             assert_eq!(held_window(&java), Some(43));
             assert_eq!(counted(&java), []);
@@ -1356,6 +1606,7 @@ fn javac_bench_menu_opens_clicks_takes_and_closes_through_the_sunrise_hooks() {
                 ]
             );
             assert_eq!(host.world.inventory[1], None);
+            assert_eq!(counted(&java), []);
 
             // 5. Take the result: `onTake` shrinks both inputs; `onCraftedBy` awards the stat.
             assert!(host.click(2, 0, 0));
@@ -1368,6 +1619,7 @@ fn javac_bench_menu_opens_clicks_takes_and_closes_through_the_sunrise_hooks() {
                 host.world.stats,
                 [(StatType::Crafted, "minecraft:stone_bricks".to_owned(), 4)]
             );
+            assert_eq!(counted(&java), [(SLOT_TAKE.to_owned(), 1)]);
 
             // 6. A tick: the bench is still there and in reach, so the menu stays.
             host.tick();
@@ -1387,16 +1639,26 @@ fn javac_bench_menu_opens_clicks_takes_and_closes_through_the_sunrise_hooks() {
                 ]
             );
             assert_eq!(held_window(&java), None);
-            assert_eq!(counted(&java), []);
+            assert_eq!(counted(&java), [(SLOT_TAKE.to_owned(), 1)]);
 
-            // 8. Reopen (window 44), put a cobblestone in, walk out of reach with one on the
-            //    cursor: the tick's `stillValid` fails, the Java close returns both, and the
-            //    window closes with an empty cursor, so nothing comes back twice.
+            // 8. Two vanilla windows open and close (a crafting table: no hook a mod hears
+            //    carries their ids), then the bench again: its window is the counter's next.
+            host.world.counter += 2;
             assert_eq!(
-                bench.dispatch(&mut host, test_block_state(), &right_click(), false),
+                bench_part(&java, "demo:bench").dispatch(
+                    &mut host,
+                    test_block_state(),
+                    &right_click(),
+                    false
+                ),
                 Some(InteractionResult::Consume)
             );
-            assert_eq!(host.world.menu.as_ref().map(|open| open.window), Some(44));
+            assert_eq!(host.world.menu.as_ref().map(|open| open.window), Some(46));
+            assert_eq!(held_window(&java), Some(46));
+
+            // 9. Put a cobblestone in, walk out of reach with three on the cursor:
+            //    `ServerPlayer.tick`'s `stillValid` fails, the Java close returns both, and the
+            //    window closes with an empty cursor, so nothing comes back twice.
             let cobble = (0..36)
                 .find(|&slot| host.text(&host.world.inventory[slot]) == "4 minecraft:cobblestone")
                 .unwrap() as i32;
@@ -1420,8 +1682,161 @@ fn javac_bench_menu_opens_clicks_takes_and_closes_through_the_sunrise_hooks() {
                     "4 minecraft:stone_bricks"
                 ]
             );
-            assert_eq!(counted(&java), []);
+            assert_eq!(counted(&java), [(SLOT_TAKE.to_owned(), 1)]);
         });
+    });
+}
+
+/// `ServerPlayer.tick`'s check runs at `entity_tick_pre`, before `gameMode.tick`; a block change
+/// at the menu's position during the player's tick (a delayed break) is one that vanilla's
+/// check would have seen there: counted. `doTick`'s check, after it, closes the menu.
+#[test]
+fn a_block_change_during_the_players_tick_is_counted_and_closes_at_do_tick() {
+    on_a_big_stack("live-menu-tick-phase", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        let java = java_with(jar);
+        with_bridge(&java, BENCH_MENUS, || {
+            let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+            open_bench(&java, &mut host);
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            assert!(host.click(0, 1, 0));
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            // Another block replaces the bench while the player ticks.
+            host.tick_with(|host| host.block = "demo:null_bench".to_owned());
+            assert!(host.world.menu.is_none());
+            assert_eq!(held_window(&java), None);
+            assert_eq!(
+                host.held(),
+                ["3 minecraft:amethyst_shard", "5 minecraft:cobblestone"]
+            );
+            assert_eq!(
+                counted(&java),
+                [(
+                    "game-hook re-entry: sunrise#live_menu:still_valid_before_game_mode_tick"
+                        .to_owned(),
+                    1
+                )]
+            );
+        });
+    });
+}
+
+/// A menu with a data slot opens with the values `sendInitialData` sent (`ModMenuOpen::data`;
+/// Sunrise refuses another count with `DataCountMismatch`). A menu whose live layout is not its
+/// type's declared one (a provider building a one-input menu of the bench's type) never opens.
+#[test]
+fn data_slots_open_with_their_values_and_a_mismatched_layout_never_opens() {
+    on_a_big_stack("live-menu-data", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        let java = java_with(jar);
+        with_bridge(&java, BENCH_MENUS, || {
+            let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+            host.block = "demo:data_bench".to_owned();
+            assert_eq!(
+                bench_part(&java, "demo:data_bench").dispatch(
+                    &mut host,
+                    test_block_state(),
+                    &right_click(),
+                    false
+                ),
+                Some(InteractionResult::Consume)
+            );
+            let open = host.world.menu.clone().expect("the data menu opened");
+            assert_eq!(
+                (open.menu.as_str(), open.data.as_slice()),
+                ("demo:data", &[7][..])
+            );
+            assert_eq!(counted(&java), []);
+            assert!(host.close_window());
+            host.deliver_closes();
+
+            host.block = "demo:odd_bench".to_owned();
+            assert_eq!(
+                bench_part(&java, "demo:odd_bench").dispatch(
+                    &mut host,
+                    test_block_state(),
+                    &right_click(),
+                    false
+                ),
+                Some(InteractionResult::Consume)
+            );
+            assert!(host.world.menu.is_none());
+            assert_eq!(held_window(&java), None);
+            assert_eq!(host.opens.len(), 1, "only the data menu opened");
+            assert_eq!(
+                counted(&java),
+                [(
+                    "game-hook re-entry: sunrise#openModMenu:layout_unverified".to_owned(),
+                    1
+                )]
+            );
+        });
+    });
+}
+
+/// A disconnect or a death while an input sits in the menu: vanilla's `dropOrPlaceInInventory`
+/// drops it (`isRemoved` for `KILLED`, `hasDisconnected`), as Sunrise drops its cursor
+/// (`MenuRemoval::drops_items`). Nothing is lost or doubled: the stacks in the world and the
+/// inventory are the ones the player had. A dead player throws nothing (`drop_stack` refuses), so
+/// the stack is spawned where `Player.drop` puts it; a player Sunrise no longer has, at their last
+/// known position. A logout that reaches the mod first closes the menu the same way.
+#[test]
+fn a_disconnect_or_a_death_drops_what_the_menu_held() {
+    on_a_big_stack("live-menu-removal", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        for how in ["disconnect", "death", "logout"] {
+            let java = java_with(Arc::clone(&jar));
+            with_bridge(&java, BENCH_MENUS, || {
+                let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+                open_bench(&java, &mut host);
+                // All five cobblestone picked up, one right-clicked into the base.
+                assert!(host.click(hotbar(3, 0), 0, 0));
+                assert!(host.click(0, 1, 0));
+                // A tick, so the bridge has seen the player where they stand.
+                host.tick();
+                match how {
+                    "disconnect" => host.disconnect(),
+                    "death" => {
+                        host.health = 0.0;
+                        assert!(host.close_window());
+                        host.deliver_closes();
+                    }
+                    _ => {
+                        // The logout reaches the mod before any `menu_closed`.
+                        host.present = false;
+                        crate::live_menu::close_for_removal(
+                            &java,
+                            &mut host,
+                            UUID,
+                            crate::live_menu::Removal::Disconnected,
+                        );
+                        assert_eq!(held_window(&java), None);
+                        host.close_window();
+                        host.deliver_closes();
+                    }
+                }
+                assert_eq!(held_window(&java), None, "{how}");
+                let mut spawned: Vec<String> = host
+                    .world
+                    .spawned
+                    .iter()
+                    .map(|(stack, at)| {
+                        format!("{} at y {:.2}", host.text(&Some(stack.clone())), at[1])
+                    })
+                    .collect();
+                spawned.sort();
+                assert_eq!(
+                    spawned,
+                    [
+                        "1 minecraft:cobblestone at y 66.32",
+                        "4 minecraft:cobblestone at y 66.32"
+                    ],
+                    "{how}"
+                );
+                assert_eq!(host.held(), ["3 minecraft:amethyst_shard"], "{how}");
+                assert!(host.world.drops.is_empty(), "{how}");
+            });
+        }
     });
 }
 
@@ -1438,14 +1853,14 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
     on_a_big_stack("live-menu-runes", move || {
         let jar = Arc::new(NativeJar::from_path(Path::new(&jar_path)).expect("load RUNES_JAR"));
         let java = java_with(jar);
-        with_bridge(&java, "runes:crafting", || {
+        with_bridge(&java, &["runes:crafting"], || {
             let mut host = MenuTestHost::new(
                 &[
                     "minecraft:cobblestone",
                     "minecraft:ender_pearl",
                     "runes:arcane_stone",
                 ],
-                &[("runes:crafting", 3)],
+                &[("runes:crafting", 3, 0)],
             );
             host.world.inventory[0] = Some(host.stack("minecraft:cobblestone", 5));
             host.world.inventory[1] = Some(host.stack("minecraft:ender_pearl", 3));
@@ -1483,6 +1898,9 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
                 ]
             );
             assert_eq!(counted(&java), []);
+            // A tick (both of `ServerPlayer`'s checks) keeps the altar's menu.
+            host.tick();
+            assert_eq!(held_window(&java), Some(8));
 
             // Take the stones: Runes' `onTake` consumes one of each input.
             assert!(host.click(2, 0, 0));
@@ -1498,10 +1916,12 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             // Runes' `RuneCrafter` cooldown read the player's `tickCount` and position (Sunrise's
             // facts, so exact) and went on to its crafting sound: the level's `RandomSource` for
             // its pitch is unknown, counted. `RecipeCraftingHolder.awardUsedRecipes`'
-            // `RECIPE_CRAFTED` trigger has no Sunrise call (vanilla triggers aren't lent), counted.
+            // `RECIPE_CRAFTED` trigger has no Sunrise call (vanilla triggers aren't lent), and
+            // the take's `menu_slot_take` is the engine's to raise: both counted.
             assert_eq!(
                 taken,
                 [
+                    (SLOT_TAKE.to_owned(), 1),
                     (
                         "game-hook re-entry: sunrise#live_menu:recipe_crafted_trigger".to_owned(),
                         1

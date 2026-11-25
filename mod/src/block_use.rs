@@ -92,8 +92,32 @@ impl JavaBlockUsePart {
         } else {
             "useWithoutItem"
         };
+        let openings: Vec<Opening> = match &outcome {
+            Ok(outcome) => {
+                let mut guard = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard
+                    .jars
+                    .get(jar_index)
+                    .is_some_and(|jar| jar.row.id == jar_id)
+                    .then(|| {
+                        crate::live_menu::opening_check(
+                            &mut guard,
+                            jar_index,
+                            click.player,
+                            &outcome.live_effects,
+                        )
+                    })
+                    .flatten()
+                    .into_iter()
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        };
         let applied = match &outcome {
-            Ok(outcome) => apply_menu_effects(host, click.player, &outcome.menu_effects),
+            Ok(outcome) => apply_menu_effects(host, click.player, &outcome.menu_effects, &openings),
             Err(_) => Vec::new(),
         };
         let opening_counted =
@@ -223,16 +247,17 @@ impl JavaBlockUsePart {
             };
             crate::live_menu::opening_contents(jar, &*host, jar_index, uuid, window)
         };
-        let Some((prepared, java_slots)) = prepared else {
+        let Some((prepared, roles)) = prepared else {
             return Vec::new();
         };
         let menu = host
             .player(uuid)
             .and_then(|player| player.container_menu(&*host))
             .filter(|menu| menu.container_id(&*host) == Some(window));
-        if menu.and_then(|menu| menu.slot_count(&*host)) != Some(java_slots) {
+        if !menu.is_some_and(|menu| crate::live_menu::window_matches(&*host, menu, &roles)) {
             log::warn!(
-                "{LOG}: {jar_id}: Sunrise's window {window} does not have the Java menu's {java_slots} slots; closing it"
+                "{LOG}: {jar_id}: Sunrise's window {window} does not lay out the Java menu's {} slots as Java does; closing it",
+                roles.len()
             );
             if let Some(menu) = menu {
                 menu.close_container(host);
@@ -521,11 +546,23 @@ pub(crate) enum MenuApplied {
     },
 }
 
-/// Carry a use's menu effects out on Sunrise, in order, without the state lock.
+/// A Java menu a call left held, checked before its window opens (`live_menu::opening_check`):
+/// the data slot values it opens with, or why it must not open (its live layout is not its
+/// type's declared one, its initial data isn't known).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Opening {
+    pub(crate) container_id: i32,
+    pub(crate) data: Result<Vec<i32>, String>,
+}
+
+/// Carry a use's menu effects out on Sunrise, in order, without the state lock. An open only
+/// goes out for a menu `openings` checked; any other is refused, never a window whose layout
+/// nothing compared with its type's.
 pub(crate) fn apply_menu_effects(
     host: &mut dyn ServerHost,
     player_uuid: u128,
     effects: &[MenuEffect],
+    openings: &[Opening],
 ) -> Vec<MenuApplied> {
     deliver_menu_effects(
         &mut SunriseMenus {
@@ -533,14 +570,15 @@ pub(crate) fn apply_menu_effects(
             player: player_uuid,
         },
         effects,
+        openings,
     )
 }
 
 /// Where a call's menu effects go: Sunrise ([`SunriseMenus`]), or a test's recorder.
 pub(crate) trait MenuSink {
-    /// Open Java's menu as a Sunrise mod menu, replacing the open one
-    /// ([`MenuReplace::CloseFirst`]: its close, then the open, as vanilla's packets go).
-    fn open(&mut self, effect: &OpenMenuEffect) -> SunriseMenuAttempt;
+    /// Open Java's menu as a Sunrise mod menu with its initial data slot values, replacing the
+    /// open one ([`MenuReplace::CloseFirst`]: its close, then the open, as vanilla's packets go).
+    fn open(&mut self, effect: &OpenMenuEffect, data: Vec<i32>) -> SunriseMenuAttempt;
     /// Close window `container_id`, if it is the one shown.
     fn close(&mut self, container_id: i32) -> bool;
     /// The window shown now.
@@ -557,8 +595,8 @@ struct SunriseMenus<'a> {
 }
 
 impl MenuSink for SunriseMenus<'_> {
-    fn open(&mut self, effect: &OpenMenuEffect) -> SunriseMenuAttempt {
-        try_open_sunrise_menu(self.host, self.player, effect)
+    fn open(&mut self, effect: &OpenMenuEffect, data: Vec<i32>) -> SunriseMenuAttempt {
+        try_open_sunrise_menu(self.host, self.player, effect, data)
     }
 
     fn close(&mut self, container_id: i32) -> bool {
@@ -592,12 +630,29 @@ impl MenuSink for SunriseMenus<'_> {
 /// - followed by an open Sunrise refuses or a mod cancels (which leaves Sunrise's old window
 ///   as it was), it is closed right after that attempt, which itself changed nothing;
 /// - followed by no open, it is closed then.
-fn deliver_menu_effects(sink: &mut dyn MenuSink, effects: &[MenuEffect]) -> Vec<MenuApplied> {
+fn deliver_menu_effects(
+    sink: &mut dyn MenuSink,
+    effects: &[MenuEffect],
+    openings: &[Opening],
+) -> Vec<MenuApplied> {
     let mut applied = Vec::new();
     for (index, effect) in effects.iter().enumerate() {
         match effect {
             MenuEffect::Opened(open) => {
-                let attempt = sink.open(open);
+                let checked = openings
+                    .iter()
+                    .find(|opening| opening.container_id == open.container_id)
+                    .map(|opening| opening.data.clone())
+                    .unwrap_or_else(|| {
+                        Err("the menu's layout was not compared with its type's".to_owned())
+                    });
+                let attempt = match checked {
+                    Ok(data) => sink.open(open, data),
+                    Err(reason) => SunriseMenuAttempt::Refused {
+                        hook_tag: "sunrise#openModMenu:layout_unverified",
+                        reason: format!("openMenu: not opened: {reason}"),
+                    },
+                };
                 let replaced = matches!(attempt, SunriseMenuAttempt::Opened(_));
                 applied.push(MenuApplied::Opened {
                     container_id: open.container_id,
@@ -757,7 +812,7 @@ pub(crate) fn menu_closed(
     let delivered: Vec<(usize, String, Vec<MenuApplied>)> = closes
         .into_iter()
         .map(|(index, id, effects)| {
-            let applied = apply_menu_effects(host, player_uuid, &effects);
+            let applied = apply_menu_effects(host, player_uuid, &effects, &[]);
             (index, id, applied)
         })
         .collect();
@@ -909,6 +964,7 @@ fn try_open_sunrise_menu(
     host: &mut dyn ServerHost,
     player_uuid: u128,
     effect: &OpenMenuEffect,
+    data: Vec<i32>,
 ) -> SunriseMenuAttempt {
     let Some(menu_id) = effect.menu_type_id.as_deref() else {
         return SunriseMenuAttempt::Refused {
@@ -958,9 +1014,10 @@ fn try_open_sunrise_menu(
         };
     };
 
-    // No opening bytes, no live data values (Decaf's menus declare none), no opening hand (a
-    // block opened it), and the old window closed first: `ModMenuOpen::new`'s defaults.
+    // No opening bytes and no opening hand (a block opened it), the Java menu's initial data
+    // slot values, and the old window closed first.
     let mut request = ModMenuOpen::new(menu_key, title_text);
+    request.data = data;
     request.pos = effect.access_pos;
     request.replace = MenuReplace::CloseFirst;
     let result = player_ref.open_mod_menu(host, request);
@@ -988,6 +1045,10 @@ fn classify_open_mod_menu_result(
         Err(OpenMenuError::TooLarge) => SunriseMenuAttempt::Refused {
             hook_tag: "sunrise#openModMenu:extra_too_large",
             reason: format!("openMenu: extra menu payload too large for `{menu_id}`"),
+        },
+        Err(OpenMenuError::DataCountMismatch) => SunriseMenuAttempt::Refused {
+            hook_tag: "sunrise#openModMenu:data_count_mismatch",
+            reason: format!("openMenu: `{menu_id}` declares another number of data slots"),
         },
         Err(OpenMenuError::Title(error)) => SunriseMenuAttempt::Refused {
             hook_tag: "sunrise#openModMenu:title_error",
@@ -1313,6 +1374,7 @@ mod tests {
                 MenuEffect::Closed { container_id: 1 },
                 MenuEffect::Orphaned { container_id: 2 },
             ],
+            &[],
         );
         assert_eq!(
             applied,
@@ -1329,7 +1391,7 @@ mod tests {
                 MenuApplied::Shown(PlayerContainer::Inventory),
             ]
         );
-        assert!(apply_menu_effects(&mut host, uuid, &[]).is_empty());
+        assert!(apply_menu_effects(&mut host, uuid, &[], &[]).is_empty());
     }
 
     /// A Sunrise stand-in that records each call and opens or refuses as told.
@@ -1340,8 +1402,9 @@ mod tests {
     }
 
     impl MenuSink for RecordingSink {
-        fn open(&mut self, effect: &OpenMenuEffect) -> SunriseMenuAttempt {
-            self.calls.push(format!("open {}", effect.container_id));
+        fn open(&mut self, effect: &OpenMenuEffect, data: Vec<i32>) -> SunriseMenuAttempt {
+            self.calls
+                .push(format!("open {} data {data:?}", effect.container_id));
             if self.accept {
                 // `CloseFirst`: the shown window closes, then this one opens.
                 self.shown = PlayerContainer::Open(effect.container_id);
@@ -1401,8 +1464,9 @@ mod tests {
         let applied = deliver_menu_effects(
             &mut sink,
             &[MenuEffect::Closed { container_id: 1 }, opened_effect(2)],
+            &[checked(2)],
         );
-        assert_eq!(sink.calls, ["open 2", "close 1"]);
+        assert_eq!(sink.calls, ["open 2 data [3]", "close 1"]);
         assert_eq!(
             applied,
             vec![
@@ -1434,8 +1498,9 @@ mod tests {
         let applied = deliver_menu_effects(
             &mut sink,
             &[MenuEffect::Closed { container_id: 1 }, opened_effect(2)],
+            &[checked(2)],
         );
-        assert_eq!(sink.calls, ["open 2"]);
+        assert_eq!(sink.calls, ["open 2 data [3]"]);
         assert_eq!(
             applied,
             vec![
@@ -1452,9 +1517,52 @@ mod tests {
             accept: true,
             shown: PlayerContainer::Open(2),
         };
-        deliver_menu_effects(&mut sink, &[MenuEffect::Closed { container_id: 2 }]);
+        deliver_menu_effects(&mut sink, &[MenuEffect::Closed { container_id: 2 }], &[]);
         assert_eq!(sink.calls, ["close 2"]);
         assert_eq!(sink.shown, PlayerContainer::Inventory);
+    }
+
+    /// A checked opening: the window opens with the menu's initial data slot values.
+    fn checked(container_id: i32) -> Opening {
+        Opening {
+            container_id,
+            data: Ok(vec![3]),
+        }
+    }
+
+    /// An open nothing checked (or whose check failed: a layout not its type's, data unknown) is
+    /// refused before Sunrise is asked, and the window it would have replaced still closes.
+    #[test]
+    fn an_unchecked_or_mismatched_open_is_refused_without_a_window() {
+        for openings in [
+            Vec::new(),
+            vec![Opening {
+                container_id: 2,
+                data: Err("the open menu's layout is not its type's declared one".to_owned()),
+            }],
+        ] {
+            let mut sink = RecordingSink {
+                calls: Vec::new(),
+                accept: true,
+                shown: PlayerContainer::Open(1),
+            };
+            let applied = deliver_menu_effects(
+                &mut sink,
+                &[MenuEffect::Closed { container_id: 1 }, opened_effect(2)],
+                &openings,
+            );
+            assert_eq!(sink.calls, ["close 1"]);
+            assert!(matches!(
+                &applied[0],
+                MenuApplied::Opened {
+                    container_id: 2,
+                    attempt: SunriseMenuAttempt::Refused {
+                        hook_tag: "sunrise#openModMenu:layout_unverified",
+                        ..
+                    },
+                }
+            ));
+        }
     }
 
     #[test]

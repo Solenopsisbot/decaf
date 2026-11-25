@@ -719,8 +719,9 @@ fn menu_declarations_json(
     let mut menus = Vec::new();
     let mut refusals = Vec::new();
     for declaration in jar.menu_type_declarations(host) {
-        match declaration.file {
-            Ok(file) => menus.push(serde_json::json!({ "id": declaration.id, "file": file })),
+        match declaration.layout {
+            Ok(layout) => menus
+                .push(serde_json::json!({ "id": declaration.id, "file": layout.declaration() })),
             Err(reason) => {
                 refusals.push(serde_json::json!({ "id": declaration.id, "reason": reason }))
             }

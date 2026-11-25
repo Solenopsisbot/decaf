@@ -178,7 +178,17 @@ const STUBS: &[(&str, &str)] = &[
            protected AbstractContainerMenu(MenuType<?> type, int id) {}\n\
            public void removed(Player player) {}\n\
            public ItemStack getCarried() { return null; }\n\
+           protected DataSlot addDataSlot(DataSlot slot) { return slot; }\n\
            public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) { return true; }\n\
+         }",
+    ),
+    (
+        "net/minecraft/world/inventory/DataSlot.java",
+        "package net.minecraft.world.inventory;\n\
+         public abstract class DataSlot {\n\
+           public static DataSlot standalone() { return null; }\n\
+           public abstract int get();\n\
+           public abstract void set(int value);\n\
          }",
     ),
     (
@@ -393,6 +403,8 @@ fn effect_lines(effects: &[LiveMenuEffect], out: &mut Vec<String>) {
                 format!("inventory_sent {slot} {}", components_text(stack))
             }
             LiveMenuEffect::Closed { container_id } => format!("closed {container_id}"),
+            // A notice for the embedder's own take hook; the oracle sends no packet for it.
+            LiveMenuEffect::SlotTaken { .. } => continue,
         };
         out.push(format!("effect: {line}"));
     }
@@ -738,9 +750,13 @@ const BRIDGE_SOURCES: &[(&str, &str)] = &[
          public final class BridgeProbe implements ModInitializer {\n\
            @Override public void onInitialize() {\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"nothing\"), new MenuType<BenchMenu>((id, inventory) -> null, FeatureFlags.VANILLA_SET));\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"data\"), new MenuType<DataMenu>(DataMenu::new, FeatureFlags.VANILLA_SET));\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"branchy\"), new MenuType<BranchMenu>(BranchMenu::new, FeatureFlags.VANILLA_SET));\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"late_slot\"), new MenuType<LateSlotMenu>(LateSlotMenu::new, FeatureFlags.VANILLA_SET));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"tick_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 0));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"null_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 1));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"removed_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 2));\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"data_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 3));\n\
            }\n\
          }",
     ),
@@ -763,9 +779,49 @@ const BRIDGE_SOURCES: &[(&str, &str)] = &[
            @Override protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n\
              if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
              int kind = this.kind;\n\
-             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> kind == 0 ? new TickMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 1 ? null : new RemovedMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> kind == 0 ? new TickMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 1 ? null : kind == 2 ? new RemovedMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : new DataMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
              return InteractionResult.CONSUME;\n\
            }\n\
+         }",
+    ),
+    (
+        "demo/DataMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.inventory.DataSlot;\n\
+         public class DataMenu extends BenchMenu {\n\
+           public DataMenu(int id, Inventory inventory) { this(id, inventory, ContainerLevelAccess.NULL); }\n\
+           public DataMenu(int id, Inventory inventory, ContainerLevelAccess access) {\n\
+             super(id, inventory, access);\n\
+             addDataSlot(DataSlot.standalone()).set(7);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/BranchMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.inventory.DataSlot;\n\
+         public class BranchMenu extends BenchMenu {\n\
+           public BranchMenu(int id, Inventory inventory) {\n\
+             super(id, inventory, ContainerLevelAccess.NULL);\n\
+             if (id > 0) addDataSlot(DataSlot.standalone());\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/LateSlotMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         public class LateSlotMenu extends BenchMenu {\n\
+           public LateSlotMenu(int id, Inventory inventory) {\n\
+             super(id, inventory, ContainerLevelAccess.NULL);\n\
+             extra();\n\
+           }\n\
+           private void extra() {}\n\
          }",
     ),
     (
@@ -975,13 +1031,32 @@ fn menu_type_declaration_is_the_java25_layout() {
                 .iter()
                 .find(|declaration| declaration.id == id)
                 .unwrap_or_else(|| panic!("no declaration for {id}: {declarations:?}"))
-                .file
+                .layout
                 .clone()
+                .map(|layout| layout.declaration())
         };
-        assert_eq!(found("demo:bench"), Ok(expected));
+        assert_eq!(found("demo:bench"), Ok(expected.clone()));
+        // One straight-line `addDataSlot` after the combiner's constructor: one data slot.
+        let mut with_data = expected;
+        with_data["data_slots"] = 1.into();
+        assert_eq!(found("demo:data"), Ok(with_data));
+        // Refused from the bytecode, before anything runs: a supplier that builds nothing
+        // isn't a constructor reference, a branch could change the layout, and so could a call
+        // into the menu's own code after its slots are laid out.
         assert_eq!(
             found("demo:nothing"),
-            Err("its MenuSupplier returned null".to_owned())
+            Err("its MenuSupplier lambda does not construct exactly one menu".to_owned())
+        );
+        assert_eq!(
+            found("demo:branchy"),
+            Err("demo/BranchMenu's constructor branches or throws".to_owned())
+        );
+        assert_eq!(
+            found("demo:late_slot"),
+            Err(
+                "demo/LateSlotMenu's constructor calls demo/LateSlotMenu.extra after its slots are laid out"
+                    .to_owned()
+            )
         );
     });
 }
@@ -1096,19 +1171,25 @@ fn a_null_create_menu_still_advances_the_container_counter() {
 /// `menu_closed`): the call starts from its empty cursor (`MenuPlayerFacts::carried`), so the
 /// menu's `removed` hands back only the inputs, and the cursor's stack isn't handed back twice.
 /// A jar `removed` override could read the cursor before `super.removed`, where Java's would
-/// still see the stack: that close counts. Without knowing whether the player is leaving
-/// (`departure_unknown`), returning the inputs counts too.
+/// still see the stack: that close counts. A player removed for a reason other than a dimension
+/// change (killed) or disconnected gets the inputs dropped (`dropOrPlaceInInventory` offsets
+/// 16-59: `drop(stack, false, SERVER_ONLY)`); a dimension change places them back.
 #[test]
 fn a_close_starts_from_the_embedders_cursor() {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Removal {
+        Live,
+        ChangedDimension,
+        Killed,
+        Disconnected,
+    }
     on_big_stack("live-menu-close", || {
-        for (block, departure_unknown, counted) in [
-            ("demo:bench", false, None),
-            (
-                "demo:removed_bench",
-                false,
-                Some("net/minecraft/server/level/ServerPlayer#doCloseContainer()V"),
-            ),
-            ("demo:bench", true, Some("")),
+        for (block, removal) in [
+            ("demo:bench", Removal::Live),
+            ("demo:removed_bench", Removal::Live),
+            ("demo:bench", Removal::ChangedDimension),
+            ("demo:bench", Removal::Killed),
+            ("demo:bench", Removal::Disconnected),
         ] {
             let (fixture, mut host) = bridge_host("live_menu_close");
             let mut inventory = vec![StdHost::empty_item_stack(); 43];
@@ -1134,7 +1215,8 @@ fn a_close_starts_from_the_embedders_cursor() {
                 );
                 inventory = outcome.inventory.unwrap();
             }
-            // The embedder closed the window and put the nine back into slot 0.
+            // The embedder closed the window and put the nine back into slot 0 (or dropped
+            // them, for a player who is gone; either way not on the cursor any more).
             inventory[0] = host.make_item_stack_for_id("minecraft:cobblestone", 9, false);
             host.take_stdout();
             let closed = close_menu(
@@ -1143,61 +1225,109 @@ fn a_close_starts_from_the_embedders_cursor() {
                 window,
                 &MenuPlayerFacts {
                     carried: Some(StdHost::empty_item_stack()),
-                    departure_unknown,
+                    removed: matches!(
+                        removal,
+                        Removal::ChangedDimension | Removal::Killed | Removal::Disconnected
+                    ),
+                    removed_for_dimension_change: removal == Removal::ChangedDimension,
+                    disconnected: removal == Removal::Disconnected,
                     ..facts(inventory.clone(), 7.5, false)
                 },
             );
             assert_eq!(closed.failure, None);
             assert!(host.player_open_menu(UUID).is_none());
-            match counted {
-                None => {
-                    assert_eq!(
-                        closed.unknown_host_call_count, 0,
-                        "{:?}",
-                        closed.unknown_host_calls
-                    );
-                    assert_eq!(
-                        held(&host, &closed.inventory.unwrap()),
-                        ["10 minecraft:cobblestone"]
-                    );
+            let drops: Vec<String> = closed
+                .effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    LiveMenuEffect::Drop {
+                        stack,
+                        retain_ownership,
+                        prediction,
+                    } => Some(format!(
+                        "{} retain={retain_ownership} {prediction:?}",
+                        components_text(stack)
+                    )),
+                    _ => None,
+                })
+                .collect();
+            let held = held(&host, &closed.inventory.clone().unwrap());
+            if block == "demo:removed_bench" {
+                assert!(
+                    host.take_stdout()
+                        .contains("mod: removed with 0 minecraft:air")
+                );
+                assert_eq!(
+                    closed
+                        .unknown_host_calls
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    ["net/minecraft/server/level/ServerPlayer#doCloseContainer()V"]
+                );
+            } else {
+                assert_eq!(
+                    closed.unknown_host_call_count, 0,
+                    "{:?}",
+                    closed.unknown_host_calls
+                );
+            }
+            match removal {
+                Removal::Live | Removal::ChangedDimension => {
+                    assert!(drops.is_empty(), "{drops:?}");
+                    assert_eq!(held, ["10 minecraft:cobblestone"]);
                 }
-                Some("") => {
-                    // Drop or place back is unknown: the step counts (the outermost modelled
-                    // method, the combiner's `removed`) and moves nothing.
-                    assert_eq!(
-                        closed
-                            .unknown_host_calls
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        [
-                            "net/minecraft/world/inventory/ItemCombinerMenu#removed(Lnet/minecraft/world/entity/player/Player;)V"
-                        ]
-                    );
-                    assert_eq!(
-                        held(&host, &closed.inventory.unwrap()),
-                        ["9 minecraft:cobblestone"]
-                    );
-                }
-                Some(key) => {
-                    assert!(
-                        host.take_stdout()
-                            .contains("mod: removed with 0 minecraft:air")
-                    );
-                    assert_eq!(
-                        closed
-                            .unknown_host_calls
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                        [key]
-                    );
-                    assert_eq!(
-                        held(&host, &closed.inventory.unwrap()),
-                        ["10 minecraft:cobblestone"]
-                    );
+                Removal::Killed | Removal::Disconnected => {
+                    assert_eq!(drops, ["1 minecraft:cobblestone retain=false ServerOnly"]);
+                    assert_eq!(held, ["9 minecraft:cobblestone"]);
                 }
             }
         }
+    });
+}
+
+/// A menu with a data slot opens with its initial value sent (`ServerPlayer$1.sendInitialData`,
+/// one `DataChanged` per data slot after the contents), which is what an embedder opens its
+/// window with, and the held menu's layout is the one its type declares.
+#[test]
+fn a_data_slot_menu_opens_with_its_initial_value_and_its_declared_layout() {
+    on_big_stack("live-menu-data", || {
+        let (fixture, mut host) = bridge_host("live_menu_data");
+        let inventory = vec![StdHost::empty_item_stack(); 43];
+        let opened = use_block(
+            &fixture,
+            &mut host,
+            "demo:data_bench",
+            facts(inventory, 7.5, false),
+        );
+        assert_eq!(
+            opened.unknown_host_call_count, 0,
+            "{:?}",
+            opened.unknown_host_calls
+        );
+        let window = opened.open_menus().next().unwrap().container_id;
+        let after_initial: Vec<&LiveMenuEffect> = opened
+            .live_effects
+            .iter()
+            .skip_while(|effect| !matches!(effect, LiveMenuEffect::InitialData { .. }))
+            .skip(1)
+            .collect();
+        assert_eq!(
+            after_initial.first(),
+            Some(&&LiveMenuEffect::DataChanged {
+                container_id: window,
+                index: 0,
+                value: 7
+            })
+        );
+        let declared = fixture
+            .jar
+            .menu_type_declarations(&mut host.clone())
+            .into_iter()
+            .find(|declaration| declaration.id == "demo:data")
+            .unwrap()
+            .layout
+            .unwrap();
+        assert_eq!(host.held_menu_layout(UUID), Ok(declared));
     });
 }

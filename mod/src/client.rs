@@ -282,7 +282,7 @@ impl State {
         let mut streams =
             crate::sound::sync_unknown_sound_streams(&mut self.jars, |jar| &mut jar.host);
         for loaded in &mut self.jars {
-            let sounds = loaded.host.take_played_sounds();
+            let sounds = loaded.host.take_sound_records();
             if sounds.is_empty() {
                 continue;
             }
