@@ -63,6 +63,16 @@ pub(crate) enum Equality {
     Host,
 }
 
+/// Whether `class` is a fastutil entry class (`AbstractObject2BooleanMap$BasicEntry`,
+/// `Object2BooleanMap$Entry`).
+pub(crate) fn fastutil_entry_class(class: &str) -> bool {
+    class.starts_with("it/unimi/dsi/fastutil/")
+        && class
+            .rsplit(['/', '$'])
+            .next()
+            .is_some_and(|simple| simple.contains("Entry"))
+}
+
 /// `hashCode()` of a box: `Boolean`'s 1231/1237, the value of an
 /// `Integer`/`Short`/`Byte`, the code unit of a `Character`, a `Float`'s
 /// `floatToIntBits`.
@@ -170,6 +180,15 @@ impl<H: Host> Runtime<'_, H> {
             && !jvm_dispatch::library_modelled(class)
             && self.class(class).is_some())
         .then(|| class.to_owned())
+    }
+
+    /// Whether `value` is an object of a fastutil entry class (`new BasicEntry<>(k, v)`) this
+    /// runtime does not run: the library's own `equals` and `hashCode` (`BasicEntry` compares
+    /// and hashes by its key and value, equal to any entry that holds the same ones) are not
+    /// modelled, and the identity answer an object of an unknown class gets would be wrong.
+    pub(crate) fn fastutil_library_entry(&self, value: &Value) -> bool {
+        crate::runtime::jar_object::object_class(value).is_some_and(fastutil_entry_class)
+            && self.interpreted_object_class(value).is_none()
     }
 
     /// Whose `equals` and `hashCode` `value` runs.
@@ -327,6 +346,15 @@ impl<H: Host> Runtime<'_, H> {
                 .host
                 .as_std_host()
                 .and_then(|host| crate::runtime::recipe_models::object_hash_code(host, handle)));
+        }
+        // The same for `hashCode`: the library's (key ^ value), not an identity hash.
+        if self.fastutil_library_entry(value) {
+            self.host.unknown_operand_call(&MethodRef {
+                owner: "java/lang/Object".into(),
+                name: "hashCode".into(),
+                descriptor: HASH_CODE.into(),
+            })?;
+            return Ok(None);
         }
         // One level of a nested `hashCode` (#250): a list holding itself recurses on the JVM
         // too, and ends in a `StackOverflowError` the jar can catch.
@@ -565,6 +593,16 @@ impl<H: Host> Runtime<'_, H> {
                     Ok(false)
                 }
             };
+        }
+        // A fastutil entry object whose class this runtime does not run: its `equals` is the
+        // library's (equal to any entry with the same key and value), not identity: counted.
+        if self.fastutil_library_entry(a) {
+            self.host.unknown_operand_call(&MethodRef {
+                owner: "java/lang/Object".into(),
+                name: "equals".into(),
+                descriptor: EQUALS.into(),
+            })?;
+            return Ok(false);
         }
         // One level of a nested `equals` (#250).
         let _level = crate::runtime::host_recursion::enter()?;
@@ -1962,6 +2000,10 @@ impl<H: Host> host_ref::Nested for RuntimeNested<'_, '_, '_, H> {
 
     fn uuid_bits(&mut self, value: &Value) -> Option<(i64, i64)> {
         self.runtime.host.constructed_uuid(value)
+    }
+
+    fn is_fastutil_entry(&mut self, value: &Value) -> bool {
+        self.runtime.host.map_entry_of_fastutil_map(value)
     }
 
     fn map_entry_parts(&mut self, value: &Value) -> Option<(Value, Value)> {

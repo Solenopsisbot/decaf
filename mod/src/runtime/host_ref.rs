@@ -791,6 +791,13 @@ pub(crate) trait Nested {
         let _ = value;
         None
     }
+    /// Whether a host `Map.Entry` is an entry of a fastutil map (or wraps one): its
+    /// `toString` is the library's own (`key=>value`), not `AbstractMap`'s, so the host
+    /// does not print it.
+    fn is_fastutil_entry(&mut self, value: &Value) -> bool {
+        let _ = value;
+        false
+    }
     /// The handle key a jar's own `BlockPos`/`LevelResource` has
     /// (`jar_server_values.rs`): `None` for any other value or where this
     /// context cannot read jar objects' fields, `Some(None)` where its

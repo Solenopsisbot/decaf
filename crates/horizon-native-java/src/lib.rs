@@ -2888,6 +2888,11 @@ pub trait Host {
         None
     }
 
+    /// Whether a host `Map.Entry` belongs to a fastutil map (or wraps such an entry).
+    fn map_entry_of_fastutil_map(&self, _value: &Value) -> bool {
+        false
+    }
+
     /// Whether a host map entry implements a fastutil primitive entry interface.
     fn map_entry_is_instance_of(&self, _value: &Value, _wanted: &str) -> Option<bool> {
         None
@@ -3159,6 +3164,23 @@ pub trait Host {
     /// The view copies taken from the map `source`.
     fn view_copies_of(&self, _source: &str) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Record whether the fastutil map `map`'s host table mirrors the Java map exactly
+    /// (`library_dispatch.rs`: only a no-arg constructor does).
+    fn mark_exact_fastutil_map(&mut self, _map: &Value, _exact: bool) {}
+
+    fn is_exact_fastutil_map(&self, _map: &Value) -> bool {
+        false
+    }
+
+    /// Whether an iterator was already made from the fastutil entry set `set` since its entries
+    /// were last made, and record that one is now (`iterated`) or that its entries are new
+    /// (`!iterated`, which answers `false`). Every iterator over one host copy of the set hands
+    /// out the same entry objects, where each `next()` of fastutil's makes a new one
+    /// (`library_dispatch.rs`).
+    fn note_fastutil_entry_set_iterated(&mut self, _set: &Value, _iterated: bool) -> bool {
+        false
     }
 
     /// The collection a `Collections.synchronized*` view wraps, when
@@ -4039,6 +4061,11 @@ pub struct StdHost {
     /// Property builders / blocks created from `ofFullCopy` / `ofLegacyCopy` / `copy` whose
     /// source block's `hasCollision` is unknown (cleared if `.noCollision()` is called).
     block_copied_properties: BTreeSet<String>,
+    /// The fastutil maps whose host table mirrors the Java map exactly: made by a no-arg
+    /// constructor of a class whose key equality the table shares (`library_dispatch.rs`).
+    exact_fastutil_maps: BTreeSet<String>,
+    /// The fastutil entry sets an iterator was already made from.
+    iterated_fastutil_entry_sets: BTreeSet<String>,
     /// Properties captured from each mod block's virtual state-definition hook.
     block_state_properties: BTreeMap<String, BTreeMap<String, StatePropertyInfo>>,
     state_definition_builders: BTreeMap<String, String>,
@@ -4504,6 +4531,8 @@ impl StdHost {
             item_property_builders: BTreeMap::new(),
             block_property_builders: BTreeMap::new(),
             block_copied_properties: BTreeSet::new(),
+            exact_fastutil_maps: BTreeSet::new(),
+            iterated_fastutil_entry_sets: BTreeSet::new(),
             block_state_properties: BTreeMap::new(),
             state_definition_builders: BTreeMap::new(),
             block_states: BTreeMap::new(),
@@ -9218,6 +9247,32 @@ impl Host for StdHost {
         self.view_kinds.get(marker).cloned()
     }
 
+    fn mark_exact_fastutil_map(&mut self, map: &Value, exact: bool) {
+        if let Some(marker) = expect_ref(map) {
+            if exact {
+                self.exact_fastutil_maps.insert(marker.clone());
+            } else {
+                self.exact_fastutil_maps.remove(marker);
+            }
+        }
+    }
+
+    fn is_exact_fastutil_map(&self, map: &Value) -> bool {
+        expect_ref(map).is_some_and(|marker| self.exact_fastutil_maps.contains(marker))
+    }
+
+    fn note_fastutil_entry_set_iterated(&mut self, set: &Value, iterated: bool) -> bool {
+        let Some(marker) = expect_ref(set) else {
+            return false;
+        };
+        if iterated {
+            !self.iterated_fastutil_entry_sets.insert(marker.clone())
+        } else {
+            self.iterated_fastutil_entry_sets.remove(marker);
+            false
+        }
+    }
+
     fn view_copies_of(&self, source: &str) -> Vec<String> {
         if self.view_copies.is_empty() {
             return Vec::new();
@@ -9610,6 +9665,10 @@ impl Host for StdHost {
             return None;
         };
         self.map_entries.map_of(handle.key()).map(str::to_owned)
+    }
+
+    fn map_entry_of_fastutil_map(&self, value: &Value) -> bool {
+        self.entry_of_fastutil_map(value)
     }
 
     fn map_entry_is_instance_of(&self, value: &Value, wanted: &str) -> Option<bool> {
@@ -14004,7 +14063,10 @@ impl Host for StdHost {
                     .and_then(|source| source.strip_prefix("map-entry/"))
                     .and_then(|source| self.view_copy_source(source))
                     .or(fallback_map)
-                    && let Some((key, _)) = self.map_entry_now(&last)
+                    && let Some(key) = self
+                        .map_entry_now(&last)
+                        .map(|(key, _)| key)
+                        .or_else(|| self.fastutil_entry_key(&last, &map))
                 {
                     let Some(mut values) = self.mutable_collections.get(&map).cloned() else {
                         return self.unknown_host_call(r);
@@ -18149,6 +18211,12 @@ impl host_ref::Nested for HostNested<'_> {
 
     fn map_entry_parts(&mut self, value: &Value) -> Option<(Value, Value)> {
         self.0.as_deref()?.map_entry_now(value)
+    }
+
+    fn is_fastutil_entry(&mut self, value: &Value) -> bool {
+        self.0
+            .as_deref()
+            .is_some_and(|host| host.entry_of_fastutil_map(value))
     }
 }
 
@@ -30887,6 +30955,12 @@ impl<H: Host> Runtime<'_, H> {
             {
                 return self.host.unknown_operand_call(r).map(Some);
             }
+            // A fastutil entry object (`new BasicEntry<>(k, v)`) is equal to any entry with its
+            // key and value, not only to itself: counted, never a marker comparison.
+            if jar_object::object_class(receiver).is_some_and(object_methods::fastutil_entry_class)
+            {
+                return self.host.unknown_operand_call(r).map(Some);
+            }
             return Ok(Some(Value::Int(
                 (value_marker(receiver) == value_marker(other)) as i32,
             )));
@@ -39535,6 +39609,9 @@ impl<H: Host> Runtime<'_, H> {
                     let taint_receiver = receiver.clone();
                     let unknown_before = self.host.counted_unknown_calls();
                     let mut dispatched: Option<Value> = None;
+                    // A call that makes an exact fastutil map's host table differ from the Java
+                    // map ends its exactness (`iteration_guard.rs`).
+                    self.note_fastutil_map_call(&r, receiver.as_ref(), &args);
                     // SetFromMap inherits AbstractSet.equals. Handle it at
                     // the runtime boundary so an argument whose class is a
                     // jar implementation of Set is checked through its own

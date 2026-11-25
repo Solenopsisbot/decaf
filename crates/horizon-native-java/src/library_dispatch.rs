@@ -24,6 +24,9 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(counted) = self.count_refused_reflective_load(r, receiver, args)? {
             return Ok(Some(counted));
         }
+        // Also a method reference to a fastutil map's method (`map::put`), which reaches the
+        // model without the call instruction's dispatch (`iteration_guard.rs`).
+        self.note_fastutil_map_call(r, receiver, args);
         if let Some(receiver) = receiver
             && let Some(result) = crate::commons_fraction::instance_call(r, receiver, args)
         {
@@ -265,6 +268,9 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_class_is_instance(r, receiver, args)? {
+            return Ok(Some(value));
+        }
+        if let Some(value) = self.invoke_fastutil_entry_iterator(r, receiver, args)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_fastutil_primitive(r, receiver, args)? {
@@ -1113,6 +1119,94 @@ impl<H: Host> Runtime<'_, H> {
         }))
     }
 
+    /// The iterator of a linked fastutil map's entry set, and its cursor.
+    ///
+    /// `Object2BooleanLinkedOpenHashMap.object2BooleanEntrySet()` is a
+    /// `FastSortedEntrySet` whose `iterator()` walks the entries in insertion
+    /// order, one new entry per `next()`, and whose `hasNext`/`next`/`remove`
+    /// are `Iterator`'s: a bare `NoSuchElementException` past the end, a bare
+    /// `IllegalStateException` for a `remove` with no entry to remove. The
+    /// entry set is the host's `Map.entrySet()` view of the map (the call that
+    /// made it, above), so its iterator is the host's, guarded
+    /// (`iteration_guard.rs`) because fastutil's iterator reads its map live
+    /// and never fails fast: a map changed under it is counted.
+    ///
+    /// Only the linked hash maps return a `FastSortedEntrySet`: the tree maps'
+    /// entry set is an unrelated `ObjectSortedSet` in natural key order, which
+    /// the host's insertion-ordered map table does not model, so their calls
+    /// stay counted. `fastIterator()` stays counted too: it reuses one entry
+    /// object for every `next()`, where the host makes one per element.
+    fn invoke_fastutil_entry_iterator(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        const FAST_SORTED: &str =
+            "it/unimi/dsi/fastutil/objects/Object2BooleanSortedMap$FastSortedEntrySet";
+        const BIDIRECTIONAL: &str = "it/unimi/dsi/fastutil/objects/ObjectBidirectionalIterator";
+        let Some(receiver) = receiver else {
+            return Ok(None);
+        };
+        if r.owner == FAST_SORTED
+            && r.name == "iterator"
+            && r.descriptor == "()Lit/unimi/dsi/fastutil/objects/ObjectBidirectionalIterator;"
+        {
+            if !self.is_linked_fastutil_entry_set(receiver) {
+                return Ok(None);
+            }
+            // fastutil makes a new entry object for every `next()`; the host's copy of the
+            // entry set holds one per key, which every iterator over the copy returns. A
+            // second iterator over one entry set, with no `object2BooleanEntrySet()` call
+            // between (which makes the copy's entries anew), would hand out the entries of the
+            // first (`==`, an identity map and a set of entries tell them apart in Java):
+            // counted.
+            if self.host.note_fastutil_entry_set_iterated(receiver, true) {
+                return Ok(None);
+            }
+            let iterator = self.host.invoke_instance(
+                &MethodRef {
+                    owner: "java/util/Set".into(),
+                    name: "iterator".into(),
+                    descriptor: "()Ljava/util/Iterator;".into(),
+                },
+                receiver,
+                &[],
+            )?;
+            self.guard_fastutil_iterator(&iterator, receiver)?;
+            return Ok(Some(iterator));
+        }
+        // `hasNext`/`next`/`remove` typed as the fastutil iterator are
+        // `Iterator`'s, on an iterator this model made (a fastutil-guarded one).
+        if r.owner == BIDIRECTIONAL
+            && matches!(
+                (r.name.as_str(), r.descriptor.as_str()),
+                ("hasNext", "()Z") | ("next", "()Ljava/lang/Object;") | ("remove", "()V")
+            )
+            && crate::host_iterator::marker(receiver)
+                .and_then(|marker| self.host.iterator_guard(marker))
+                .is_some_and(|guard| guard.fastutil)
+        {
+            let iterator = MethodRef {
+                owner: "java/util/Iterator".into(),
+                name: r.name.clone(),
+                descriptor: r.descriptor.clone(),
+            };
+            // Through the iteration guard first: a map changed under the iterator is counted
+            // whatever type the program gives the iterator.
+            if let Some(answer) =
+                self.invoke_iteration_guard(&iterator, 0xb9, Some(receiver), args)?
+            {
+                return Ok(Some(answer));
+            }
+            return self
+                .host
+                .invoke_instance(&iterator, receiver, args)
+                .map(Some);
+        }
+        Ok(None)
+    }
+
     /// A fastutil collection's primitive overloads, answered through the
     /// `java.util` method they specialise.
     ///
@@ -1138,6 +1232,12 @@ impl<H: Host> Runtime<'_, H> {
         if r.name == "<init>" {
             if kind == "map" && crate::expect_ref(&receiver).is_some() {
                 self.host.register_mutable_collection(&receiver, kind);
+                // Only a no-arg constructor leaves the host table equal to the Java map
+                // (the copy constructors fill the Java map, never the host's).
+                self.host.mark_exact_fastutil_map(
+                    &receiver,
+                    r.owner == LINKED_OBJECT2BOOLEAN_MAP && r.descriptor == "()V",
+                );
             }
             return Ok(Some(Value::Void));
         }
@@ -1152,10 +1252,12 @@ impl<H: Host> Runtime<'_, H> {
                 == "()Lit/unimi/dsi/fastutil/objects/Object2BooleanSortedMap$FastSortedEntrySet;"
                 || r.descriptor == "()Ljava/lang/Iterable;")
         {
-            return self
+            let set = self
                 .host
-                .invoke_instance(&java_map_entry_set(), &receiver, &[])
-                .map(Some);
+                .invoke_instance(&java_map_entry_set(), &receiver, &[])?;
+            // The host's copy of the set is made again, with new entry objects.
+            self.host.note_fastutil_entry_set_iterated(&set, false);
+            return Ok(Some(set));
         }
         let primitive = |descriptor: &str| descriptor.len() == 1 && descriptor != "V";
         if !parameters.iter().any(|parameter| primitive(parameter)) && !primitive(&result) {
@@ -2579,6 +2681,11 @@ fn unbox_primitive(descriptor: &str, value: &Value) -> Value {
         _ => value.clone(),
     }
 }
+
+/// The one fastutil map class whose host table is modelled exactly enough to answer its entry set's
+/// iterator (`invoke_fastutil_entry_iterator`).
+pub(crate) const LINKED_OBJECT2BOOLEAN_MAP: &str =
+    "it/unimi/dsi/fastutil/objects/Object2BooleanLinkedOpenHashMap";
 
 /// The `java.util` collection kind (`map`, `list`, `set`) a fastutil
 /// collection class implements, from its name; a fastutil iterator, function

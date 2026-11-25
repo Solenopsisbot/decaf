@@ -602,6 +602,17 @@ impl<H: Host> Runtime<'_, H> {
                 &other,
                 &[],
             )?;
+            // A fastutil entry casts the other's value to its own box type once the keys are
+            // equal (`Object2BooleanLinkedOpenHashMap$MapEntry.equals`): a
+            // `ClassCastException`, `NullPointerException` for `null`, where `equals` below
+            // would answer `false`: counted.
+            if part == "getValue"
+                && self.host.map_entry_of_fastutil_map(this)
+                && crate::host_map_entry::fastutil_value_cast_fails(&mine, &theirs)
+            {
+                self.host.unknown_operand_call(r)?;
+                return Ok(Some(boolean(false)));
+            }
             // `IdentityHashMap.EntryIterator.Entry.equals` compares `e.getKey() == key` and
             // `e.getValue() == value` (#221 review B1): by reference, counted where this model
             // keeps no identity (two texts or boxes).

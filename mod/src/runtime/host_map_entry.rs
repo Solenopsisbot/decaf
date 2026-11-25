@@ -872,6 +872,37 @@ impl StdHost {
             .map(|(_, state)| state)
     }
 
+    /// Whether `entry` is an entry of a fastutil map, or wraps one (an unmodifiable view's).
+    pub(crate) fn entry_of_fastutil_map(&self, entry: &Value) -> bool {
+        let Value::Host(handle) = entry else {
+            return false;
+        };
+        let Some(state) = self.entry_state(handle) else {
+            return false;
+        };
+        match &state.life {
+            Life::Opaque { map, .. } | Life::Live { map, .. } | Life::Concurrent { map } => {
+                class_of_marker(map).starts_with("it/unimi/dsi/fastutil/")
+            }
+            Life::Wrapped { inner } => self.entry_of_fastutil_map(inner),
+            Life::Fixed | Life::Detached | Life::Lost => false,
+        }
+    }
+
+    /// The key of `entry`, an entry of the fastutil map `map` read before the map last
+    /// changed. The map keeps no row of its entries it can follow, so the entry reads (its
+    /// value) are counted once the map changed; its key never changes, and it is what the
+    /// iterator that returned the entry removes (`Iterator.remove`).
+    pub(crate) fn fastutil_entry_key(&self, entry: &Value, map: &str) -> Option<Value> {
+        let Value::Host(handle) = entry else {
+            return None;
+        };
+        let state = self.entry_state(handle)?;
+        let own = matches!(&state.life, Life::Opaque { map: own, .. } if own == map);
+        (own && class_of_marker(map).starts_with("it/unimi/dsi/fastutil/"))
+            .then(|| state.key.clone())
+    }
+
     /// The entry an unmodifiable view's entry wraps (`Life::Wrapped`'s `inner`): the source map's
     /// own entry, which `UnmodifiableCollection.toArray(IntFunction)` hands out (#221 review 7,
     /// B11). `None` for any other value.
@@ -1243,6 +1274,10 @@ fn parts(handle: &HostRef, nested: &mut dyn Nested) -> Option<(Value, Value)> {
 }
 
 fn entry_text(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<String>, NativeError> {
+    // fastutil's entries print `key=>value`, not `AbstractMap`'s `key=value`: counted.
+    if nested.is_fastutil_entry(&Value::Host(handle.clone())) {
+        return Ok(None);
+    }
     let Some((key, value)) = parts(handle, nested) else {
         return Ok(None);
     };
@@ -1259,6 +1294,24 @@ fn entry_text(handle: &HostRef, nested: &mut dyn Nested) -> Result<Option<String
         return Ok(None);
     };
     Ok(Some(format!("{key}={value}")))
+}
+
+/// Whether a fastutil map's entry (`Object2BooleanLinkedOpenHashMap$MapEntry`), holding the value
+/// `own`, would throw comparing itself with an entry of an equal key and the value `other`: its
+/// `equals` casts `other.getValue()` to the box of its own value type (`Boolean`) once the keys
+/// are equal, a `ClassCastException` (a `NullPointerException` for `null`) where the host would
+/// answer `false`. A reference-valued map's entry casts nothing.
+pub(crate) fn fastutil_value_cast_fails(own: &Value, other: &Value) -> bool {
+    match (own, other) {
+        (Value::Boxed(own), Value::Boxed(theirs)) => {
+            std::mem::discriminant(own) != std::mem::discriminant(theirs)
+        }
+        (Value::Boxed(_), _) => true,
+        // A value this model cannot tell from another box kind (`Int`: an `Integer` or a
+        // `Boolean`): the cast holds only for another such value.
+        (Value::Int(_), other) => !matches!(other, Value::Int(_)),
+        _ => false,
+    }
 }
 
 /// `IdentityHashMap`'s entries compare and hash by identity (Java 25's
@@ -1323,7 +1376,14 @@ fn entry_equals(
                 });
             }
             Ok(match nested.equals(&key, &other_key)? {
-                Some(true) => nested.equals(&value, &other_value)?,
+                Some(true) => {
+                    if nested.is_fastutil_entry(&Value::Host(handle.clone()))
+                        && fastutil_value_cast_fails(&value, &other_value)
+                    {
+                        return Ok(None);
+                    }
+                    nested.equals(&value, &other_value)?
+                }
                 answer => answer,
             })
         }

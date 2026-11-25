@@ -1465,6 +1465,18 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.view_copies_of(source)
     }
 
+    fn mark_exact_fastutil_map(&mut self, map: &Value, exact: bool) {
+        self.inner.mark_exact_fastutil_map(map, exact)
+    }
+
+    fn is_exact_fastutil_map(&self, map: &Value) -> bool {
+        self.inner.is_exact_fastutil_map(map)
+    }
+
+    fn note_fastutil_entry_set_iterated(&mut self, set: &Value, iterated: bool) -> bool {
+        self.inner.note_fastutil_entry_set_iterated(set, iterated)
+    }
+
     fn synchronized_wrapped(&self, value: &Value) -> Option<Value> {
         self.inner.synchronized_wrapped(value)
     }
@@ -1636,6 +1648,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
 
     fn map_entry_parts(&self, value: &Value) -> Option<(Value, Value)> {
         self.inner.map_entry_parts(value)
+    }
+
+    fn map_entry_of_fastutil_map(&self, value: &Value) -> bool {
+        self.inner.map_entry_of_fastutil_map(value)
     }
 
     fn map_entry_source(&self, value: &Value) -> Option<String> {

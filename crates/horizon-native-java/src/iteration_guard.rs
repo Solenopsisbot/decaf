@@ -61,6 +61,10 @@ pub struct IteratorGuard {
     /// An `ArrayDeque` iterator whose layout is known: its `cursor` slot and
     /// `remaining` count (`array_deque.rs`).
     deque_cursor: Option<(usize, usize)>,
+    /// An iterator over a fastutil map, which reads the map live and never
+    /// fails fast: `structure` is the map's key sequence it last saw, and a
+    /// step after the map changed is counted (`guard_fastutil_iterator`).
+    pub(crate) fastutil: bool,
 }
 
 /// How a fail-fast collection iterates.
@@ -201,8 +205,25 @@ impl<H: Host> Runtime<'_, H> {
         else {
             return Ok(None);
         };
+        if matches!(
+            (r.name.as_str(), r.descriptor.as_str()),
+            ("hasNext", "()Z") | ("next", "()Ljava/lang/Object;") | ("remove", "()V")
+        ) && let Some(guard) = self.host.iterator_guard(&marker)
+            && guard.fastutil
+        {
+            return self.fastutil_iterator_step(r, receiver, &marker, guard, args);
+        }
         match (r.name.as_str(), r.descriptor.as_str()) {
             ("iterator", "()Ljava/util/Iterator;") => {
+                // The entry set of the linked fastutil map the model answers, typed as a
+                // `Set`: the entries of every iterator over one host copy are the same objects
+                // (`invoke_fastutil_entry_iterator`), so a second iterator counts, whichever
+                // type either was made through.
+                if self.is_linked_object2boolean_entry_view(receiver)
+                    && self.host.note_fastutil_entry_set_iterated(receiver, true)
+                {
+                    return self.host.unknown_operand_call(r).map(|_| None);
+                }
                 let Some((source, how)) = self.fail_fast_source(receiver) else {
                     return Ok(None);
                 };
@@ -232,6 +253,7 @@ impl<H: Host> Runtime<'_, H> {
                             structure,
                             deque,
                             deque_cursor,
+                            fastutil: false,
                         },
                     );
                 }
@@ -352,6 +374,206 @@ impl<H: Host> Runtime<'_, H> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Whether `entry_set` is the host's entry-set view of an
+    /// `Object2BooleanLinkedOpenHashMap` (the class `is_linked_fastutil_entry_set` answers).
+    fn is_linked_object2boolean_entry_view(&self, entry_set: &Value) -> bool {
+        let Some(marker) = expect_ref(entry_set) else {
+            return false;
+        };
+        self.host.view_copy_kind(marker).as_deref() == Some("entrySet")
+            && self.host.view_copy_source(marker).is_some_and(|map| {
+                crate::jar_object::marker_class(&map)
+                    == Some(crate::library_dispatch::LINKED_OBJECT2BOOLEAN_MAP)
+            })
+    }
+
+    /// Whether `entry_set` is the entry set of a linked fastutil hash map
+    /// (`FastSortedEntrySet`) whose host table is exactly the Java map: the
+    /// host's `entrySet()` view of an `Object2BooleanLinkedOpenHashMap` (its
+    /// own class, not a subclass and not the custom-strategy map, whose
+    /// `Hash.Strategy` the host ignores) made by its no-arg constructor
+    /// (a copy constructor leaves the host table empty), holding only `String`
+    /// keys (the host compares any other object's keys by identity, where
+    /// fastutil runs the key's `equals`).
+    pub(crate) fn is_linked_fastutil_entry_set(&self, entry_set: &Value) -> bool {
+        let Some(marker) = expect_ref(entry_set) else {
+            return false;
+        };
+        if self.host.view_copy_kind(marker).as_deref() != Some("entrySet") {
+            return false;
+        }
+        let Some(map) = self.host.view_copy_source(marker) else {
+            return false;
+        };
+        if crate::jar_object::marker_class(&map)
+            != Some(crate::library_dispatch::LINKED_OBJECT2BOOLEAN_MAP)
+        {
+            return false;
+        }
+        let map = crate::jar_object::stored_value(&map);
+        if !self.host.is_exact_fastutil_map(&map) {
+            return false;
+        }
+        let Some(live) = self.host.mutable_collection_entries(&map) else {
+            return false;
+        };
+        if !live.chunks(2).all(|pair| {
+            matches!(pair.first(), Some(Value::Ref(Some(text)))
+                if crate::value_class::is_plain_string(text))
+        }) {
+            return false;
+        }
+        // The Java entry set is a live view of the map; the host's is a copy made when the
+        // program asked for it, which the fastutil put/remove/clear do not refresh. It is the
+        // map's view now only if it holds the map's keys in the map's order and every entry
+        // still reads (an entry reads only while the map is unchanged since it was made): a
+        // copy kept across a change of the map is counted.
+        let Ok(copy) = self.collection_elements(entry_set) else {
+            return false;
+        };
+        copy.len() * 2 == live.len()
+            && copy.iter().zip(live.chunks(2)).all(|(entry, pair)| {
+                self.host
+                    .map_entry_parts(entry)
+                    .is_some_and(|(key, _)| Some(&key) == pair.first())
+            })
+    }
+
+    /// Where a call may change what the host's table of an exact fastutil map
+    /// ([`Self::is_linked_fastutil_entry_set`]) holds from what the Java map holds: the map
+    /// stops being exact, for good, and its entry set's iterator is counted from then on.
+    ///
+    /// The host's table keeps a key that is a lone surrogate as U+FFFD, so two Java keys can be
+    /// one host key, and a key removed again leaves no trace: a call with a U+FFFD in its text
+    /// arguments ends exactness (a genuine U+FFFD too: conservative). A `put` of a null value
+    /// is a `NullPointerException` in Java (the unboxing) which the host stores as `false`.
+    /// Only the calls the oracle rows use (`put`/`remove`/`get`/`clear`/`size`/... and their
+    /// primitive forms) keep a map exact; any other call on it (a bulk write, `compute`,
+    /// `merge`) and a wrapper made around it (`Collections.synchronizedMap`, `Object2BooleanMaps`)
+    /// ends it, as their writes are not followed here.
+    pub(crate) fn note_fastutil_map_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) {
+        let ends = match receiver {
+            None => {
+                let wrapper = r.owner == "java/util/Collections"
+                    || r.owner.starts_with("it/unimi/dsi/fastutil/");
+                if wrapper {
+                    for argument in args {
+                        if self.host.is_exact_fastutil_map(argument) {
+                            self.host.mark_exact_fastutil_map(argument, false);
+                        }
+                    }
+                }
+                return;
+            }
+            Some(receiver) if self.host.is_exact_fastutil_map(receiver) => {
+                let name = r.name.as_str();
+                let written = matches!(
+                    name,
+                    "put" | "putBoolean" | "remove" | "removeBoolean" | "clear"
+                );
+                let read = matches!(
+                    name,
+                    "get"
+                        | "getBoolean"
+                        | "getOrDefault"
+                        | "containsKey"
+                        | "containsValue"
+                        | "size"
+                        | "isEmpty"
+                        | "object2BooleanEntrySet"
+                        | "defaultReturnValue"
+                        | "hashCode"
+                        | "toString"
+                        | "getClass"
+                );
+                (!written && !read)
+                    || args
+                        .iter()
+                        .any(|value| matches!(value, Value::Ref(Some(text)) if text.contains('\u{FFFD}')))
+                    || (name == "put" && matches!(args.get(1), Some(Value::Ref(None))))
+            }
+            Some(_) => false,
+        };
+        if ends && let Some(receiver) = receiver {
+            self.host.mark_exact_fastutil_map(receiver, false);
+        }
+    }
+
+    /// Guard the iterator over the entry set `entry_set` of a fastutil map
+    /// (`iterator`, a host iterator over its snapshot) with the map's key
+    /// sequence now. fastutil's iterators read their map live and never throw
+    /// `ConcurrentModificationException`, so a step after the map changed
+    /// (other than through this iterator's own `remove`) is counted, not
+    /// answered from the snapshot.
+    pub(crate) fn guard_fastutil_iterator(
+        &mut self,
+        iterator: &Value,
+        entry_set: &Value,
+    ) -> Result<(), NativeError> {
+        let (Some(iterator), Some(marker)) = (
+            crate::host_iterator::marker(iterator),
+            expect_ref(entry_set),
+        ) else {
+            return Ok(());
+        };
+        let Some(source) = self.host.view_copy_source(marker) else {
+            return Ok(());
+        };
+        let structure =
+            self.structure_of(&crate::jar_object::stored_value(&source), FailFast::MapKeys)?;
+        self.host.store_iterator_guard(
+            iterator,
+            IteratorGuard {
+                root: source.clone(),
+                source,
+                cursor: None,
+                expected: ModStamp::default(),
+                structure,
+                deque: false,
+                deque_cursor: None,
+                fastutil: true,
+            },
+        );
+        Ok(())
+    }
+
+    /// `hasNext`, `next` and `remove` of an iterator guarded by
+    /// [`Self::guard_fastutil_iterator`]: the host's answer while the map's
+    /// key sequence is the one the iterator last saw, counted after any other
+    /// change. `remove` is the iterator's own change, so the sequence it
+    /// leaves becomes the one the iterator expects.
+    fn fastutil_iterator_step(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        marker: &str,
+        guard: IteratorGuard,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let source = crate::jar_object::stored_value(&guard.source);
+        if self.structure_of(&source, FailFast::MapKeys)? != guard.structure {
+            return self.host.unknown_operand_call(r).map(|_| None);
+        }
+        if r.name != "remove" {
+            return Ok(None);
+        }
+        let step = MethodRef {
+            owner: "java/util/Iterator".into(),
+            name: r.name.clone(),
+            descriptor: r.descriptor.clone(),
+        };
+        let answer = self.host.invoke_instance(&step, receiver, args)?;
+        let structure = self.structure_of(&source, FailFast::MapKeys)?;
+        self.host
+            .store_iterator_guard(marker, IteratorGuard { structure, ..guard });
+        Ok(Some(answer))
     }
 
     /// `ArrayList.forEach`: `for (i = 0; modCount == expectedModCount && i
