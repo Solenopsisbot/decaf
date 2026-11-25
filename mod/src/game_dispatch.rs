@@ -510,12 +510,22 @@ fn dispatch_state(
             Ok(Ok(run)) => run,
             Ok(Err(error)) => {
                 loaded.row.game_hooks.failed += 1;
-                drop_failed_callback_sounds(&mut context, &mut loaded.host, &mut sound_streams);
+                drop_failed_callback_sounds(
+                    dispatch.host,
+                    &mut context,
+                    &mut loaded.host,
+                    &mut sound_streams,
+                );
                 return Err(DispatchError::from_error(error));
             }
             Err(panic) => {
                 loaded.row.game_hooks.failed += 1;
-                drop_failed_callback_sounds(&mut context, &mut loaded.host, &mut sound_streams);
+                drop_failed_callback_sounds(
+                    dispatch.host,
+                    &mut context,
+                    &mut loaded.host,
+                    &mut sound_streams,
+                );
                 return Err(DispatchError::from_error(format!("panicked: {panic}")));
             }
         };
@@ -550,32 +560,32 @@ fn apply_effect(
                 let _ = target.tell(host, mod_api::Text::literal(text));
             }
         }
-        GameHookEffect::PlaySound(effect) => {
-            crate::sound::apply_server_sounds(host, &[effect], sound_streams, |reason| {
+        sound @ (GameHookEffect::PlaySound(_) | GameHookEffect::SoundSeedDrawn { .. }) => {
+            let records: Vec<_> = sound.sound_record().into_iter().collect();
+            crate::sound::apply_server_sounds(host, &records, sound_streams, |reason| {
                 runtime_host.note_unknown_game_hook(reason);
             });
         }
     }
 }
 
-/// A failed callback's effects are not applied. Its recorded sounds are counted instead, and a
-/// sound whose seed was deferred to Sunrise leaves its stream unknown: Java drew that seed before
-/// the failure, and Sunrise never will.
+/// A failed callback's effects are not applied. Its recorded sounds are counted instead, but the
+/// seeds Java drew for them (and for its calls that played nothing) before the failure are drawn
+/// from Sunrise all the same, in call order, so the stream stays in step.
 fn drop_failed_callback_sounds(
+    host: &mut dyn ServerHost,
     context: &mut GameHookContext,
     runtime_host: &mut crate::runtime::StdHost,
     sound_streams: &mut std::collections::BTreeSet<String>,
 ) {
-    let sounds: Vec<_> = context
+    let records: Vec<_> = context
         .take_effects()
-        .into_iter()
-        .filter_map(|effect| match effect {
-            GameHookEffect::PlaySound(sound) => Some(sound),
-            GameHookEffect::SystemMessage { .. } => None,
-        })
+        .iter()
+        .filter_map(GameHookEffect::sound_record)
         .collect();
-    crate::sound::count_undelivered_sounds(
-        &sounds,
+    crate::sound::replay_unplayed_server_sounds(
+        host,
+        &records,
         sound_streams,
         |reason| runtime_host.note_unknown_game_hook(reason),
         "level sound from a failed game hook callback",

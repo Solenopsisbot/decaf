@@ -416,6 +416,35 @@ pub enum GameHookEffect {
     /// `Level.playSound` / `playSeededSound` / `Entity.playSound`: a sound
     /// effect requested during the hook firing.
     PlaySound(crate::level_sound::LevelSoundEffect),
+    /// A server `Level.playSound` drew `dimension`'s seed, deferred to the
+    /// live host, and then played nothing
+    /// ([`crate::level_sound::SoundRecord::SeedDrawn`]): the host still draws it.
+    SoundSeedDrawn { dimension: String },
+}
+
+impl GameHookEffect {
+    /// The effect a recorded sound log entry asks for.
+    pub fn from_sound_record(record: crate::level_sound::SoundRecord) -> Self {
+        match record {
+            crate::level_sound::SoundRecord::Play(effect) => Self::PlaySound(effect),
+            crate::level_sound::SoundRecord::SeedDrawn { dimension } => {
+                Self::SoundSeedDrawn { dimension }
+            }
+        }
+    }
+
+    /// The sound log entry this effect is, if it is one.
+    pub fn sound_record(&self) -> Option<crate::level_sound::SoundRecord> {
+        match self {
+            Self::PlaySound(effect) => Some(crate::level_sound::SoundRecord::Play(effect.clone())),
+            Self::SoundSeedDrawn { dimension } => {
+                Some(crate::level_sound::SoundRecord::SeedDrawn {
+                    dimension: dimension.clone(),
+                })
+            }
+            Self::SystemMessage { .. } => None,
+        }
+    }
 }
 
 /// The game objects of one firing, and what the callbacks asked of them.

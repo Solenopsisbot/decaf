@@ -60,11 +60,32 @@
 //! - a call may or may not reach its draw (a `BlockPos` Decaf cannot read, or
 //!   an entity whose `isSilent()`, level or `getSoundSource()` is unknown);
 //! - a seed deferred to a live host ([`SoundSeed::HostDeferred`]) is never
-//!   delivered: the call records no effect, or the host bridge refuses the
-//!   effect. The host draws only for a sound it plays, so its stream falls one
-//!   draw behind Java's. A live host may back every level with one stream (as
-//!   Sunrise does), so while seeds are deferred a mark covers every stream on
-//!   its side ([`host_sound_streams`]).
+//!   drawn by the host: on the server only where the host bridge cannot reach
+//!   a level to draw on (see below); on the client whenever the effect is
+//!   refused, because a client host draws only for a sound it plays. A live
+//!   host may back every level with one stream (as Sunrise does), so while
+//!   seeds are deferred a mark covers every stream on its side
+//!   ([`host_sound_streams`]).
+//!
+//! # Server seeds a live host draws
+//!
+//! While server seeds are deferred, every server draw is logged, in call
+//! order, as a [`SoundRecord`]: [`SoundRecord::Play`] for a call that recorded
+//! a sound, and [`SoundRecord::SeedDrawn`] for a call that drew and then
+//! played nothing (Decaf counted it after the draw, or it threw). The host
+//! bridge replays the log in that order, drawing each seed from the live
+//! host's stream (Sunrise's `LevelRef::next_sound_seed`, which is exactly the
+//! stream its own `playSound` uses) and playing each sound with that seed
+//! (`play_seeded_sound`). So the host's stream moves once per Java draw, in
+//! Java's order, whether or not the sound then plays: a sound the bridge
+//! refuses has consumed its seed, as in vanilla.
+//!
+//! Nothing draws from the host's stream between a Java call and the replay:
+//! the Java code runs to the end before the bridge delivers, and the game does
+//! not run in between. So drawing at the replay gives every seed the value a
+//! draw at the call would have, and Java cannot read the value either way
+//! (`Level.soundSeedGenerator` is private, with no getter, in 26.3; only
+//! `playSeededSound` sees the seed, and Decaf models that method).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -226,11 +247,47 @@ pub enum SoundSeed {
     LevelRandom(i64),
     /// Explicit `long seed` argument to `Level.playSeededSound`.
     Explicit(i64),
-    /// Delegated to the live host engine (`LevelRef::play_sound`,
-    /// `LevelWriteHost::play_sound`, `HitHost::play_sound_*`, or
-    /// `ClientHost::play_local_sound`), which draws from its own sound-seed
-    /// stream at execution time.
+    /// Delegated to the live host engine, which draws it from its own
+    /// sound-seed stream when the recorded log is replayed: on a server with
+    /// `LevelRef::next_sound_seed` (then `play_seeded_sound`), and where the
+    /// host offers no separate draw (`HitHost::play_sound_*`,
+    /// `LevelWriteHost::play_sound`, `ClientHost::play_local_sound`) by the
+    /// play itself.
     HostDeferred,
+}
+
+/// One entry of a recorded sound log, in call order.
+///
+/// A server call whose seed was deferred to a live host leaves one entry per
+/// draw, so the host bridge can draw the host's stream exactly where Java drew
+/// (see the module docs). Client calls only ever record [`Self::Play`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum SoundRecord {
+    /// A sound to play.
+    Play(LevelSoundEffect),
+    /// A server `Level.playSound` drew `dimension`'s `soundSeedGenerator`
+    /// (deferred to the live host: [`SoundSeed::HostDeferred`]) and then
+    /// played nothing: Decaf counted the call after the draw, or it threw. The
+    /// host still draws the seed, as vanilla's stream moved.
+    SeedDrawn { dimension: String },
+}
+
+impl SoundRecord {
+    /// The sound this entry plays, if any.
+    pub fn effect(&self) -> Option<&LevelSoundEffect> {
+        match self {
+            Self::Play(effect) => Some(effect),
+            Self::SeedDrawn { .. } => None,
+        }
+    }
+
+    /// The sound this entry plays, if any.
+    pub fn into_effect(self) -> Option<LevelSoundEffect> {
+        match self {
+            Self::Play(effect) => Some(effect),
+            Self::SeedDrawn { .. } => None,
+        }
+    }
 }
 
 /// One exact level sound effect recorded from a Java `Level` or `Entity` call.
@@ -400,7 +457,8 @@ pub(crate) struct LevelSoundState {
     pub(crate) entity_facts: BTreeMap<String, EntitySoundFacts>,
     pub(crate) standalone_client_camera: Option<[f64; 3]>,
     pub(crate) standalone_client_player: Option<EntitySoundFacts>,
-    pub(crate) played_sounds: Vec<LevelSoundEffect>,
+    /// Sounds (and server seed draws) recorded outside a frame, in call order.
+    pub(crate) played_sounds: Vec<SoundRecord>,
 }
 
 /// Exact vanilla MC 26.3 `Entity.getSoundSource()` for entity types whose sound
@@ -1203,17 +1261,36 @@ fn null_block_pos() -> NativeError {
     npe(r#"Cannot invoke "net.minecraft.core.BlockPos.getX()" because "pos" is null"#)
 }
 
-/// A seed was drawn for a call that then recorded no effect: Decaf counted
-/// it, it threw, or a client call skipped another player's sound.
+/// A client seed was drawn for a call that then recorded no effect: Decaf
+/// counted it, it threw, or the call skipped another player's sound.
 ///
 /// Java consumed that seed all the same. A seed Decaf drew itself (or an
 /// explicit one) leaves Decaf's copy of the stream exactly where Java's is.
-/// A seed deferred to a live host ([`SoundSeed::HostDeferred`]) does not: the
-/// host draws only for an effect that reaches it, so its stream is now one
-/// draw behind Java's and every later draw from `stream` must count.
+/// A seed deferred to a live client host ([`SoundSeed::HostDeferred`]) does
+/// not: `play_local_sound` draws only for a sound it plays, and the client
+/// host has no draw of its own, so its stream is now one draw behind Java's
+/// and every later draw from `stream` must count.
+///
+/// A server seed needs none of this: [`server_seed_not_played`] logs the draw
+/// for the host bridge to replay.
 fn seed_not_delivered<H: Host + ?Sized>(host: &mut H, stream: &str, seed: SoundSeed) {
     if seed == SoundSeed::HostDeferred {
         host.mark_sound_stream_unknown(stream);
+    }
+}
+
+/// A server seed was drawn from `dimension`'s `soundSeedGenerator` for a call
+/// that then recorded no sound (Decaf counted it after the draw, or it threw).
+///
+/// A seed Decaf drew itself, or an explicit one, needs nothing: Decaf's copy
+/// of the stream is where Java's is. A seed deferred to the live host is
+/// logged as [`SoundRecord::SeedDrawn`], in call order, so the bridge draws
+/// the host's stream at this point too and it stays in step with Java's.
+fn server_seed_not_played(dimension: &str, seed: SoundSeed, emit: &mut dyn FnMut(SoundRecord)) {
+    if seed == SoundSeed::HostDeferred {
+        emit(SoundRecord::SeedDrawn {
+            dimension: dimension.to_owned(),
+        });
     }
 }
 
@@ -1229,7 +1306,7 @@ fn execute_server_level_call<H: Host + ?Sized>(
     firing: Option<&events::EventFiring>,
     hook_context: Option<&game_hooks::GameHookContext>,
     host_facts: &BTreeMap<String, EntitySoundFacts>,
-    emit: &mut dyn FnMut(LevelSoundEffect),
+    emit: &mut dyn FnMut(SoundRecord),
 ) -> SoundCallOutcome {
     if r.name == "getRandom" && r.descriptor == "()Lnet/minecraft/util/RandomSource;" {
         return match host.level_random_handle(level_marker) {
@@ -1438,7 +1515,7 @@ fn server_play<H: Host + ?Sized>(
     call: &ServerLevelCall<'_>,
     args: SeededArgs<'_>,
     explicit_seed: Option<i64>,
-    emit: &mut dyn FnMut(LevelSoundEffect),
+    emit: &mut dyn FnMut(SoundRecord),
 ) -> SoundCallOutcome {
     let seed = match explicit_seed {
         Some(seed) => SoundSeed::Explicit(seed),
@@ -1449,11 +1526,11 @@ fn server_play<H: Host + ?Sized>(
     };
     match server_seeded_effect(host, call, args, seed) {
         Ok(effect) => {
-            emit(effect);
+            emit(SoundRecord::Play(effect));
             SoundCallOutcome::Handled(Value::Void)
         }
         Err(outcome) => {
-            seed_not_delivered(host, call.level_marker, seed);
+            server_seed_not_played(call.dimension, seed, emit);
             outcome
         }
     }
@@ -2054,7 +2131,7 @@ fn execute_server_entity_call<H: Host + ?Sized>(
     position: Option<[f64; 3]>,
     silent: Option<bool>,
     sound_source: Option<SoundSource>,
-    emit: &mut dyn FnMut(LevelSoundEffect),
+    emit: &mut dyn FnMut(SoundRecord),
 ) -> SoundCallOutcome {
     let call = EntitySoundCall {
         is_player,
@@ -2141,7 +2218,7 @@ fn server_entity_emit_play_sound<H: Host + ?Sized>(
     sound: &Value,
     volume: f32,
     pitch: f32,
-    emit: &mut dyn FnMut(LevelSoundEffect),
+    emit: &mut dyn FnMut(SoundRecord),
 ) -> SoundCallOutcome {
     let Some(dimension) = call.dimension else {
         // The draw happens on whichever level `level()` is: Decaf cannot name it.
@@ -2165,11 +2242,11 @@ fn server_entity_emit_play_sound<H: Host + ?Sized>(
     };
     match server_entity_effect(host, call, dimension, source, sound, volume, pitch, seed) {
         Ok(effect) => {
-            emit(effect);
+            emit(SoundRecord::Play(effect));
             SoundCallOutcome::Handled(Value::Void)
         }
         Err(outcome) => {
-            seed_not_delivered(host, &level_marker, seed);
+            server_seed_not_played(dimension, seed, emit);
             outcome
         }
     }
@@ -2559,7 +2636,9 @@ pub(crate) fn standalone_client_sound_call(
         }
         (HostKind::GameLevel, client_surface::LEVEL) if is_level_sound_method_name(&r.name) => {
             execute_client_level_call(host, r, args, None, &mut |host, effect| {
-                host.level_sound.played_sounds.push(effect);
+                host.level_sound
+                    .played_sounds
+                    .push(SoundRecord::Play(effect));
             })
         }
         (HostKind::GameEntity, client_surface::PLAYER)
@@ -2582,7 +2661,9 @@ pub(crate) fn standalone_client_sound_call(
         }
         (HostKind::GameEntity, client_surface::PLAYER) if is_entity_sound_method_name(&r.name) => {
             execute_local_player_call(host, r, args, None, &mut |host, effect| {
-                host.level_sound.played_sounds.push(effect);
+                host.level_sound
+                    .played_sounds
+                    .push(SoundRecord::Play(effect));
             })
         }
         _ => return None,
@@ -2619,8 +2700,8 @@ pub(crate) fn game_hook_sound_call<H: Host>(
                 &empty_facts,
                 &mut |effect| recorded.push(effect),
             );
-            for effect in recorded {
-                context.push_effect(game_hooks::GameHookEffect::PlaySound(effect));
+            for record in recorded {
+                context.push_effect(game_hooks::GameHookEffect::from_sound_record(record));
             }
             Some(finish_game_hook_outcome(inner, marker, r, outcome))
         }
@@ -2656,8 +2737,8 @@ pub(crate) fn game_hook_sound_call<H: Host>(
                 sound_source,
                 &mut |effect| recorded.push(effect),
             );
-            for effect in recorded {
-                context.push_effect(game_hooks::GameHookEffect::PlaySound(effect));
+            for record in recorded {
+                context.push_effect(game_hooks::GameHookEffect::from_sound_record(record));
             }
             Some(finish_game_hook_outcome(inner, marker, r, outcome))
         }
@@ -2880,14 +2961,37 @@ impl StdHost {
     }
 
     /// Standalone sounds recorded outside an `EventFiring`, `GameHookContext`,
-    /// or `ClientSnapshot` frame.
-    pub fn played_sounds(&self) -> &[LevelSoundEffect] {
+    /// or `ClientSnapshot` frame, in call order (without the server seed
+    /// draws that played nothing: [`Self::sound_records`] has those too).
+    pub fn played_sounds(&self) -> Vec<LevelSoundEffect> {
+        self.level_sound
+            .played_sounds
+            .iter()
+            .filter_map(SoundRecord::effect)
+            .cloned()
+            .collect()
+    }
+
+    /// The standalone sound log: every recorded sound and every server seed
+    /// draw deferred to the live host, in call order.
+    pub fn sound_records(&self) -> &[SoundRecord] {
         &self.level_sound.played_sounds
     }
 
-    /// Drain standalone recorded sounds.
-    pub fn take_played_sounds(&mut self) -> Vec<LevelSoundEffect> {
+    /// Drain the standalone sound log ([`Self::sound_records`]). A server
+    /// bridge drains this one, so it can replay every deferred draw.
+    pub fn take_sound_records(&mut self) -> Vec<SoundRecord> {
         std::mem::take(&mut self.level_sound.played_sounds)
+    }
+
+    /// Drain standalone recorded sounds, dropping any server seed draw that
+    /// played nothing. For client drains (a client log holds only sounds) and
+    /// tests; a server bridge uses [`Self::take_sound_records`].
+    pub fn take_played_sounds(&mut self) -> Vec<LevelSoundEffect> {
+        self.take_sound_records()
+            .into_iter()
+            .filter_map(SoundRecord::into_effect)
+            .collect()
     }
 
     /// Draw the client level's `Level.random.nextLong()` where Java does
