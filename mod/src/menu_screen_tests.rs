@@ -217,6 +217,8 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
          public final class ScreenProbe implements ModInitializer {\n\
            @Override public void onInitialize() {\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"shelf\"), ShelfMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"cost\"), CostMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"bare\"), BareMenu.TYPE);\n\
            }\n\
          }",
     ),
@@ -231,9 +233,10 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
          import net.minecraft.world.inventory.Slot;\n\
          public class ShelfMenu extends AbstractContainerMenu {\n\
            public static final MenuType<ShelfMenu> TYPE = new MenuType<>(ShelfMenu::new, FeatureFlags.VANILLA_SET);\n\
+           public final SimpleContainer box = new SimpleContainer(1);\n\
            public ShelfMenu(int id, Inventory inventory) {\n\
              super(TYPE, id);\n\
-             this.addSlot(new Slot(new SimpleContainer(1), 0, 80, 20));\n\
+             this.addSlot(new IconSlot(this.box, 0, 80, 20));\n\
              this.addStandardInventorySlots(inventory, 8, 51);\n\
            }\n\
          }",
@@ -253,9 +256,11 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
              this.titleLabelX = 60;\n\
              this.titleLabelY = 18;\n\
            }\n\
+           public static int removals;\n\
            @Override protected void extractErrorIcon(GuiGraphicsExtractor graphics, int x, int y) {\n\
              graphics.fill(x + 99, y + 45, x + 127, y + 66, 0xFF8B8B8B);\n\
            }\n\
+           @Override public void removed() { super.removed(); removals++; }\n\
          }",
     ),
     (
@@ -270,13 +275,98 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
          import net.minecraft.world.entity.player.Inventory;\n\
          public class ShelfScreen extends AbstractContainerScreen<ShelfMenu> {\n\
            private static final Identifier TEXTURE = Identifier.fromNamespaceAndPath(\"demo\", \"textures/gui/shelf.png\");\n\
-           public ShelfScreen(ShelfMenu menu, Inventory inventory, Component title) { super(menu, inventory, title, 176, 133); }\n\
+           public ShelfScreen(ShelfMenu menu, Inventory inventory, Component title) { super(menu, inventory, Component.translatable(\"container.demo.own_shelf\"), 176, 133); }\n\
            @Override public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {\n\
              super.extractBackground(graphics, mouseX, mouseY, partialTick);\n\
              graphics.blit(RenderPipelines.GUI_TEXTURED, TEXTURE, this.leftPos, this.topPos, 0.0f, 0.0f, this.imageWidth, this.imageHeight, 256, 256);\n\
+             if (this.menu.box.getItem(0).isEmpty()) graphics.fill(this.leftPos, this.topPos, this.leftPos + 4, this.topPos + 4, 0xFFFF0000);\n\
            }\n\
            @Override protected void extractLabels(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {}\n\
            @Override public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) { return false; }\n\
+         }",
+    ),
+    (
+        "demo/IconSlot.java",
+        "package demo;\n\
+         import net.minecraft.resources.Identifier;\n\
+         import net.minecraft.world.Container;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         public class IconSlot extends Slot {\n\
+           public IconSlot(Container container, int index, int x, int y) { super(container, index, x, y); }\n\
+           @Override public Identifier getNoItemIcon() { return Identifier.fromNamespaceAndPath(\"demo\", \"container/slot/shelf\"); }\n\
+         }",
+    ),
+    (
+        "demo/CostMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.AbstractContainerMenu;\n\
+         import net.minecraft.world.inventory.DataSlot;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         public class CostMenu extends AbstractContainerMenu {\n\
+           public static final MenuType<CostMenu> TYPE = new MenuType<>(CostMenu::new, FeatureFlags.VANILLA_SET);\n\
+           public final DataSlot cost = DataSlot.standalone();\n\
+           public CostMenu(int id, Inventory inventory) {\n\
+             super(TYPE, id);\n\
+             this.addSlot(new Slot(new SimpleContainer(1), 0, 80, 35));\n\
+             this.addStandardInventorySlots(inventory, 8, 84);\n\
+             this.addDataSlot(this.cost);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/CostScreen.java",
+        "package demo;\n\
+         import net.minecraft.client.gui.GuiGraphicsExtractor;\n\
+         import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         public class CostScreen extends AbstractContainerScreen<CostMenu> {\n\
+           public CostScreen(CostMenu menu, Inventory inventory, Component title) { super(menu, inventory, title); }\n\
+           @Override public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {\n\
+             super.extractBackground(graphics, mouseX, mouseY, partialTick);\n\
+             int cost = this.menu.cost.get();\n\
+             graphics.fill(this.leftPos + 8, this.topPos + 70, this.leftPos + 8 + cost, this.topPos + 74, 0xFF00FF00);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/BareMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.AbstractContainerMenu;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         public class BareMenu extends AbstractContainerMenu {\n\
+           public static final MenuType<BareMenu> TYPE = new MenuType<>(BareMenu::new, FeatureFlags.VANILLA_SET);\n\
+           public BareMenu(int id, Inventory inventory) {\n\
+             super(TYPE, id);\n\
+             this.addSlot(new Slot(new SimpleContainer(1), 0, 80, 35));\n\
+             this.addStandardInventorySlots(inventory, 8, 84);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/BareScreen.java",
+        "package demo;\n\
+         import net.minecraft.client.gui.GuiGraphicsExtractor;\n\
+         import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;\n\
+         import net.minecraft.client.renderer.RenderPipelines;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.resources.Identifier;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         public class BareScreen extends AbstractContainerScreen<BareMenu> {\n\
+           private static final Identifier TEXTURE = Identifier.fromNamespaceAndPath(\"demo\", \"textures/gui/bare.png\");\n\
+           public BareScreen(BareMenu menu, Inventory inventory, Component title) { super(menu, inventory, title); }\n\
+           @Override protected void init() { super.init(); this.titleLabelX = this.width / 8; }\n\
+           @Override public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {\n\
+             graphics.blit(RenderPipelines.GUI_TEXTURED, TEXTURE, this.leftPos, this.topPos, 0.0f, 0.0f, this.imageWidth, this.imageHeight, 256, 256);\n\
+           }\n\
          }",
     ),
     (
@@ -288,6 +378,8 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
            @Override public void onInitializeClient() {\n\
              MenuScreens.register(BenchMenu.TYPE, BenchScreen::new);\n\
              MenuScreens.register(ShelfMenu.TYPE, ShelfScreen::new);\n\
+             MenuScreens.register(CostMenu.TYPE, CostScreen::new);\n\
+             MenuScreens.register(BareMenu.TYPE, BareScreen::new);\n\
            }\n\
          }",
     ),
@@ -296,6 +388,7 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
 /// `live_menu_tests`' stubs this fixture needs wider: an `Inventory` that is a `Container`, a
 /// menu that adds slots, a `Slot` with a position.
 const REPLACED_STUBS: &[&str] = &[
+    "net/minecraft/network/chat/Component.java",
     "net/minecraft/world/entity/player/Inventory.java",
     "net/minecraft/world/inventory/AbstractContainerMenu.java",
     "net/minecraft/world/inventory/Slot.java",
@@ -303,6 +396,14 @@ const REPLACED_STUBS: &[&str] = &[
 
 /// Compile-only 26.3 client signatures (the client jar's), and the widened common stubs.
 const SCREEN_STUBS: &[(&str, &str)] = &[
+    (
+        "net/minecraft/network/chat/Component.java",
+        "package net.minecraft.network.chat;\n\
+         public interface Component {\n\
+           static MutableComponent translatable(String key) { return null; }\n\
+           static MutableComponent literal(String text) { return null; }\n\
+         }",
+    ),
     (
         "net/fabricmc/api/ClientModInitializer.java",
         "package net.fabricmc.api; public interface ClientModInitializer { void onInitializeClient(); }",
@@ -335,6 +436,7 @@ const SCREEN_STUBS: &[(&str, &str)] = &[
          public class Slot {\n\
            public final Container container; public final int x, y;\n\
            public Slot(Container container, int index, int x, int y) { this.container = container; this.x = x; this.y = y; }\n\
+           public net.minecraft.resources.Identifier getNoItemIcon() { return null; }\n\
          }",
     ),
     (
@@ -342,10 +444,14 @@ const SCREEN_STUBS: &[(&str, &str)] = &[
         "package net.minecraft.world.inventory;\n\
          import net.minecraft.world.Container;\n\
          import net.minecraft.world.item.ItemStack;\n\
+         import net.minecraft.world.entity.player.Player;\n\
          public abstract class AbstractContainerMenu {\n\
            protected AbstractContainerMenu(MenuType<?> type, int id) {}\n\
            protected Slot addSlot(Slot slot) { return slot; }\n\
            protected void addStandardInventorySlots(Container container, int x, int y) {}\n\
+           protected DataSlot addDataSlot(DataSlot slot) { return slot; }\n\
+           public void removed(Player player) {}\n\
+           public ItemStack getCarried() { return null; }\n\
            public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) { return true; }\n\
          }",
     ),
@@ -626,17 +732,10 @@ fn javac_item_combiner_screen_opens_draws_resizes_and_closes_through_the_sunrise
             // The window drops the opening: `removed()` runs and the screen is gone.
             drop(screen);
             assert!(!java.lock_client().menu_screen_open());
-            // `ItemCombinerScreen.init`'s `addSlotListener` broadcasts the client menu's slots,
-            // which read the player's inventory: a screen frame holds none, so that one read is
-            // counted. Nothing else is.
-            assert_eq!(
-                counted_since(java, &before),
-                vec![(
-                    "net/minecraft/world/inventory/AbstractContainerMenu#broadcastChanges()V"
-                        .to_owned(),
-                    1
-                )]
-            );
+            // `ItemCombinerScreen.init`'s `addSlotListener` broadcast reads stacks the client
+            // menu doesn't have, but nothing observes them there (no synchronizer, and
+            // `ItemCombinerScreen.slotChanged` is `return`): nothing is counted.
+            assert_eq!(counted_since(java, &before), Vec::new());
         });
     });
 }
@@ -660,15 +759,18 @@ fn javac_container_screen_counts_the_overrides_sunrise_performs() {
             assert_eq!((layout.width, layout.height), (176.0, 133.0));
             assert_eq!(
                 layout.slots,
+                // `IconSlot.getNoItemIcon()` ran at open; Sunrise won't ask it again (counted).
                 vec![Some(mod_api::ScreenSlot {
                     position: [80.0, 20.0],
-                    no_item_icon: None,
+                    no_item_icon: Some("demo:container/slot/shelf".to_owned()),
                 })]
             );
             assert_eq!((layout.inventory_x, layout.inventory_y), (8.0, 51.0));
             assert_eq!(layout.title_label, Some([8.0, 6.0]));
             assert_eq!(layout.inventory_label, Some([8.0, 39.0]));
 
+            // The blit, then `menu.box.getItem(0)`: the client box never got the server's
+            // contents, so the read is counted and the frame stops there (no `isEmpty` fill).
             let mut painted = Painted::default();
             screen.draw(&host, frame([320, 240], [176, 133]), &mut painted);
             assert_eq!(
@@ -681,6 +783,11 @@ fn javac_container_screen_counts_the_overrides_sunrise_performs() {
                 counted_since(java, &before),
                 vec![
                     (
+                        "demo/IconSlot#getNoItemIcon()Lnet/minecraft/resources/Identifier;"
+                            .to_owned(),
+                        1
+                    ),
+                    (
                         "demo/ShelfScreen#extractLabels(Lnet/minecraft/client/gui/GuiGraphicsExtractor;II)V"
                             .to_owned(),
                         1
@@ -691,12 +798,157 @@ fn javac_container_screen_counts_the_overrides_sunrise_performs() {
                         1
                     ),
                     (
+                        "game-hook re-entry: sunrise#menu_screen:screen_title_is_not_the_server_title"
+                            .to_owned(),
+                        1
+                    ),
+                    (
                         "net/minecraft/client/DeltaTracker#getGameTimeDeltaPartialTick(Z)F"
+                            .to_owned(),
+                        1
+                    ),
+                    (
+                        "net/minecraft/world/SimpleContainer#getItem(I)Lnet/minecraft/world/item/ItemStack;"
                             .to_owned(),
                         1
                     ),
                 ]
             );
+        });
+    });
+}
+
+/// A background drawn from a data slot (`CostScreen` fills `menu.cost.get()` pixels): each
+/// frame writes Sunrise's synced value into the client menu first, as vanilla's
+/// `ClientboundContainerSetDataPacket` → `setData` does, sign-extended from the packet's
+/// `short`. Before Sunrise has a value the slot keeps the value the menu built (0).
+#[test]
+fn a_data_slot_driven_background_follows_the_servers_values() {
+    on_a_big_stack("menu-screen-cost", || {
+        with_client(screens_jar(), &["demo:cost"], |java| {
+            let before = counted(java);
+            let host = ScreenHost::new([640, 480], 2);
+            let title = Text::literal("Cost");
+            let (_, screen) =
+                mod_api::__private::create_menu_screen(&host, open(5, "demo:cost", &title, 1))
+                    .expect("the menu type has a screen factory");
+            let screen = screen.unwrap().expect("the Java screen opened");
+            let bar = |data: &'static [i32]| {
+                let mut painted = Painted::default();
+                let mut at = frame([320, 240], [176, 166]);
+                at.data = data;
+                screen.draw(&host, at, &mut painted);
+                painted.0
+            };
+            // leftPos 72, topPos 37: the bar spans x 80 .. 80 + cost, y 107 .. 111.
+            let fill = |x1: i32| GuiDraw::Fill {
+                x0: 80,
+                y0: 107,
+                x1,
+                y1: 111,
+                color: 0xFF00_FF00,
+            };
+            assert_eq!(bar(&[]), vec![fill(80)]);
+            assert_eq!(bar(&[37]), vec![fill(117)]);
+            assert_eq!(bar(&[12]), vec![fill(92)]);
+            // 70000 travels as the short 4464 (70000 - 65536).
+            assert_eq!(bar(&[70000]), vec![fill(80 + 4464)]);
+            drop(screen);
+            // `CostScreen` overrides `extractBackground`, which gets the partial tick Sunrise's
+            // frame lacks: counted on each of the four frames. Nothing else.
+            assert_eq!(
+                counted_since(java, &before),
+                vec![(
+                    "net/minecraft/client/DeltaTracker#getGameTimeDeltaPartialTick(Z)F".to_owned(),
+                    4
+                )]
+            );
+        });
+    });
+}
+
+/// A screen whose `extractBackground` never reaches `Screen.extractBackground` has no backdrop
+/// in vanilla, but Sunrise draws one under every mod screen: counted per frame. Its `init`
+/// puts the title at `width / 8`, so a resize moves the label Sunrise took at open: counted.
+#[test]
+fn a_background_without_super_and_a_label_moved_by_init_are_counted() {
+    on_a_big_stack("menu-screen-bare", || {
+        with_client(screens_jar(), &["demo:bare"], |java| {
+            let before = counted(java);
+            let host = ScreenHost::new([640, 480], 2);
+            let title = Text::literal("Bare");
+            let (_, screen) =
+                mod_api::__private::create_menu_screen(&host, open(6, "demo:bare", &title, 1))
+                    .expect("the menu type has a screen factory");
+            let screen = screen.unwrap().expect("the Java screen opened");
+            assert_eq!(screen.layout().title_label, Some([40.0, 6.0]));
+            let mut painted = Painted::default();
+            screen.draw(&host, frame([320, 240], [176, 166]), &mut painted);
+            assert_eq!(painted.0, vec![blit("demo:gui/bare", [72, 37], [176, 166])]);
+            let mut painted = Painted::default();
+            screen.draw(&host, frame([400, 300], [176, 166]), &mut painted);
+            assert_eq!(
+                painted.0,
+                vec![blit("demo:gui/bare", [112, 67], [176, 166])]
+            );
+            drop(screen);
+            assert_eq!(
+                counted_since(java, &before),
+                vec![
+                    (
+                        "game-hook re-entry: sunrise#menu_screen:backdrop_without_Screen.extractBackground"
+                            .to_owned(),
+                        2
+                    ),
+                    (
+                        "game-hook re-entry: sunrise#menu_screen:layout_changed_after_open"
+                            .to_owned(),
+                        1
+                    ),
+                    (
+                        "net/minecraft/client/DeltaTracker#getGameTimeDeltaPartialTick(Z)F"
+                            .to_owned(),
+                        2
+                    ),
+                ]
+            );
+        });
+    });
+}
+
+/// The world unloads with the screen open: vanilla's `disconnect` / `clearClientLevel` run its
+/// `removed()` (`Gui.setScreen`, before `player` is cleared); the next world opens fresh.
+#[test]
+fn a_world_unload_closes_the_open_screen() {
+    on_a_big_stack("menu-screen-unload", || {
+        with_client(screens_jar(), &["demo:bench"], |java| {
+            let host = ScreenHost::new([640, 480], 2);
+            let title = Text::translate("container.demo.bench", Vec::new());
+            let open_bench = || {
+                mod_api::__private::create_menu_screen(&host, open(9, "demo:bench", &title, 3))
+                    .expect("the menu type has a screen factory")
+                    .1
+                    .unwrap()
+                    .expect("the Java screen opened")
+            };
+            let removals = |java: &HorizonJava| {
+                // A static never written still holds its default, 0.
+                java.lock_client()
+                    .static_value(0, "demo/BenchScreen", "removalsI")
+                    .or(Some(crate::runtime::Value::Int(0)))
+            };
+            let screen = open_bench();
+            assert_eq!(removals(java), Some(crate::runtime::Value::Int(0)));
+            java.on_client_level_unload();
+            assert!(!java.lock_client().menu_screen_open());
+            assert_eq!(removals(java), Some(crate::runtime::Value::Int(1)));
+            // The window drops the old opening later: nothing runs twice.
+            drop(screen);
+            assert_eq!(removals(java), Some(crate::runtime::Value::Int(1)));
+            java.on_client_level_load();
+            let screen = open_bench();
+            drop(screen);
+            assert_eq!(removals(java), Some(crate::runtime::Value::Int(2)));
         });
     });
 }
@@ -768,14 +1020,7 @@ fn real_runes_altar_screen_opens_and_draws_through_the_sunrise_hooks() {
             );
             drop(screen);
             assert!(!java.lock_client().menu_screen_open());
-            assert_eq!(
-                counted_since(java, &before),
-                vec![(
-                    "net/minecraft/world/inventory/AbstractContainerMenu#broadcastChanges()V"
-                        .to_owned(),
-                    1
-                )]
-            );
+            assert_eq!(counted_since(java, &before), Vec::new());
         });
     });
 }

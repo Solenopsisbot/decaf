@@ -914,6 +914,18 @@ pub(crate) struct ClientState {
     /// `draw_client_screen_bg`, and closed via virtual `removed()` before opening
     /// a different screen so slot listeners never leak).
     active_screen: Option<ActiveScreen>,
+    /// The `menu_states` objects of the client menu a screen frame built (`screen_models.rs`):
+    /// its slots and containers, whose contents vanilla's client takes from the server's
+    /// `ClientboundContainerSetContentPacket`, which Decaf's client menu never gets. A read of
+    /// their contents is no fact: `Runtime::screen_menu_unsynced_call` counts it. The data
+    /// slots are left out: the screen bridge writes Sunrise's synced values into them.
+    pub(crate) screen_menu_graph: std::collections::BTreeSet<String>,
+    /// The data values the bridge last wrote into the active client menu (`setData`), by
+    /// data-slot index.
+    pub(crate) screen_menu_data: Vec<Option<i32>>,
+    /// `Screen.extractBackground` (the in-game backdrop Sunrise draws itself) ran in this
+    /// frame's `extractBackground` chain.
+    pub(crate) screen_backdrop: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1321,6 +1333,24 @@ impl StdHost {
         self.client_menu_constructor(menu_type).is_some()
     }
 
+    /// The current frame is a container screen's ([`ClientSnapshot::screen_scope`]).
+    pub(crate) fn client_screen_scope(&self) -> bool {
+        self.client
+            .frame
+            .as_ref()
+            .is_some_and(|frame| frame.screen_scope)
+    }
+
+    /// Whether `Screen.extractBackground`'s own body (the backdrop Sunrise draws itself) ran
+    /// since the last [`StdHost::client_screen_backdrop_reset`].
+    pub fn client_screen_backdrop_ran(&self) -> bool {
+        self.client.screen_backdrop
+    }
+
+    pub(crate) fn client_screen_backdrop_reset(&mut self) {
+        self.client.screen_backdrop = false;
+    }
+
     /// The GUI size the active screen was laid out for (its last `init` or `resize`).
     pub fn client_active_gui_size(&self) -> Option<[i32; 2]> {
         self.client
@@ -1412,6 +1442,8 @@ impl StdHost {
 
     /// Forget the active screen (`Gui.setScreen(null)` switching it out), returning it.
     pub(crate) fn take_client_active_screen(&mut self) -> Option<Value> {
+        self.client.screen_menu_graph.clear();
+        self.client.screen_menu_data.clear();
         self.client.active_screen.take().map(|active| active.screen)
     }
 
@@ -2748,7 +2780,12 @@ impl StdHost {
                 let (y0, y1) = (v[1].min(v[2]), v[1].max(v[2]));
                 self.client.fill([v[0], y0 + 1, v[0] + 1, y1], v[3] as u32)
             }
-            // A fill through an explicit pipeline (`RenderPipelines.GUI`).
+            // A fill through an explicit pipeline (`RenderPipelines.GUI`). This descriptor is
+            // the pre-26.3 `com.mojang.blaze3d.pipeline` one; 26.3's `RenderPipeline` is
+            // `com.mojang.renderpearl.api.pipeline.RenderPipeline`, so a 26.3 jar's call never
+            // matches and stays counted (the arm's `_ => None`). Moving it to the 26.3 package
+            // needs the pipeline argument checked (only `GUI` fills like this) and a fixture;
+            // until then it stays counted rather than half-ported.
             ("fill", "(Lcom/mojang/blaze3d/pipeline/RenderPipeline;IIIII)V") => {
                 let v = ints(1, 5)?;
                 self.client.fill([v[0], v[1], v[2], v[3]], v[4] as u32)
@@ -2792,7 +2829,11 @@ impl StdHost {
                     .client_item_draw(frame, slot, [v[0], v[1]], false, Some(count.flatten()))
                     .map(|()| Ok(Value::Void));
             }
-            // `blitSprite(pipeline, sprite, x, y, w, h[, colour | alpha])`.
+            // `blitSprite(pipeline, sprite, x, y, w, h[, colour | alpha])`. Pre-26.3 package, as
+            // the pipeline `fill` above: a 26.3 call (`com.mojang.renderpearl.api.pipeline`)
+            // stays counted. A port also needs the 10-int partial overload (a sub-region of the
+            // sprite) and a nine-slice sprite under a scaled pose, which `DrawOp::Sprite`
+            // (a stretched rect) does not express exactly.
             ("blitSprite", descriptor)
                 if descriptor.starts_with(
                     "(Lcom/mojang/blaze3d/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIII",

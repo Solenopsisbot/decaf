@@ -222,7 +222,7 @@ impl State {
         let built = build_screen(loaded, open, menu_type, title);
         loaded.host.end_client_frame();
         loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
-        let layout = match built {
+        let (layout, java_layout) = match built {
             Ok(layout) => layout,
             Err(reason) => {
                 log::warn!(
@@ -239,6 +239,7 @@ impl State {
             serial: self.screen_serial,
         };
         self.screen = Some(opening);
+        self.screen_layout = Some(java_layout);
         Some((opening, layout))
     }
 
@@ -260,20 +261,45 @@ impl State {
         loaded
             .host
             .begin_client_frame(screen_frame(frame.gui_size, player), &[]);
+        // The server's data-slot values Sunrise holds, into the client menu before the frame,
+        // as vanilla's `ClientboundContainerSetDataPacket` lands before the render.
+        if let Err(error) = loaded
+            .jar
+            .sync_client_menu_data(&mut loaded.host, frame.data)
+        {
+            log::debug!("{LOG}: client {} menu data: {error}", loaded.row.id);
+        }
         // Sunrise's frame carries no partial tick: a jar `extractBackground` counts it.
         let (ops, result) =
             loaded
                 .jar
                 .draw_active_client_screen(&mut loaded.host, frame.pointer, None);
+        // Sunrise draws the in-game backdrop under every mod screen; vanilla draws it only when
+        // the screen's `extractBackground` chain reaches `Screen.extractBackground`.
+        if result.is_ok() && !loaded.host.client_screen_backdrop_ran() {
+            loaded.host.note_unknown_game_hook(
+                "sunrise#menu_screen:backdrop_without_Screen.extractBackground",
+            );
+        }
         // The Java screen draws at its own `leftPos`/`topPos`; Sunrise puts its slots and
         // labels at `frame.origin`. They agree unless Sunrise moved the panel (a recipe book,
         // another mod's `screen_room`), which the Java screen never hears of.
-        if let Some(layout) = loaded.jar.active_client_screen_layout(&loaded.host)
+        let current = loaded.jar.active_client_screen_layout(&loaded.host);
+        if let Some(layout) = &current
             && [layout.left_pos as f32, layout.top_pos as f32] != frame.origin
         {
             loaded
                 .host
                 .note_unknown_game_hook("sunrise#menu_screen:origin_differs_from_leftPos_topPos");
+        }
+        // Everything else Sunrise took at open: a later `init` (a resize) that moves a label
+        // or changes the image is not on Sunrise's window. `Slot.x/y` are `final` in 26.3.
+        if let (Some(now), Some(then)) = (&current, &self.screen_layout)
+            && !same_shape(now, then)
+        {
+            loaded
+                .host
+                .note_unknown_game_hook("sunrise#menu_screen:layout_changed_after_open");
         }
         let mut draws = Vec::with_capacity(ops.len());
         for op in &ops {
@@ -308,15 +334,36 @@ impl State {
         }
     }
 
-    /// Forget an open screen without running Java (a world unload drops every client object).
+    /// The world goes away with a screen open: vanilla's `Minecraft.disconnect` /
+    /// `clearClientLevel` switch it out with `Gui.setScreen` (offsets 136/186, 58) while
+    /// `player` is still set (cleared at 202, 83), so its `removed()` runs here, before the
+    /// world's objects are forgotten. The window's later drop of the opening then does nothing.
     pub(super) fn forget_menu_screen(&mut self) {
-        self.screen = None;
+        self.screen_layout = None;
+        if let Some(opening) = self.screen.take()
+            && let Some(loaded) = self.jars.get_mut(opening.jar)
+        {
+            close_on(loaded);
+        }
     }
 
     /// Whether a Java screen is open on a Sunrise window.
     #[cfg(test)]
     pub(crate) fn menu_screen_open(&self) -> bool {
         self.screen.is_some()
+    }
+
+    /// A static field of resident jar `index`'s classes (`owner`, `name` + descriptor).
+    #[cfg(test)]
+    pub(crate) fn static_value(
+        &self,
+        index: usize,
+        owner: &str,
+        key: &str,
+    ) -> Option<runtime::Value> {
+        runtime::Host::persistent_class_state(&self.jars[index].host)
+            .0
+            .remove(&format!("{owner}#{key}"))
     }
 
     /// The counted calls of resident jar `index`, by name.
@@ -378,7 +425,7 @@ fn build_screen(
     open: &MenuScreenOpen<'_>,
     menu_type: runtime::Value,
     title: runtime::Value,
-) -> Result<MenuScreenLayout, String> {
+) -> Result<(MenuScreenLayout, ScreenLayout), String> {
     let note = |loaded: &mut LoadedJar, reason: &str| {
         loaded
             .host
@@ -405,19 +452,38 @@ fn build_screen(
     if let Err(error) = loaded.jar.count_sunrise_screen_overrides(&mut loaded.host) {
         log::debug!("{LOG}: client {} screen overrides: {error}", loaded.row.id);
     }
-    let (screen_layout, mismatches) = sunrise_layout(&layout, open);
+    // Sunrise labels the window with the server's title; vanilla's `extractLabels` draws the
+    // screen's own `title`, which a constructor may have replaced.
+    if loaded
+        .jar
+        .active_client_screen_keeps_its_title(&mut loaded.host)
+        != Some(true)
+    {
+        note(loaded, "screen_title_is_not_the_server_title");
+    }
+    let presentation = match loaded.jar.client_screen_slot_presentation(&mut loaded.host) {
+        Ok(presentation) => presentation,
+        Err(error) => {
+            note(loaded, "slot_presentation_not_read");
+            return Err(format!("the slots' presentation: {error}"));
+        }
+    };
+    let (screen_layout, mismatches) = sunrise_layout(&layout, &presentation, open);
     for reason in mismatches {
         note(loaded, reason);
     }
-    screen_layout.ok_or_else(|| {
-        note(loaded, "slot_count_mismatch");
-        format!(
-            "the Java menu has {} slots, Sunrise's window {} + {}",
-            layout.slots.len(),
-            open.backing_slots,
-            open.player_slots
-        )
-    })
+    let java_layout = layout.clone();
+    screen_layout
+        .map(|screen| (screen, java_layout))
+        .ok_or_else(|| {
+            note(loaded, "slot_count_mismatch");
+            format!(
+                "the Java menu has {} slots, Sunrise's window {} + {}",
+                layout.slots.len(),
+                open.backing_slots,
+                open.player_slots
+            )
+        })
 }
 
 /// Sunrise's layout for the Java screen's, and the differences Sunrise would draw (each
@@ -425,6 +491,7 @@ fn build_screen(
 /// when both menus have the same slots (#662 opens the window from the same layout).
 pub(crate) fn sunrise_layout(
     layout: &ScreenLayout,
+    presentation: &[(bool, Option<String>)],
     open: &MenuScreenOpen<'_>,
 ) -> (Option<MenuScreenLayout>, Vec<&'static str>) {
     let mut mismatches = Vec::new();
@@ -438,15 +505,27 @@ pub(crate) fn sunrise_layout(
     {
         return (None, mismatches);
     }
+    if presentation.len() != layout.slots.len() {
+        return (None, mismatches);
+    }
+    // `Slot.isActive()` false starts the slot hidden (`None`); `getNoItemIcon()` is its empty
+    // sprite. Player slots are Sunrise's grid, so a hidden or iconed one there is counted.
     let slots = layout.slots[..backing]
         .iter()
-        .map(|slot| {
-            Some(ScreenSlot {
+        .zip(presentation)
+        .map(|(slot, (active, icon))| {
+            active.then(|| ScreenSlot {
                 position: [slot.x as f32, slot.y as f32],
-                no_item_icon: None,
+                no_item_icon: icon.clone(),
             })
         })
         .collect();
+    if presentation[backing..]
+        .iter()
+        .any(|(active, icon)| !active || icon.is_some())
+    {
+        mismatches.push("player_slot_hidden_or_iconed");
+    }
     let player = &layout.slots[backing..];
     let (inventory_x, inventory_y) = match player.first() {
         Some(first) => (first.x, first.y),
@@ -616,4 +695,20 @@ fn api_text(host: &dyn ClientHost, text: &ClientText) -> Option<mod_api::Text> {
         ClientText::Translatable(key) => Some(mod_api::Text::translate(key.clone(), Vec::new())),
         ClientText::Json(json) => host.text_from_json(json).ok().flatten(),
     }
+}
+
+/// The parts of the Java layout Sunrise's window took at open (all but the position, which
+/// each frame checks against Sunrise's origin).
+fn same_shape(now: &ScreenLayout, then: &ScreenLayout) -> bool {
+    (
+        now.image_width,
+        now.image_height,
+        now.title_label,
+        now.inventory_label,
+    ) == (
+        then.image_width,
+        then.image_height,
+        then.title_label,
+        then.inventory_label,
+    ) && now.slots == then.slots
 }

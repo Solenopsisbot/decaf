@@ -623,6 +623,8 @@ impl<H: Host> Runtime<'_, H> {
                         })?;
                         return Ok(Some(Value::Void));
                     }
+                    // The host's backdrop stands for this body: tell the screen bridge it ran.
+                    self.host.note_screen_backdrop();
                     Ok(Some(Value::Void))
                 }
                 _ => Ok(None),
@@ -639,6 +641,158 @@ impl<H: Host> Runtime<'_, H> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// The choke point for a screen frame's client menu (`create_client_menu` arms it): a call
+    /// on one of its slots or containers that would read contents the server never sent is
+    /// counted, never answered from the empty client copy. An allow-list keeps what observes no
+    /// synced state: construction, the menu's type, slot lookup, data writes (`setData`, the
+    /// sync itself), listeners, `removed`, `broadcastChanges` (`screen_menu_broadcast_unobservable`
+    /// decides), and a slot's or container's shape.
+    #[inline(never)]
+    pub(crate) fn screen_menu_unsynced_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+    ) -> Result<Option<Value>, NativeError> {
+        let Some(host) = self.host.as_std_host() else {
+            return Ok(None);
+        };
+        if host.client.screen_menu_graph.is_empty() {
+            return Ok(None);
+        }
+        let Some(key) = crate::expect_ref(receiver) else {
+            return Ok(None);
+        };
+        if !host.client.screen_menu_graph.contains(key) {
+            return Ok(None);
+        }
+        let shape = matches!(
+            (r.name.as_str(), r.descriptor.as_str()),
+            ("<init>", _)
+                | ("getType", "()Lnet/minecraft/world/inventory/MenuType;")
+                | ("getSlot", "(I)Lnet/minecraft/world/inventory/Slot;")
+                | ("isValidSlotIndex", "(I)Z")
+                | ("setData", "(II)V")
+                | (
+                    "addSlotListener" | "removeSlotListener",
+                    "(Lnet/minecraft/world/inventory/ContainerListener;)V"
+                )
+                | ("removed", "(Lnet/minecraft/world/entity/player/Player;)V")
+                | ("broadcastChanges", "()V")
+                | ("isActive" | "isFake" | "isHighlightable", "()Z")
+                | ("getNoItemIcon", "()Lnet/minecraft/resources/Identifier;")
+                | ("getContainerSlot" | "getContainerSize", "()I")
+                | ("hashCode", "()I")
+                | ("equals", "(Ljava/lang/Object;)Z")
+        );
+        if shape {
+            return Ok(None);
+        }
+        self.host.unknown_operand_call(r).map(Some)
+    }
+
+    /// 26.3 `AbstractContainerMenu.broadcastChanges` on a screen frame's client menu, when
+    /// nothing can observe the stacks it reads: the client has no synchronizer (`setSynchronizer`
+    /// is `ServerPlayer.initMenu`'s), every listener's `slotChanged`/`dataChanged` is
+    /// `ItemCombinerScreen`'s (offset 0: `return`), and no jar `Slot.getItem`, container,
+    /// `getCarried` or `DataSlot` body would run. Then the only effect is `lastSlots`, which
+    /// becomes the copies of contents Decaf does not have ([`LastSlot::Unknown`]: a later
+    /// comparison counts). `false` when any of that is not so (the modelled body runs, or counts).
+    #[inline(never)]
+    pub(crate) fn screen_menu_broadcast_unobservable(
+        &mut self,
+        menu: &Value,
+    ) -> Result<bool, NativeError> {
+        let Some(host) = self.host.as_std_host() else {
+            return Ok(false);
+        };
+        let Some(key) = crate::expect_ref(menu) else {
+            return Ok(false);
+        };
+        if !host.client.screen_menu_graph.contains(key) {
+            return Ok(false);
+        }
+        let Some(crate::menu_models::Object::Menu(state)) = host.menu_states.get(key) else {
+            return Ok(false);
+        };
+        let data_slots: Vec<Value> = state
+            .live
+            .data_slots
+            .iter()
+            .map(|entry| entry.slot.clone())
+            .collect();
+        let Some(entries) = self.host.menu_broadcast_slots(menu) else {
+            return Ok(false);
+        };
+        let listeners = self.host.menu_listeners(menu);
+        let jar = |value: &Value, runtime: &Self| {
+            crate::jar_object::object_class(value)
+                .is_some_and(|class| runtime.class(class).is_some())
+        };
+        for entry in &entries {
+            if jar(&entry.slot, self) || jar(&entry.container, self) {
+                return Ok(false);
+            }
+        }
+        for slot in &data_slots {
+            if jar(slot, self) {
+                return Ok(false);
+            }
+            if let Some(slot_key) = crate::expect_ref(slot)
+                && let Some(host) = self.host.as_std_host()
+                && let Some(crate::menu_models::DataSlotKind::Container { .. }) =
+                    crate::menu_models::data_slot_kind(&host.menu_states, slot_key)
+            {
+                // `DataSlot.forContainer`: its `get` is the `ContainerData`'s, usually a jar's.
+                return Ok(false);
+            }
+        }
+        let carried = MethodRef {
+            owner: ABSTRACT_CONTAINER_MENU.into(),
+            name: "getCarried".into(),
+            descriptor: "()Lnet/minecraft/world/item/ItemStack;".into(),
+        };
+        if self
+            .jvm_selected_jar_body(&carried, 0xb6, Some(menu))?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        for listener in &listeners {
+            let vanilla = crate::jar_object::object_class(listener)
+                .and_then(|class| self.vanilla_superclass(class));
+            if vanilla.as_deref() != Some(ITEM_COMBINER_SCREEN) {
+                return Ok(false);
+            }
+            for (name, desc) in [
+                (
+                    "slotChanged",
+                    "(Lnet/minecraft/world/inventory/AbstractContainerMenu;ILnet/minecraft/world/item/ItemStack;)V",
+                ),
+                (
+                    "dataChanged",
+                    "(Lnet/minecraft/world/inventory/AbstractContainerMenu;II)V",
+                ),
+            ] {
+                let r = MethodRef {
+                    owner: "net/minecraft/world/inventory/ContainerListener".into(),
+                    name: name.into(),
+                    descriptor: desc.into(),
+                };
+                if self
+                    .jvm_selected_jar_body(&r, 0xb9, Some(listener))?
+                    .is_some()
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        for entry in &entries {
+            self.host
+                .menu_set_last_slot(menu, entry.index, crate::menu_models::LastSlot::Unknown);
+        }
+        Ok(true)
     }
 
     fn screen_int_field(
@@ -778,18 +932,43 @@ impl NativeJar {
             return Err(NativeError::Metadata("menu type is null".into()));
         }
         let inventory = host.client_inventory_value();
-        self.with_persistent_runtime(host, &[menu_type.clone(), inventory.clone()], |runtime| {
-            let r = MethodRef {
-                owner: MENU_TYPE.into(),
-                name: "create".into(),
-                descriptor: "(ILnet/minecraft/world/entity/player/Inventory;)Lnet/minecraft/world/inventory/AbstractContainerMenu;".into(),
-            };
-            runtime
-                .invoke_menu_model(&r, &menu_type, &[Value::Int(container_id), inventory])?
-                .ok_or_else(|| {
-                    NativeError::Metadata("MenuType was not constructed with a MenuSupplier".into())
+        let screen_scope = host.client_screen_scope();
+        let before: std::collections::BTreeSet<String> = host.menu_states.keys().cloned().collect();
+        let menu = self.with_persistent_runtime(
+            host,
+            &[menu_type.clone(), inventory.clone()],
+            |runtime| {
+                let r = MethodRef {
+                    owner: MENU_TYPE.into(),
+                    name: "create".into(),
+                    descriptor: "(ILnet/minecraft/world/entity/player/Inventory;)Lnet/minecraft/world/inventory/AbstractContainerMenu;".into(),
+                };
+                runtime
+                    .invoke_menu_model(&r, &menu_type, &[Value::Int(container_id), inventory])?
+                    .ok_or_else(|| {
+                        NativeError::Metadata(
+                            "MenuType was not constructed with a MenuSupplier".into(),
+                        )
+                    })
+            },
+        )?;
+        // In a screen frame, the new menu's slots and containers wait for contents the server
+        // would send (`ClientboundContainerSetContentPacket`); Decaf never gets them, so from
+        // here on a read of them counts (`screen_menu_unsynced_call`). The data slots are synced
+        // by the bridge (`sync_client_menu_data`).
+        if screen_scope {
+            host.client.screen_menu_graph = host
+                .menu_states
+                .iter()
+                .filter(|(key, object)| {
+                    !before.contains(*key)
+                        && !matches!(object, crate::menu_models::Object::DataSlot { .. })
                 })
-        })
+                .map(|(key, _)| key.clone())
+                .collect();
+            host.client.screen_menu_data.clear();
+        }
+        Ok(menu)
     }
 
     /// Construct a jar object (allocating a real `JarObject` handle) and invoke
@@ -1016,6 +1195,7 @@ impl NativeJar {
         partial_tick: Option<f32>,
     ) -> (Vec<DrawOp>, Result<(), NativeError>) {
         let before = host.client_draws().len();
+        host.client_screen_backdrop_reset();
         let result = self.draw_active_client_screen_inner(host, mouse, partial_tick);
         (host.client_draws()[before..].to_vec(), result)
     }
@@ -1071,6 +1251,163 @@ impl NativeJar {
             Ok(Value::Void)
         })?;
         Ok(())
+    }
+
+    /// Write the server's data-slot values Sunrise holds for the open menu (`MenuScreenFrame::data`)
+    /// into the active screen's client menu, as vanilla's `ClientPacketListener
+    /// .handleContainerSetData` does: virtual `menu.setData(id, value)` (26.3 offsets 0-17:
+    /// `dataSlots.get(id).set(value)`). The packet carries a `short` (`ByteBufCodecs.SHORT`), so
+    /// the client sees the value sign-extended from 16 bits. A value is written once per change,
+    /// as the server sends one (`synchronizeDataSlotToRemote` compares `remoteDataSlots`); values
+    /// Sunrise has not received yet stay as the menu built them, as on a vanilla client before
+    /// the packet. An index past the menu's data slots (vanilla's `dataSlots.get` throws in the
+    /// packet handler) counts `AbstractContainerMenu.setData`.
+    pub fn sync_client_menu_data(
+        &self,
+        host: &mut StdHost,
+        data: &[i32],
+    ) -> Result<(), NativeError> {
+        let Some((_, menu, _, _, _)) = host.client_active_screen() else {
+            return Ok(());
+        };
+        let Some(key) = crate::expect_ref(&menu) else {
+            return Ok(());
+        };
+        let slots = match host.menu_states.get(key) {
+            Some(crate::menu_models::Object::Menu(state)) => state.live.data_slots.len(),
+            _ => 0,
+        };
+        let set_data = MethodRef {
+            owner: ABSTRACT_CONTAINER_MENU.into(),
+            name: "setData".into(),
+            descriptor: "(II)V".into(),
+        };
+        if data.len() > slots {
+            let _ = host.unknown_host_call(&set_data);
+        }
+        let mut writes = Vec::new();
+        for (index, value) in data.iter().take(slots).enumerate() {
+            let value = i32::from(*value as i16);
+            if host.client.screen_menu_data.get(index).copied().flatten() != Some(value) {
+                writes.push((index, value));
+            }
+        }
+        if writes.is_empty() {
+            return Ok(());
+        }
+        self.with_persistent_runtime(host, std::slice::from_ref(&menu), |runtime| {
+            for (index, value) in &writes {
+                runtime.call_virtual(
+                    Site::Virtual,
+                    ABSTRACT_CONTAINER_MENU,
+                    "setData",
+                    "(II)V",
+                    &menu,
+                    &[Value::Int(*index as i32), Value::Int(*value)],
+                )?;
+            }
+            Ok(Value::Void)
+        })?;
+        let synced = &mut host.client.screen_menu_data;
+        for (index, value) in writes {
+            if synced.len() <= index {
+                synced.resize(index + 1, None);
+            }
+            synced[index] = Some(value);
+        }
+        Ok(())
+    }
+
+    /// Whether the active screen's `Screen.title` is the title it was opened with (the one
+    /// Sunrise draws as the label): `false` when its constructor handed `super` another one,
+    /// which vanilla's `extractLabels` would draw instead. `None` with no active screen.
+    pub fn active_client_screen_keeps_its_title(&self, host: &mut StdHost) -> Option<bool> {
+        let (_, _, title, _, screen) = host.client_active_screen()?;
+        let field = MethodRef {
+            owner: SCREEN.into(),
+            name: "title".into(),
+            descriptor: "Lnet/minecraft/network/chat/Component;".into(),
+        };
+        let own = crate::Host::menu_field(host, &screen, &field)?;
+        Some(own == title)
+    }
+
+    /// Each slot of the active screen's menu, in order, as Sunrise lays it out at open:
+    /// virtual `isActive()` and `getNoItemIcon()` (26.3 `Slot` bodies: `iconst_1; ireturn` and
+    /// `aconst_null; areturn`; `ItemCombinerMenu$2`/`$3` override neither), a jar override run.
+    /// Sunrise asks neither again, nor `isFake`, `isHighlightable` or `getMaxStackSize(ItemStack)`
+    /// (vanilla `false`, `true`, `min(getMaxStackSize(), stack.getMaxStackSize())`), so a jar
+    /// override of any of the five is counted. A run that counted keeps the vanilla answer.
+    pub fn client_screen_slot_presentation(
+        &self,
+        host: &mut StdHost,
+    ) -> Result<Vec<(bool, Option<String>)>, NativeError> {
+        let Some((_, menu, _, _, _)) = host.client_active_screen() else {
+            return Ok(Vec::new());
+        };
+        let Some(menu_key) = crate::expect_ref(&menu) else {
+            return Ok(Vec::new());
+        };
+        let slots = match host.menu_states.get(menu_key) {
+            Some(crate::menu_models::Object::Menu(state)) => {
+                match host.menu_states.get(&state.slots) {
+                    Some(crate::menu_models::Object::SlotList { slots }) => slots
+                        .iter()
+                        .map(|key| crate::menu_models::marker_of(key))
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        };
+        let mut out = Vec::with_capacity(slots.len());
+        let mut roots = slots.clone();
+        roots.push(menu);
+        self.with_persistent_runtime(host, &roots, |runtime| {
+            for slot in &slots {
+                let mut active = true;
+                let mut icon = None;
+                for (name, desc) in [
+                    ("isActive", "()Z"),
+                    ("getNoItemIcon", "()Lnet/minecraft/resources/Identifier;"),
+                    ("isFake", "()Z"),
+                    ("isHighlightable", "()Z"),
+                    ("getMaxStackSize", "(Lnet/minecraft/world/item/ItemStack;)I"),
+                ] {
+                    let r = MethodRef {
+                        owner: crate::menu_models::SLOT.into(),
+                        name: name.into(),
+                        descriptor: desc.into(),
+                    };
+                    let Some(owner) = runtime.jvm_selected_jar_body(&r, 0xb6, Some(slot))? else {
+                        continue;
+                    };
+                    let _ = runtime.host.unknown_operand_call(&MethodRef {
+                        owner: owner.clone(),
+                        ..r.clone()
+                    });
+                    if !matches!(name, "isActive" | "getNoItemIcon") {
+                        continue;
+                    }
+                    let before = runtime.host.counted_unknown_calls();
+                    let value = runtime.invoke(&owner, name, desc, Some(slot.clone()), &[])?;
+                    if runtime.host.counted_unknown_calls() != before {
+                        continue;
+                    }
+                    match (name, value) {
+                        ("isActive", Value::Int(flag)) => active = flag != 0,
+                        ("getNoItemIcon", Value::Ref(None)) => icon = None,
+                        ("getNoItemIcon", id) => {
+                            icon = crate::host_ids::identifier_key(&id).map(str::to_owned)
+                        }
+                        _ => {}
+                    }
+                }
+                out.push((active, icon));
+            }
+            Ok(Value::Void)
+        })?;
+        Ok(out)
     }
 
     /// Close the active client screen as `Gui.setScreen(null)` does (offset 77, virtual

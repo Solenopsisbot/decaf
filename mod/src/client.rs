@@ -27,6 +27,9 @@ pub(crate) struct State {
     screen: Option<menu_screen::Opening>,
     /// The last opening's serial: a reused window id is still a new opening.
     screen_serial: u64,
+    /// The layout the open screen's Java side had when Sunrise took it (`MenuScreenLayout` is
+    /// fixed at open): a later `init` that moves a label is counted.
+    screen_layout: Option<runtime::screen_models::ScreenLayout>,
     #[cfg(test)]
     fixture_files: Option<Vec<(String, Vec<u8>)>>,
 }

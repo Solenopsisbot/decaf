@@ -2487,6 +2487,9 @@ pub trait Host {
 
     fn set_menu_screen_initialized(&mut self, _screen: &Value, _initialized: bool) {}
 
+    /// `Screen.extractBackground`'s own body ran (the backdrop), for the screen bridge.
+    fn note_screen_backdrop(&mut self) {}
+
     fn menu_screen_is_container(&self, _screen: &Value) -> bool {
         false
     }
@@ -4666,6 +4669,8 @@ impl StdHost {
             !receiver.starts_with("game/") && !receiver.starts_with("client/")
         });
         self.initialized_game_mixins.clear();
+        // A client screen belongs to the world it opened in: never carry it into the next.
+        let _ = self.take_client_active_screen();
     }
 
     /// Make an unmodeled host call fail instead of returning its neutral Java
@@ -8439,6 +8444,10 @@ impl Host for StdHost {
 
     fn menu_screen_initialized(&self, screen: &Value) -> Option<bool> {
         menu_models::screen_initialized(&self.menu_states, screen)
+    }
+
+    fn note_screen_backdrop(&mut self) {
+        self.client.screen_backdrop = true;
     }
 
     fn set_menu_screen_initialized(&mut self, screen: &Value, initialized: bool) {
@@ -35955,6 +35964,10 @@ impl<H: Host> Runtime<'_, H> {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        // A screen frame's client menu holds no synced contents (`screen_models.rs`).
+        if let Some(counted) = self.screen_menu_unsynced_call(r, receiver)? {
+            return Ok(Some(counted));
+        }
         let effective_owner = if op == 0xb7 {
             if r.name == "<init>" {
                 if self.class(&r.owner).is_some() {
@@ -36430,6 +36443,10 @@ impl<H: Host> Runtime<'_, H> {
     /// - Counts `broadcastChanges` if `getItem` hits an unknown host call or if
     ///   `ItemStack.matches` cannot be determined from tracked stack contents.
     fn invoke_menu_broadcast_changes(&mut self, menu: &Value) -> Result<(), NativeError> {
+        // A screen frame's client menu, where nothing can observe the stacks (`screen_models.rs`).
+        if self.screen_menu_broadcast_unobservable(menu)? {
+            return Ok(());
+        }
         let broadcast_ref = MethodRef {
             owner: menu_models::ABSTRACT_CONTAINER_MENU.into(),
             name: "broadcastChanges".into(),
