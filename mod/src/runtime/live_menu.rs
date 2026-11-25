@@ -837,12 +837,15 @@ fn body_applies(host: &StdHost, body: Body, receiver: &Value) -> bool {
         | AcmIncrementStateId
         | AcmSetRemoteSlot
         | AcmSetItem
-        | AcmSetData
-        | AcmAddDataSlot
-        | AcmAddDataSlots
         | AcmFindSlot
         | AcmAddSlotListener => {
             matches!(state, Some(menu_models::Object::Menu(menu)) if !menu_has_client_slots(host, menu))
+        }
+        // The data slots are the menu's own bookkeeping, the same on either side: a client
+        // screen's menu (`client/inventory` slots) keeps them too, so the screen bridge can write
+        // the server's values (`setData`) and a jar's `DataSlot.get` reads them.
+        AcmSetData | AcmAddDataSlot | AcmAddDataSlots => {
+            matches!(state, Some(menu_models::Object::Menu(_)))
         }
         IcmQuickMoveStack
         | IcmCanMoveIntoInputSlots

@@ -348,6 +348,8 @@ mod game_hooks;
 mod live_menu;
 #[cfg(test)]
 mod live_menu_tests;
+#[cfg(test)]
+mod menu_screen_tests;
 mod runtime;
 mod server_facts;
 mod sound;
@@ -372,7 +374,8 @@ const LOG: &str = "Horizon Java";
 #[derive(Default)]
 pub struct HorizonJava {
     state: Arc<Mutex<State>>,
-    client: Mutex<client::State>,
+    /// Shared with the menu screen factories (`client/menu_screen.rs`), which the window calls.
+    client: Arc<Mutex<client::State>>,
     /// Serializes state access with top-level Java dispatches while allowing same-thread access
     /// through the thread-local frame owned by `game_dispatch`.
     pub(crate) dispatch_gate: Arc<Mutex<()>>,
@@ -684,7 +687,7 @@ impl Hooks for HorizonJava {
         let mut state = self.lock();
         content::register_placement_parts(&mut state, context, registrar, Arc::clone(&self.state));
         drop(state);
-        content::register_block_parts(&self.state, registrar, context);
+        content::register_block_parts(&self.state, registrar, context, &self.client);
         self.refresh_game_hook_plan_bits();
     }
 

@@ -82,6 +82,9 @@ pub enum LastSlot {
     /// The `ItemStack.copy()` of a server stack `broadcastChanges` stored (`live_menu.rs`),
     /// whose contents the live-stack model knows.
     Stack(Value),
+    /// A copy `broadcastChanges` stored on a screen frame's client menu, whose contents Decaf
+    /// does not have (`screen_models.rs`): a later comparison with it is counted.
+    Unknown,
 }
 
 #[derive(Clone, Debug)]

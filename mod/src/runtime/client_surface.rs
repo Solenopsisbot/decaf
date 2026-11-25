@@ -746,6 +746,14 @@ pub struct ClientSnapshot {
     pub options: crate::runtime::client_frame::ClientOptions,
     /// The crosshair target (`Minecraft.hitResult`) filled by the game.
     pub hit_result: Option<crate::runtime::client_frame::ClientHitResult>,
+    /// A container screen's frame (`AbstractContainerScreen` on a Sunrise mod menu screen,
+    /// `screen_models.rs`). The embedder fills only `gui_size` and the presence of `player`
+    /// and `level`; every other field keeps its default and is no fact. So, in this scope, an
+    /// allow-list answers: the `GuiGraphicsExtractor` and its pose (minus anything measured with
+    /// the font, whose metrics are not filled), and the `Minecraft` fields that are bare handles.
+    /// Every other client-object member, the player's inventory and fields, `Minecraft.screen`
+    /// and the options are refused and counted (`StdHost::screen_scope_call`).
+    pub screen_scope: bool,
 }
 
 /// One registered mapping's input state, in [`StdHost::client_key_mappings`]
@@ -906,6 +914,12 @@ pub(crate) struct ClientState {
     /// `draw_client_screen_bg`, and closed via virtual `removed()` before opening
     /// a different screen so slot listeners never leak).
     active_screen: Option<ActiveScreen>,
+    /// The data values the bridge last wrote into the active client menu (`setData`), by
+    /// data-slot index.
+    pub(crate) screen_menu_data: Vec<Option<i32>>,
+    /// `Screen.extractBackground` (the in-game backdrop Sunrise draws itself) ran in this
+    /// frame's `extractBackground` chain.
+    pub(crate) screen_backdrop: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1307,6 +1321,38 @@ impl StdHost {
         client_registrations::summary(&self.client.registrations)
     }
 
+    /// Whether a `MenuScreens.register` this host's jar made covers `menu_type`
+    /// (`MenuScreens.getConstructor` is not null).
+    pub fn client_menu_screen_registered(&self, menu_type: &Value) -> bool {
+        self.client_menu_constructor(menu_type).is_some()
+    }
+
+    /// The current frame is a container screen's ([`ClientSnapshot::screen_scope`]).
+    pub(crate) fn client_screen_scope(&self) -> bool {
+        self.client
+            .frame
+            .as_ref()
+            .is_some_and(|frame| frame.screen_scope)
+    }
+
+    /// Whether `Screen.extractBackground`'s own body (the backdrop Sunrise draws itself) ran
+    /// since the last [`StdHost::client_screen_backdrop_reset`].
+    pub fn client_screen_backdrop_ran(&self) -> bool {
+        self.client.screen_backdrop
+    }
+
+    pub(crate) fn client_screen_backdrop_reset(&mut self) {
+        self.client.screen_backdrop = false;
+    }
+
+    /// The GUI size the active screen was laid out for (its last `init` or `resize`).
+    pub fn client_active_gui_size(&self) -> Option<[i32; 2]> {
+        self.client
+            .active_screen
+            .as_ref()
+            .map(|active| active.gui_size)
+    }
+
     pub(crate) fn client_menu_constructor(&self, menu: &Value) -> Option<Value> {
         client_registrations::menu_constructor(&self.client.registrations, menu)
     }
@@ -1334,7 +1380,12 @@ impl StdHost {
     }
 
     pub(crate) fn client_inventory_stack(&self, container_slot: i32) -> Option<ClientStack> {
-        let player = self.client.frame.as_ref()?.player.as_ref()?;
+        let frame = self.client.frame.as_ref()?;
+        // A container screen's frame fills no inventory: the read is no fact (counted).
+        if frame.screen_scope {
+            return None;
+        }
+        let player = frame.player.as_ref()?;
         match container_slot {
             0..=35 => Some(
                 player
@@ -1368,6 +1419,29 @@ impl StdHost {
             && active.title == *title
             && active.gui_size == gui_size)
             .then(|| active.screen.clone())
+    }
+
+    /// The active screen: its menu type, menu, title, the GUI size it was laid out for, and
+    /// the screen.
+    pub(crate) fn client_active_screen(&self) -> Option<(Value, Value, Value, [i32; 2], Value)> {
+        let active = self.client.active_screen.as_ref()?;
+        Some((
+            active.menu_type.clone(),
+            active.menu.clone(),
+            active.title.clone(),
+            active.gui_size,
+            active.screen.clone(),
+        ))
+    }
+
+    /// Forget the active screen (`Gui.setScreen(null)` switching it out), returning it.
+    pub(crate) fn take_client_active_screen(&mut self) -> Option<Value> {
+        self.client.active_screen.take().map(|active| active.screen)
+    }
+
+    /// Forget the data values written into the active client menu (its screen is gone).
+    pub(crate) fn clear_client_screen_menus(&mut self) {
+        self.client.screen_menu_data.clear();
     }
 
     pub(crate) fn client_active_screen_value(&self) -> Option<Value> {
@@ -1606,8 +1680,11 @@ impl StdHost {
                 "level" => frame
                     .and_then(|f| f.level.as_ref())
                     .map_or(Value::Ref(None), |_| marker(LEVEL)),
-                // No screen: null. An open one has no stand-in, and refuses.
-                "screen" if frame.is_some_and(|f| f.screen_open) => return refuse(),
+                // No screen: null. An open one has no stand-in, and refuses. In a container
+                // screen's own frame the screen is open: refuse.
+                "screen" if frame.is_some_and(|f| f.screen_open || f.screen_scope) => {
+                    return refuse();
+                }
                 "screen" => Value::Ref(None),
                 "options" => marker(OPTIONS),
                 "gui" => marker(GUI),
@@ -1629,6 +1706,7 @@ impl StdHost {
                     return Some(Ok(marker(format!("{VANILLA_KEY}{mapping}"))));
                 }
                 match (name, frame) {
+                    ("hideGui", Some(frame)) if frame.screen_scope => refuse(),
                     ("hideGui", Some(frame)) => Some(Ok(flag(frame.hide_gui))),
                     ("keyDebugModifier", _) => {
                         Some(Ok(marker(format!("{VANILLA_KEY}key.debug.modifier"))))
@@ -1696,6 +1774,10 @@ impl StdHost {
                 | "net/minecraft/client/player/AbstractClientPlayer",
                 name,
             ) if frame.is_some() => {
+                // A container screen's frame fills no player facts.
+                if frame.is_some_and(|frame| frame.screen_scope) {
+                    return refuse();
+                }
                 match frame.and_then(|frame| Self::client_player_field(frame, name)) {
                     Some(value) => Some(Ok(value)),
                     None => refuse(),
@@ -1827,6 +1909,9 @@ impl StdHost {
         }
         if !self.client_environment() {
             return None;
+        }
+        if let Some(answer) = self.screen_scope_call(r, receiver, args) {
+            return Some(answer);
         }
         if let Some(value) =
             client_registrations::instance(&mut self.client.registrations, r, receiver, args)
@@ -2064,6 +2149,65 @@ impl StdHost {
         Some(match answer {
             Some(value) => Ok(value),
             None => Err(self.refuse_client_call(r)),
+        })
+    }
+
+    /// In a container screen's frame ([`ClientSnapshot::screen_scope`]), the one choke point
+    /// for a client object's members: the `GuiGraphicsExtractor` (minus font measurement) and its
+    /// pose answer; every other client handle's member is refused and counted, because the frame
+    /// fills none of the facts it would answer from (key states, the player, options, level,
+    /// sounds, stacks). `None` outside that scope, or for a receiver that is not a client
+    /// handle (jar objects, components, identifiers keep the host's own answers).
+    fn screen_scope_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Option<Result<Value, NativeError>> {
+        let frame = self.client.frame.clone()?;
+        if !frame.screen_scope {
+            return None;
+        }
+        let key = crate::runtime::game_object::text(receiver)?.clone();
+        // A registered `KeyMapping` (a jar object) answers from the frame's key presses, which
+        // this frame does not fill.
+        let key_mapping = self.client.key_inits.contains_key(&key)
+            && crate::runtime::jar_object::object_class(receiver) == Some(KEY_MAPPING);
+        let client_handle = matches!(receiver, Value::Host(_))
+            && (key.starts_with("client/")
+                || key.starts_with(CATEGORY)
+                || input_key_parts(&key).is_some());
+        if !client_handle && !key_mapping {
+            return None;
+        }
+        Some(match key.as_str() {
+            GRAPHICS => match self.graphics_call(&frame, r, args) {
+                Some(answer) => answer,
+                None => Err(self.refuse_client_call(r)),
+            },
+            POSE => match self.pose_call(r, args) {
+                Some(value) => Ok(value),
+                None => Err(self.refuse_client_call(r)),
+            },
+            // `Entity.level()`: the player's level is the client's one level, a handle (the
+            // frame says it is present); anything asked of it is refused here in turn.
+            PLAYER
+                if r.name == "level"
+                    && r.descriptor == "()Lnet/minecraft/world/level/Level;"
+                    && frame.level.is_some() =>
+            {
+                Ok(marker(LEVEL))
+            }
+            // 26.3 `Inventory.getName` (offsets 0-3) is `DEFAULT_NAME`, and
+            // `Nameable.getDisplayName` (offsets 0-6) `getName()`: a constant, no frame fact
+            // (`AbstractContainerScreen.<init>` reads it for `playerInventoryTitle`).
+            items::INVENTORY
+                if matches!(r.name.as_str(), "getDisplayName" | "getName")
+                    && r.descriptor == "()Lnet/minecraft/network/chat/Component;" =>
+            {
+                Ok(crate::runtime::host_component::inventory_default_name())
+            }
+            _ => Err(self.refuse_client_call(r)),
         })
     }
 
@@ -2633,7 +2777,12 @@ impl StdHost {
                 let (y0, y1) = (v[1].min(v[2]), v[1].max(v[2]));
                 self.client.fill([v[0], y0 + 1, v[0] + 1, y1], v[3] as u32)
             }
-            // A fill through an explicit pipeline (`RenderPipelines.GUI`).
+            // A fill through an explicit pipeline (`RenderPipelines.GUI`). This descriptor is
+            // the pre-26.3 `com.mojang.blaze3d.pipeline` one; 26.3's `RenderPipeline` is
+            // `com.mojang.renderpearl.api.pipeline.RenderPipeline`, so a 26.3 jar's call never
+            // matches and stays counted (the arm's `_ => None`). Moving it to the 26.3 package
+            // needs the pipeline argument checked (only `GUI` fills like this) and a fixture;
+            // until then it stays counted rather than half-ported.
             ("fill", "(Lcom/mojang/blaze3d/pipeline/RenderPipeline;IIIII)V") => {
                 let v = ints(1, 5)?;
                 self.client.fill([v[0], v[1], v[2], v[3]], v[4] as u32)
@@ -2677,7 +2826,11 @@ impl StdHost {
                     .client_item_draw(frame, slot, [v[0], v[1]], false, Some(count.flatten()))
                     .map(|()| Ok(Value::Void));
             }
-            // `blitSprite(pipeline, sprite, x, y, w, h[, colour | alpha])`.
+            // `blitSprite(pipeline, sprite, x, y, w, h[, colour | alpha])`. Pre-26.3 package, as
+            // the pipeline `fill` above: a 26.3 call (`com.mojang.renderpearl.api.pipeline`)
+            // stays counted. A port also needs the 10-int partial overload (a sub-region of the
+            // sprite) and a nine-slice sprite under a scaled pose, which `DrawOp::Sprite`
+            // (a stretched rect) does not express exactly.
             ("blitSprite", descriptor)
                 if descriptor.starts_with(
                     "(Lcom/mojang/blaze3d/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIII",
@@ -2746,6 +2899,10 @@ impl StdHost {
                     Err(None) => return None,
                 };
                 let v = ints(2, 3)?;
+                // A container screen's frame has no font metrics: the width is no fact.
+                if frame.screen_scope {
+                    return None;
+                }
                 // `x - font.width(text) / 2`, Java's integer division.
                 let width = frame.metrics.width(&frame.metrics.resolve(&text));
                 self.client.text(text, v[0] - width / 2, v[1], v[2] as u32, true)
@@ -3727,6 +3884,163 @@ mod tests {
             host.client_call(&rotate, &marker(POSE), &[Value::Float(1.0)]),
             Some(Err(NativeError::UnknownHostCall(_)))
         ));
+    }
+
+    /// A container screen's frame (`screen_scope`) fills only the GUI size and the presence of
+    /// the player and level: the graphics surface, its pose, `Entity.level()` and the inventory's
+    /// constant name answer; the player's facts, its inventory, `Minecraft.screen`, the options
+    /// and font measurement are refused and counted, even when the snapshot happens to hold
+    /// values for them.
+    #[test]
+    fn a_screen_frame_answers_only_its_allow_list() {
+        let mut host = StdHost::new();
+        host.begin_client_frame(
+            Arc::new(ClientSnapshot {
+                player: Some(ClientPlayer {
+                    health: 20.0,
+                    xp_level: 7,
+                    inventory: vec![ClientStack::empty(); 36],
+                    ..ClientPlayer::default()
+                }),
+                level: Some(ClientLevel::default()),
+                gui_size: [320, 240],
+                screen_scope: true,
+                ..ClientSnapshot::default()
+            }),
+            &[],
+        );
+        let graphics = "net/minecraft/client/gui/GuiGraphicsExtractor";
+        assert!(matches!(
+            host.client_call(&method(graphics, "guiWidth", "()I"), &marker(GRAPHICS), &[]),
+            Some(Ok(Value::Int(320)))
+        ));
+        let translate = method(
+            "org/joml/Matrix3x2fStack",
+            "translate",
+            "(FF)Lorg/joml/Matrix3x2f;",
+        );
+        assert!(matches!(
+            host.client_call(
+                &translate,
+                &marker(POSE),
+                &[Value::Float(2.0), Value::Float(3.0)]
+            ),
+            Some(Ok(_))
+        ));
+        let fill = method(graphics, "fill", "(IIIII)V");
+        let corners = [1, 2, 5, 6, 0xFF00_00FFu32 as i32].map(Value::Int);
+        assert!(matches!(
+            host.client_call(&fill, &marker(GRAPHICS), &corners),
+            Some(Ok(Value::Void))
+        ));
+        assert_eq!(
+            host.client_draws(),
+            &[DrawOp::Fill {
+                rect: [3.0, 5.0, 4.0, 4.0],
+                argb: 0xFF00_00FF,
+            }]
+        );
+        let level = method(
+            "net/minecraft/world/entity/Entity",
+            "level",
+            "()Lnet/minecraft/world/level/Level;",
+        );
+        assert!(matches!(
+            host.client_call(&level, &marker(PLAYER), &[]),
+            Some(Ok(value)) if value == marker(LEVEL)
+        ));
+        let name = method(
+            "net/minecraft/world/entity/player/Inventory",
+            "getDisplayName",
+            "()Lnet/minecraft/network/chat/Component;",
+        );
+        assert!(matches!(
+            host.client_call(&name, &marker(items::INVENTORY), &[]),
+            Some(Ok(value)) if value == crate::runtime::host_component::inventory_default_name()
+        ));
+        let before = host.unknown_host_call_count();
+        let refused = [
+            (
+                method(
+                    "net/minecraft/world/entity/LivingEntity",
+                    "getHealth",
+                    "()F",
+                ),
+                PLAYER,
+            ),
+            (
+                method("net/minecraft/world/level/Level", "isClientSide", "()Z"),
+                LEVEL,
+            ),
+            (
+                method(
+                    "net/minecraft/world/entity/player/Inventory",
+                    "getItem",
+                    "(I)Lnet/minecraft/world/item/ItemStack;",
+                ),
+                items::INVENTORY,
+            ),
+            (
+                method(
+                    "net/minecraft/client/DeltaTracker",
+                    "getGameTimeDeltaPartialTick",
+                    "(Z)F",
+                ),
+                DELTA,
+            ),
+        ];
+        for (r, receiver) in &refused {
+            // `getItem(0)` and `getGameTimeDeltaPartialTick(false)` take one int argument.
+            let args = if r.descriptor.starts_with("(I)") || r.descriptor.starts_with("(Z)") {
+                vec![Value::Int(0)]
+            } else {
+                Vec::new()
+            };
+            assert!(
+                matches!(
+                    host.client_call(r, &marker(*receiver), &args),
+                    Some(Err(NativeError::UnknownHostCall(_)))
+                ),
+                "{r:?}"
+            );
+        }
+        assert_eq!(host.unknown_host_call_count(), before + refused.len());
+        let centered = method(
+            graphics,
+            "centeredText",
+            "(Lnet/minecraft/client/gui/Font;Ljava/lang/String;III)V",
+        );
+        let centered_args = [
+            marker(FONT),
+            Value::Ref(Some("Title".into())),
+            Value::Int(10),
+            Value::Int(10),
+            Value::Int(-1),
+        ];
+        assert!(matches!(
+            host.client_call(&centered, &marker(GRAPHICS), &centered_args),
+            Some(Err(NativeError::UnknownHostCall(_)))
+        ));
+        assert!(host.client_inventory_stack(0).is_none());
+        for (field, descriptor) in [
+            ("screen", "Lnet/minecraft/client/gui/screens/Screen;"),
+            ("player", "Lnet/minecraft/client/player/LocalPlayer;"),
+        ] {
+            let r = method(MINECRAFT_CLASS, field, descriptor);
+            let answer = host.client_static(&r);
+            match field {
+                "screen" => assert!(matches!(answer, Some(Err(_)))),
+                _ => assert!(matches!(answer, Some(Ok(value)) if value == marker(PLAYER))),
+            }
+        }
+        let xp = method(
+            "net/minecraft/world/entity/player/Player",
+            "experienceLevel",
+            "I",
+        );
+        assert!(matches!(host.client_static(&xp), Some(Err(_))));
+        let hide = method(OPTIONS_CLASS, "hideGui", "Z");
+        assert!(matches!(host.client_static(&hide), Some(Err(_))));
     }
 
     #[test]
