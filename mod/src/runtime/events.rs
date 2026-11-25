@@ -1575,8 +1575,9 @@ pub struct EventFiring {
     /// The first non-`PASS` `InteractionResult` a Fabric listener returned
     /// (`SUCCESS`, `FAIL`...).
     pub interaction: Option<String>,
-    /// Level/entity sounds recorded during this firing, in call order.
-    pub sounds: Vec<crate::runtime::level_sound::LevelSoundEffect>,
+    /// Level/entity sounds recorded during this firing, and server seed draws
+    /// deferred to the live host that played nothing, in call order.
+    pub sounds: Vec<crate::runtime::level_sound::SoundRecord>,
     /// The event objects this firing handed its NeoForge/Forge listeners, one
     /// per event class: every listener of one firing gets the same object.
     objects: Vec<(String, Value)>,

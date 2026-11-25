@@ -500,8 +500,9 @@ fn apply_effect(host: &mut dyn ServerHost, effect: GameHookEffect) {
                 let _ = target.tell(host, mod_api::Text::literal(text));
             }
         }
-        // `deliverable_effects` never lets a level sound through; it is counted there.
-        GameHookEffect::PlaySound(_) => {}
+        // `deliverable_effects` never lets a level sound (or a logged seed draw) through; a
+        // sound is counted there.
+        GameHookEffect::PlaySound(_) | GameHookEffect::SoundSeedDrawn { .. } => {}
     }
 }
 impl From<NativeError> for DispatchError {
