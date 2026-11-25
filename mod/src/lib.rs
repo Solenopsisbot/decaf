@@ -2789,9 +2789,63 @@ fn run_java_command(
         host,
         &loaded.row.id,
         &command.usage,
+        system_message_route(source, invocation),
         run.outcome.clone(),
         &run.messages,
+        |reason| {
+            // A reply with no exact route is counted on the jar, never sent somewhere else.
+            loaded.host.note_unknown_game_hook(reason);
+            loaded.row.command_unknown_host_calls += 1;
+        },
     )
+}
+
+/// Where vanilla's `CommandSourceStack.sendSystemMessage(text)` puts a line for this source,
+/// as far as the executor can tell. Vanilla (26.3 bytecode): nothing when the stack is
+/// `silent`; else `getPlayer()` (the player it executes as, after `execute as`) gets
+/// `ServerPlayer.sendSystemMessage`; else the origin's `CommandSource.sendSystemMessage`. It
+/// never reads `sendCommandFeedback`, so `Commands::feedback` (which does) is not a route.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SystemRoute {
+    /// The stack is `silent`, so vanilla sends nothing.
+    Silent,
+    /// `ServerPlayer.sendSystemMessage` on this player: `PlayerRef::tell`.
+    Player(PlayerRef),
+    /// No exact route: each such line is counted, with this reason.
+    Unknown(&'static str),
+}
+
+/// [`SystemRoute`] for a command's origin and invocation.
+///
+/// * A function's commands run on a suppressed stack: `/function` and `execute ... run function`
+///   use `FunctionCommand.modifySenderForExecution` (`withSuppressedOutput`), tick and load
+///   functions `ServerFunctionManager.getGameLoopSender` (same), and advancement rewards
+///   suppress theirs. So a `Function` origin is silent and the line goes nowhere, uncounted.
+/// * A command block or minecart never suppresses its stack (`BaseCommandBlock.performCommand`;
+///   one that doesn't track output gets `CommandSource.NULL`, still not silent). With a player
+///   to execute as, the line is that player's `sendSystemMessage`: exact. Without one it is the
+///   block's own `sendSystemMessage`, which sets its `lastOutput` to `[HH:mm:ss] text` when it
+///   tracks output; no API writes that, so it is counted.
+/// * A `Player` or `Console` origin can be silent where the executor can't see it: another
+///   mod's `EntityRef::run_command(.., suppress_output = true)` reaches a command as `Player`
+///   (a player) or `Console` (another entity), and `Commands::run_command` runs as a console
+///   with no output. Neither the source nor the invocation says so, so these are counted rather
+///   than sent to a player or the log that vanilla might not send to.
+fn system_message_route(source: &CommandSource, invocation: &CommandInvocation) -> SystemRoute {
+    match source {
+        CommandSource::Function { .. } => SystemRoute::Silent,
+        CommandSource::CommandBlock { .. } | CommandSource::CommandBlockMinecart { .. } => {
+            match invocation.player() {
+                Some(player) => SystemRoute::Player(player),
+                None => SystemRoute::Unknown(
+                    "command sendSystemMessage: a command block's lastOutput has no API",
+                ),
+            }
+        }
+        _ => SystemRoute::Unknown(
+            "command sendSystemMessage: whether the source is silent is not visible to the executor",
+        ),
+    }
 }
 
 /// A command the bridge could not map or run: logged, and the failure text the executor
@@ -2803,9 +2857,11 @@ fn refuse(usage: &str, reason: String) -> Box<Text> {
     )))
 }
 
-/// Puts a finished Java command's replies where a mod command's feedback goes: the originating
-/// source for `sendSuccess`/`sendFailure`/`sendSystemMessage`, a named player for a direct
-/// `ServerPlayer.sendSystemMessage`. Answers the command's result for the executor:
+/// Puts a finished Java command's replies where vanilla puts them: the originating source for
+/// `sendSuccess`/`sendFailure`, `system` (see [`system_message_route`]) for
+/// `source.sendSystemMessage`, a named player for a direct `ServerPlayer.sendSystemMessage`.
+/// A reply with no exact route goes to `on_unbridged` (counted) and is not sent. Answers the
+/// command's result for the executor:
 ///
 /// * `Command.run` returned: that `int`, as vanilla's executor result;
 /// * a `CommandSyntaxException`: a failure with its message, which the game sends as vanilla's
@@ -2817,28 +2873,41 @@ fn deliver(
     host: &mut dyn ServerHost,
     id: &str,
     usage: &str,
+    system: SystemRoute,
     outcome: CommandOutcome,
     messages: &[CommandMessage],
+    mut on_unbridged: impl FnMut(&str),
 ) -> Result<i32, Box<Text>> {
     for message in messages {
         let text = mod_text(&message.text);
-        if let MessageKind::Player(uuid) = message.kind
-            && let Some(player) = host.player(uuid)
-        {
-            let _ = player.tell(host, text);
-            continue;
+        // Each reply goes through the call that is vanilla's own method: `sendSuccess(text,
+        // broadcastToAdmins)` is `feedback` with the same flag (its `broadcast_to_admins` since
+        // 3d34bbe63d: `true` also tells operators and the log), `sendFailure` is `failure`
+        // (red, shown regardless of `sendCommandFeedback`), and a `sendSystemMessage` is a
+        // player's `tell` where vanilla's goes to a player.
+        match message.kind {
+            MessageKind::Success { broadcast } => {
+                let _ = host.commands().feedback(text, broadcast);
+            }
+            MessageKind::Failure => {
+                let _ = host.commands().failure(text);
+            }
+            MessageKind::System => match system {
+                SystemRoute::Silent => {}
+                SystemRoute::Player(player) => {
+                    let _ = player.tell(host, text);
+                }
+                SystemRoute::Unknown(reason) => on_unbridged(reason),
+            },
+            MessageKind::Player(uuid) => match host.player(uuid) {
+                Some(player) => {
+                    let _ = player.tell(host, text);
+                }
+                // Java holds that `ServerPlayer`; this host can't name it, and the source is
+                // not where Java sent the line.
+                None => on_unbridged("ServerPlayer.sendSystemMessage: the player is not on"),
+            },
         }
-        // Each reply goes through the service call that is vanilla's own method on the source:
-        // `sendSuccess(text, broadcastToAdmins)` is `feedback` with the same flag (its
-        // `broadcast_to_admins` since 3d34bbe63d: `true` also tells operators and the log), and
-        // `sendFailure` is `failure` (red, shown regardless of `sendCommandFeedback`).
-        // `source.sendSystemMessage` has no service call of its own, so it keeps the success
-        // channel it always had (identical unless `sendCommandFeedback` is off).
-        let _ = match message.kind {
-            MessageKind::Success { broadcast } => host.commands().feedback(text, broadcast),
-            MessageKind::Failure => host.commands().failure(text),
-            MessageKind::System | MessageKind::Player(_) => host.commands().feedback(text, false),
-        };
     }
     match outcome {
         CommandOutcome::Returned(result) => {
@@ -5499,16 +5568,41 @@ mod tests {
         assert_eq!(state.jars[0].host.placement_array_count(), 0);
     }
 
-    /// A server host whose only service is a `Commands` that records each line it is handed.
-    #[derive(Default)]
+    /// A server host whose `Commands` records each line it is handed, whose players' `tell` is
+    /// recorded, and which knows one online player.
     struct CommandLinesHost {
         lines: CommandLines,
         none: NoServices,
+        told: Vec<(u128, Text)>,
+        online: PlayerRef,
     }
 
-    /// `(channel, text, broadcast_to_admins)` per call; `failure` has no broadcast flag.
-    #[derive(Default)]
-    struct CommandLines(Vec<(&'static str, Text, bool)>);
+    /// The one player `CommandLinesHost` knows.
+    fn online_player() -> PlayerRef {
+        mod_api::__private::game::player_ref(EntityRef::new(WorldEpoch::new(1), 7), 0x2a)
+    }
+
+    impl CommandLinesHost {
+        fn new(send_command_feedback: bool) -> Self {
+            Self {
+                lines: CommandLines {
+                    send_command_feedback,
+                    sent: Vec::new(),
+                },
+                none: NoServices,
+                told: Vec::new(),
+                online: online_player(),
+            }
+        }
+    }
+
+    /// `(channel, text, broadcast_to_admins)` per line that reached a player source; `failure`
+    /// has no broadcast flag. With `send_command_feedback` off a success line reaches no one,
+    /// as the game's `feedback` does for a player source.
+    struct CommandLines {
+        send_command_feedback: bool,
+        sent: Vec<(&'static str, Text, bool)>,
+    }
 
     impl mod_api::Commands for CommandLines {
         fn feedback(
@@ -5516,12 +5610,14 @@ mod tests {
             line: Text,
             broadcast_to_admins: bool,
         ) -> Result<(), mod_api::TextFormError> {
-            self.0.push(("feedback", line, broadcast_to_admins));
+            if self.send_command_feedback {
+                self.sent.push(("feedback", line, broadcast_to_admins));
+            }
             Ok(())
         }
 
         fn failure(&mut self, line: Text) -> Result<(), mod_api::TextFormError> {
-            self.0.push(("failure", line, false));
+            self.sent.push(("failure", line, false));
             Ok(())
         }
     }
@@ -5540,8 +5636,18 @@ mod tests {
             None
         }
     }
-    mod_api::impl_host_areas!(CommandLinesHost);
-    impl mod_api::ServerHost for CommandLinesHost {}
+    impl mod_api::prelude::PlayersHost for CommandLinesHost {
+        fn player(&self, uuid: u128) -> Option<PlayerRef> {
+            (uuid == self.online.uuid()).then_some(self.online)
+        }
+    }
+    mod_api::impl_host_areas!(CommandLinesHost, except(players));
+    impl mod_api::ServerHost for CommandLinesHost {
+        fn backend_mut(&mut self) -> Option<mod_api::BackendMutRef<'_>> {
+            use mod_api::__private::game::BackendMutRefOf;
+            Some(mod_api::BackendMutRef::of(self))
+        }
+    }
     impl mod_api::prelude::ServicesServerHost for CommandLinesHost {
         fn commands(&mut self) -> &mut dyn mod_api::Commands {
             &mut self.lines
@@ -5563,43 +5669,164 @@ mod tests {
         }
     }
     mod_api::impl_server_host_areas!(CommandLinesHost, except(services));
+    impl mod_api::prelude::PlayerMessagesBackendMut for CommandLinesHost {
+        fn player_tell(
+            &mut self,
+            player: PlayerRef,
+            line: Text,
+        ) -> Result<bool, mod_api::TextFormError> {
+            self.told.push((player.uuid(), line));
+            Ok(true)
+        }
+    }
+    mod_api::impl_backend_mut_areas!(CommandLinesHost, except(player_messages));
+    impl mod_api::BackendMut for CommandLinesHost {}
 
-    /// Each Java reply reaches the source through vanilla's own method's service call:
-    /// `sendSuccess(text, broadcastToAdmins)` keeps its flag (`Commands::feedback` v2), and
-    /// `sendFailure` is the source's red failure line (`Commands::failure`), not a success line.
-    #[test]
-    fn command_replies_keep_the_broadcast_flag_and_failures_go_out_as_failures() {
-        let line = |kind, text: &str| CommandMessage {
+    fn command_line(kind: MessageKind, text: &str) -> CommandMessage {
+        CommandMessage {
             kind,
             text: CommandText {
                 text: text.to_owned(),
                 translate: false,
                 component: None,
             },
-        };
-        let messages = [
-            line(MessageKind::Success { broadcast: false }, "listed"),
-            line(MessageKind::Success { broadcast: true }, "changed"),
-            line(MessageKind::Failure, "refused"),
-            line(MessageKind::System, "system"),
-        ];
-        let mut host = CommandLinesHost::default();
+        }
+    }
+
+    /// Runs `deliver` for `messages` on a host with `sendCommandFeedback` as given, returning
+    /// the host and the reasons it counted.
+    fn deliver_lines(
+        send_command_feedback: bool,
+        system: SystemRoute,
+        messages: &[CommandMessage],
+    ) -> (CommandLinesHost, Vec<String>) {
+        let mut host = CommandLinesHost::new(send_command_feedback);
+        let mut counted = Vec::new();
         let result = deliver(
             &mut host,
             "demo",
             "demo",
+            system,
             CommandOutcome::Returned(0),
-            &messages,
+            messages,
+            |reason| counted.push(reason.to_owned()),
         );
         assert_eq!(result, Ok(0));
+        (host, counted)
+    }
+
+    /// Each Java reply reaches the source through vanilla's own method's service call:
+    /// `sendSuccess(text, broadcastToAdmins)` keeps its flag (`Commands::feedback`'s
+    /// `broadcast_to_admins`), and `sendFailure` is the source's red failure line
+    /// (`Commands::failure`), not a success line.
+    #[test]
+    fn command_replies_keep_the_broadcast_flag_and_failures_go_out_as_failures() {
+        let messages = [
+            command_line(MessageKind::Success { broadcast: false }, "listed"),
+            command_line(MessageKind::Success { broadcast: true }, "changed"),
+            command_line(MessageKind::Failure, "refused"),
+        ];
+        let (host, counted) = deliver_lines(true, SystemRoute::Silent, &messages);
         assert_eq!(
-            host.lines.0,
+            host.lines.sent,
             vec![
                 ("feedback", Text::literal("listed"), false),
                 ("feedback", Text::literal("changed"), true),
                 ("failure", Text::literal("refused"), false),
-                ("feedback", Text::literal("system"), false),
             ]
         );
+        assert!(counted.is_empty());
+    }
+
+    /// `source.sendSystemMessage` never reads `sendCommandFeedback` (26.3: `silent`, then
+    /// `getPlayer()`, then the origin), so it never goes through `Commands::feedback`, and with
+    /// the gamerule off it is neither lost nor sent there: it reaches the executing player,
+    /// goes nowhere for a silent function, or is counted.
+    #[test]
+    fn a_system_message_ignores_send_command_feedback_and_is_counted_where_its_route_is_unknown() {
+        let system = || [command_line(MessageKind::System, "info")];
+        let player = online_player();
+        let invocation = || {
+            CommandInvocation::new(
+                vec!["demo".to_owned()],
+                Vec::new(),
+                DimensionKey::OVERWORLD,
+                [0.0; 3],
+                [0.0; 2],
+            )
+        };
+        let as_player = || invocation().with_player(player);
+        let block = CommandSource::CommandBlock {
+            position: [1, 2, 3],
+            level: DimensionKey::OVERWORLD,
+            permission: PermissionLevel::Gamemasters,
+        };
+        let cart = CommandSource::CommandBlockMinecart {
+            entity: EntityRef::new(WorldEpoch::new(1), 9),
+            permission: PermissionLevel::Gamemasters,
+        };
+        let function = CommandSource::Function {
+            id: Identifier::parse("demo:probe").unwrap(),
+            permission: PermissionLevel::Gamemasters,
+        };
+        let player_source = CommandSource::Player {
+            player,
+            permission: PermissionLevel::All,
+        };
+        let console = CommandSource::Console {
+            permission: PermissionLevel::Owners,
+        };
+
+        for send_command_feedback in [false, true] {
+            // A command block or minecart running `execute as <player>`: that player's system
+            // line, exactly.
+            for source in [&block, &cart] {
+                let (host, counted) = deliver_lines(
+                    send_command_feedback,
+                    system_message_route(source, &as_player()),
+                    &system(),
+                );
+                assert_eq!(host.told, vec![(0x2a, Text::literal("info"))]);
+                assert!(host.lines.sent.is_empty() && counted.is_empty());
+            }
+
+            // A function's stack is silent: nothing, and nothing counted.
+            let (host, counted) = deliver_lines(
+                send_command_feedback,
+                system_message_route(&function, &as_player()),
+                &system(),
+            );
+            assert!(host.told.is_empty() && host.lines.sent.is_empty() && counted.is_empty());
+
+            // A player's or the console's command may be another mod's suppressed run, and a
+            // command block with no player writes its own `lastOutput`: counted, sent nowhere.
+            for route in [
+                system_message_route(&player_source, &invocation()),
+                system_message_route(&player_source, &as_player()),
+                system_message_route(&console, &invocation()),
+                system_message_route(&console, &as_player()),
+                system_message_route(&block, &invocation()),
+                system_message_route(&cart, &invocation()),
+            ] {
+                assert!(matches!(route, SystemRoute::Unknown(_)), "{route:?}");
+                let (host, counted) = deliver_lines(send_command_feedback, route, &system());
+                assert!(host.told.is_empty() && host.lines.sent.is_empty());
+                assert_eq!(counted.len(), 1, "{counted:?}");
+            }
+
+            // A direct `ServerPlayer.sendSystemMessage` goes to that player whatever the
+            // gamerule; one this host can't name is counted, not sent to the source.
+            let (host, counted) = deliver_lines(
+                send_command_feedback,
+                SystemRoute::Silent,
+                &[
+                    command_line(MessageKind::Player(0x2a), "direct"),
+                    command_line(MessageKind::Player(0x99), "gone"),
+                ],
+            );
+            assert_eq!(host.told, vec![(0x2a, Text::literal("direct"))]);
+            assert!(host.lines.sent.is_empty());
+            assert_eq!(counted.len(), 1);
+        }
     }
 }
