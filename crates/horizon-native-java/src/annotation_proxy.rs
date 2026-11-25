@@ -30,6 +30,31 @@ struct Member {
     name: String,
     descriptor: String,
     value: AnnotationValue,
+    /// Whether the annotation type declares an `AnnotationDefault` for the
+    /// element, whatever value this annotation holds.
+    has_default: bool,
+}
+
+/// `java.util.HashMap`'s table size after `count` puts into a map made by
+/// `new HashMap<>(0)`: one slot, doubled each time the size passes
+/// three quarters of the table. The JDK keeps an annotation type's defaults in
+/// such a map, and its bucket order is the order a default is printed in.
+fn default_table_size(count: usize) -> usize {
+    let (mut table, mut threshold) = (1usize, 0usize);
+    for size in 1..=count {
+        if size > threshold {
+            table *= 2;
+            threshold = table * 3 / 4;
+        }
+    }
+    table
+}
+
+/// Whether a string constant may hold an unpaired surrogate the class reader
+/// replaced with U+FFFD (#447): it then cannot be told from a real U+FFFD, and
+/// a hash or an equal answer would be a guess.
+fn may_have_lost_surrogate(value: &str) -> bool {
+    value.contains('\u{fffd}')
 }
 
 impl<H: Host> Runtime<'_, H> {
@@ -41,17 +66,23 @@ impl<H: Host> Runtime<'_, H> {
         let file = self.class(class)?;
         file.methods
             .iter()
-            .filter(|method| method.descriptor.starts_with("()") && method.name != "<init>")
+            .filter(|method| {
+                // The elements are the annotation interface's abstract
+                // methods; a constant's `<clinit>` is not one.
+                method.descriptor.starts_with("()")
+                    && method.access & 0x0400 != 0
+                    && method.name != "<init>"
+                    && method.name != "<clinit>"
+            })
             .map(|method| {
-                let value = annotation
-                    .values
-                    .get(&method.name)
-                    .cloned()
-                    .or_else(|| file.annotation_default(&method.name))?;
+                let default = file.annotation_default(&method.name);
+                let has_default = default.is_some();
+                let value = annotation.values.get(&method.name).cloned().or(default)?;
                 Some(Member {
                     name: method.name.clone(),
                     descriptor: method.descriptor[2..].to_owned(),
                     value,
+                    has_default,
                 })
             })
             .collect()
@@ -80,12 +111,26 @@ impl<H: Host> Runtime<'_, H> {
             }
             (AnnotationValue::Int(value), "B" | "C" | "S" | "I") => *value,
             (AnnotationValue::Long(value), "J") => (*value ^ (*value >> 32)) as i32,
-            (AnnotationValue::Float(value), "F") => (f32::to_bits(*value as f32)) as i32,
+            // `Float.hashCode` and `Double.hashCode` take the canonical NaN.
+            (AnnotationValue::Float(value), "F") => {
+                if value.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    f32::to_bits(*value as f32) as i32
+                }
+            }
             (AnnotationValue::Float(value), "D") => {
-                let bits = value.to_bits();
+                let bits = if value.is_nan() {
+                    0x7ff8_0000_0000_0000
+                } else {
+                    value.to_bits()
+                };
                 (bits ^ (bits >> 32)) as i32
             }
             (AnnotationValue::String(value), "Ljava/lang/String;") => {
+                if may_have_lost_surrogate(value) {
+                    return None;
+                }
                 crate::hash_map_order::java_string_hash(value)
             }
             (AnnotationValue::Annotation(annotation), descriptor)
@@ -112,43 +157,50 @@ impl<H: Host> Runtime<'_, H> {
         Some(hash)
     }
 
-    fn quote_annotation_string(value: &str) -> String {
+    /// One UTF-16 unit of a `String` or `char` element, as the JDK escapes it:
+    /// the named escapes, then `\uXXXX` for everything outside printable ASCII
+    /// (so a supplementary character is its two surrogates).
+    fn push_annotation_unit(out: &mut String, unit: u16, quote: char) {
+        match unit {
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            0x5c => out.push_str("\\\\"),
+            unit if unit == quote as u16 => {
+                out.push('\\');
+                out.push(quote);
+            }
+            0x20..=0x7e => out.push(unit as u8 as char),
+            unit => out.push_str(&format!("\\u{unit:04x}")),
+        }
+    }
+
+    fn quote_annotation_string(value: &str) -> Option<String> {
+        if may_have_lost_surrogate(value) {
+            return None;
+        }
         let mut out = String::with_capacity(value.len() + 2);
         out.push('"');
-        for ch in value.chars() {
-            match ch {
-                '\\' => out.push_str("\\\\"),
-                '"' => out.push_str("\\\""),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                '\u{0008}' => out.push_str("\\b"),
-                '\u{000c}' => out.push_str("\\f"),
-                c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
+        for unit in value.encode_utf16() {
+            Self::push_annotation_unit(&mut out, unit, '"');
         }
         out.push('"');
-        out
+        Some(out)
     }
 
     fn quote_annotation_char(value: i32) -> String {
-        let ch = char::from_u32(value as u32).unwrap_or('\u{fffd}');
-        let escaped = match ch {
-            '\\' => "\\\\".to_owned(),
-            '\'' => "\\'".to_owned(),
-            '\n' => "\\n".to_owned(),
-            '\r' => "\\r".to_owned(),
-            '\t' => "\\t".to_owned(),
-            '\u{0008}' => "\\b".to_owned(),
-            '\u{000c}' => "\\f".to_owned(),
-            c if c.is_control() => format!("\\u{:04x}", c as u32),
-            c => c.to_string(),
-        };
-        format!("'{escaped}'")
+        let mut out = String::from("'");
+        Self::push_annotation_unit(&mut out, value as u16, '\'');
+        out.push('\'');
+        out
     }
 
-    fn annotation_class_text(value: &str) -> String {
+    /// A `Class` element: its canonical name and `.class`. A class the runtime
+    /// cannot name canonically (a nested class it holds no `InnerClasses` for,
+    /// a local or anonymous one) is `None`, counted.
+    fn annotation_class_text(&self, value: &str) -> Option<String> {
         let name = match value {
             "V" => "void".to_owned(),
             "Z" => "boolean".to_owned(),
@@ -159,12 +211,13 @@ impl<H: Host> Runtime<'_, H> {
             "J" => "long".to_owned(),
             "F" => "float".to_owned(),
             "D" => "double".to_owned(),
-            name if name.starts_with('L') && name.ends_with(';') => {
-                name[1..name.len() - 1].replace('/', ".")
+            array if array.starts_with('[') => self.canonical_class_name(array)??,
+            name => {
+                let internal = name.strip_prefix('L')?.strip_suffix(';')?;
+                self.canonical_class_name(internal)??
             }
-            name => name.replace('/', "."),
         };
-        format!("{name}.class")
+        Some(format!("{name}.class"))
     }
 
     fn annotation_value_text(&self, value: &AnnotationValue, descriptor: &str) -> Option<String> {
@@ -180,10 +233,10 @@ impl<H: Host> Runtime<'_, H> {
         }
         Some(match (value, descriptor) {
             (AnnotationValue::String(value), "Ljava/lang/String;") => {
-                Self::quote_annotation_string(value)
+                Self::quote_annotation_string(value)?
             }
             (AnnotationValue::String(value), "Ljava/lang/Class;") => {
-                Self::annotation_class_text(value)
+                self.annotation_class_text(value)?
             }
             (AnnotationValue::String(value), descriptor) if descriptor.starts_with('L') => {
                 value.rsplit_once(";.").map(|(_, name)| name.to_owned())?
@@ -224,22 +277,71 @@ impl<H: Host> Runtime<'_, H> {
         })
     }
 
+    /// The elements in the order the JDK's `AnnotationInvocationHandler` holds
+    /// them, which is the order `toString` prints them in: it starts from a
+    /// copy of the type's defaults, a `HashMap<String, Object>` iterated in
+    /// bucket order, and an explicit value replaces its default in place, so
+    /// the elements the type gives no default follow in the class file's order.
+    ///
+    /// Two defaulted elements in one bucket sit in the order the JVM listed the
+    /// type's methods, which it does not define: `None`, counted.
+    fn annotation_print_order<'a>(
+        annotation: &Annotation,
+        members: &'a [Member],
+    ) -> Option<Vec<&'a Member>> {
+        let defaulted: Vec<&Member> = members.iter().filter(|m| m.has_default).collect();
+        let mask = (default_table_size(defaulted.len()) - 1) as u32;
+        let mut bucketed: Vec<(u32, &Member)> = defaulted
+            .into_iter()
+            .map(|member| {
+                let hash = crate::hash_map_order::java_string_hash(&member.name) as u32;
+                ((hash ^ (hash >> 16)) & mask, member)
+            })
+            .collect();
+        bucketed.sort_by_key(|(bucket, _)| *bucket);
+        if bucketed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return None;
+        }
+        let mut ordered: Vec<&Member> = bucketed.into_iter().map(|(_, member)| member).collect();
+        // Class-file order, then (a hand-built annotation keeps none) by name.
+        let listed = annotation.order.iter().map(String::as_str);
+        let unlisted = annotation
+            .values
+            .keys()
+            .map(String::as_str)
+            .filter(|name| !annotation.order.iter().any(|listed| listed == name));
+        for name in listed.chain(unlisted) {
+            if let Some(member) = members
+                .iter()
+                .find(|member| member.name == name && !member.has_default)
+            {
+                ordered.push(member);
+            }
+        }
+        (ordered.len() == members.len()).then_some(ordered)
+    }
+
+    /// `AnnotationInvocationHandler.toStringImpl`: `@` and the type's canonical
+    /// name, then the elements in [`Self::annotation_print_order`] as
+    /// `name=value`, except a lone element named `value`, which prints bare.
     fn annotation_text(&self, annotation: &Annotation) -> Option<String> {
-        let name = annotation
+        let internal = annotation
             .descriptor
             .strip_prefix('L')
-            .and_then(|name| name.strip_suffix(';'))?
-            .rsplit(['/', '$'])
-            .next()?;
+            .and_then(|name| name.strip_suffix(';'))?;
+        let name = self.canonical_class_name(internal)??;
         let members = self.annotation_members(annotation)?;
-        let values = members
+        let ordered = Self::annotation_print_order(annotation, &members)?;
+        let lone_value = ordered.len() == 1 && ordered[0].name == "value";
+        let values = ordered
             .iter()
             .map(|member| {
-                Some(format!(
-                    "{}={}",
-                    member.name,
-                    self.annotation_value_text(&member.value, &member.descriptor)?
-                ))
+                let text = self.annotation_value_text(&member.value, &member.descriptor)?;
+                Some(if lone_value {
+                    text
+                } else {
+                    format!("{}={text}", member.name)
+                })
             })
             .collect::<Option<Vec<_>>>()?;
         Some(format!("@{name}({})", values.join(", ")))
@@ -271,12 +373,32 @@ impl<H: Host> Runtime<'_, H> {
             {
                 self.annotation_equal(left, right)
             }
+            (
+                AnnotationValue::String(left),
+                AnnotationValue::String(right),
+                "Ljava/lang/String;",
+            ) => {
+                // Unequal text stays unequal after the lossy read, equal text
+                // may not have been.
+                if left != right {
+                    Some(false)
+                } else if may_have_lost_surrogate(left) {
+                    None
+                } else {
+                    Some(true)
+                }
+            }
             // Class and enum members use VM identity, never their class-file
             // spelling. Without both canonical handles this proxy call counts.
             (AnnotationValue::String(_), AnnotationValue::String(_), descriptor)
                 if descriptor.starts_with('L') =>
             {
                 None
+            }
+            // `Float.equals` and `Double.equals` compare the canonical bits: a
+            // NaN equals itself and `0.0` differs from `-0.0`.
+            (AnnotationValue::Float(left), AnnotationValue::Float(right), "F" | "D") => {
+                Some((left.is_nan() && right.is_nan()) || left.to_bits() == right.to_bits())
             }
             (left, right, _) => Some(left == right),
         }

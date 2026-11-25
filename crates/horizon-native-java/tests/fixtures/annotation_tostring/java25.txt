@@ -1,0 +1,501 @@
+h_bool_f=15967
+h_bool_t=15941
+h_byte_ff=-14987
+h_byte_max=15093
+h_byte_min=-15094
+h_byte_neg=-14987
+h_byte_one=14987
+h_byte_sixteen=15002
+h_byte_zero=14986
+h_char_a=15083
+h_char_apos=15021
+h_char_bs=15062
+h_char_bsp=14978
+h_char_c1=14987
+h_char_c80=14858
+h_char_cr=14983
+h_char_del=15093
+h_char_dq=15016
+h_char_e=14947
+h_char_euro=6694
+h_char_ff=14982
+h_char_fffd=50551
+h_char_ffff=50549
+h_char_lone=57994
+h_char_lone2=58741
+h_char_nl=14976
+h_char_nul=14986
+h_char_sep=6818
+h_char_sp=15018
+h_char_tab=14979
+h_char_zero=15034
+h_const=14984
+h_const2=14985
+h_deep=1335633783
+h_dflt12=1476263257
+h_dflt12_over=1476263139
+h_dflt13=-1596191299
+h_dflt13_over=-1596191176
+h_dflt16=1526062348
+h_dflt16_over=1526062274
+h_dflt2=783638261
+h_dflt24=1977386347
+h_dflt24_over=1977386325
+h_dflt25=394409096
+h_dflt25_over=394409121
+h_dflt2_over=783638257
+h_dflt3=324979339
+h_dflt3_over=324979402
+h_dflt4=1015596604
+h_dflt4_over=1015596538
+h_dflt5=-909513363
+h_dflt5_over=-909513370
+h_dflt6=79820132
+h_dflt6_over=79820260
+h_dflt7=-795574111
+h_dflt7_over=-795574298
+h_dflt8=1701657957
+h_dflt8_over=1701657955
+h_double_big=-115844085
+h_double_e10=1644337877
+h_double_em10=-468911122
+h_double_h=1079589514
+h_double_inf=2146450058
+h_double_m=1097017434
+h_double_m2=-1587337147
+h_double_m3=-308154053
+h_double_m4=-737783995
+h_double_max=-2146420086
+h_double_min=14987
+h_double_minn=1063562
+h_double_nan=2146974346
+h_double_neg=-1075823990
+h_double_ninf=-1033590
+h_double_nzero=-2147468662
+h_double_one=1072708234
+h_double_p01=-1507837303
+h_double_p2=-309202629
+h_double_pi=340604521
+h_double_third=1786788490
+h_double_zero=14986
+h_float_big=1266694794
+h_float_e10=1343567987
+h_float_em10=786160757
+h_float_h=1120418442
+h_float_inf=2139110026
+h_float_m=1259908106
+h_float_m2=1259908341
+h_float_m3=981674213
+h_float_m4=953257373
+h_float_max=2139080053
+h_float_min=14987
+h_float_minn=8403594
+h_float_nan=2143304330
+h_float_neg=-1090504054
+h_float_ninf=-8373622
+h_float_nzero=-2147468662
+h_float_one=1065368202
+h_float_p01=1036842567
+h_float_pi=1078539601
+h_float_third=1051365409
+h_float_zero=14986
+h_int_big=123467679
+h_int_max=2147468661
+h_int_min=-2147468662
+h_int_neg=-14987
+h_int_zero=14986
+h_long_big=1912291166
+h_long_max=-2147468662
+h_long_min=-2147468662
+h_long_neg=14986
+h_long_zero=14986
+h_many0=-797522932
+h_many1=-797522955
+h_many2=-797522957
+h_many3=-797522924
+h_mix0=433608472
+h_mix1=433608480
+h_mix2=433540862
+h_nest_empty=1335631237
+h_nest_esc=1335717156
+h_nest_p=1335631339
+h_noel=0
+h_onev_def=14189
+h_onev_set=100072
+h_rep=-1139228017
+h_rep0=1335633678
+h_rep1=34
+h_repeat=-1139228017
+h_repeat_one=1335633672
+h_req2=28091
+h_req2r=28091
+h_req3=37413
+h_req3m=37413
+h_req3r=37413
+h_sbool_empty=14987
+h_sbool_one=15972
+h_sbool_two=42797
+h_sbyte_empty=14987
+h_sbyte_ex=10280
+h_sbyte_one=15018
+h_sbyte_two=14677
+h_schar_empty=14987
+h_schar_one=14858
+h_schar_q=12822
+h_schar_two=13568
+h_sdouble_empty=14987
+h_sdouble_inf=2113943883
+h_sdouble_one=1073232533
+h_sdouble_two=1056979275
+h_sfloat_empty=14987
+h_sfloat_inf=1879062859
+h_sfloat_one=1069562517
+h_sfloat_two=939538763
+h_short_max=17781
+h_short_min=-17782
+h_short_neg=-14987
+h_short_one=14987
+h_short_zero=14986
+h_sint_bare=15017
+h_sint_empty=14987
+h_sint_neg=-2147464684
+h_sint_one=15018
+h_sint_two=14696
+h_slong_empty=14987
+h_slong_one=15018
+h_slong_two=14699
+h_snest_empty=14987
+h_snest_one=1335631111
+h_snest_two=-209401078
+h_sshort_empty=14987
+h_sshort_one=15018
+h_sshort_two=14677
+h_sstr_bare=3526260
+h_sstr_empty=14987
+h_sstr_esc=3436165
+h_sstr_one=14858
+h_sstr_three=134619
+h_sstr_two=13672
+h_str_ctl=-649824766
+h_str_ctl2=1974634
+h_str_empty=14986
+h_str_fffd=2119340
+h_str_lone=1814025
+h_str_lone2=1787530
+h_str_pstring=-1081299290
+h_str_quote=-1025471595
+h_str_sep=-741821613
+h_str_slash=91093553
+h_str_supp=54961663
+h_str_tilde=1103986891
+h_str_uni=1543114979
+h_top=13969
+h_top2=-13970
+h_twov=1335647758
+h_twov2=1335647755
+h_twovd=1335648308
+h_twovd2=1335648316
+h_twovd3=1335647755
+h_val_arr0=1335633678
+h_val_arr1=1335633807
+h_val_arr2=1335634157
+h_val_def=1335634337
+h_val_def2=1336417243
+h_val_defarr=1335633678
+h_val_defarr2=1335637709
+h_val_int=1335633672
+h_val_nest=122
+h_val_str=-267341021
+h_val_strkw=-267341021
+h_wrap0=-1049808369
+h_wrap1=-1829601040
+t_all=@demo.PAnno("m") ; @demo.Probe.MAnno2(a="k", b=2) ; @demo.Probe.AInt(v=5) ; 
+t_bool_f=@demo.Probe.ABool(v=false)
+t_bool_t=@demo.Probe.ABool(v=true)
+t_byte_ff=@demo.Probe.AByte(v=(byte)0xff)
+t_byte_max=@demo.Probe.AByte(v=(byte)0x7f)
+t_byte_min=@demo.Probe.AByte(v=(byte)0x80)
+t_byte_neg=@demo.Probe.AByte(v=(byte)0xff)
+t_byte_one=@demo.Probe.AByte(v=(byte)0x01)
+t_byte_sixteen=@demo.Probe.AByte(v=(byte)0x10)
+t_byte_zero=@demo.Probe.AByte(v=(byte)0x00)
+t_char_a=@demo.Probe.AChar(v='a')
+t_char_apos=@demo.Probe.AChar(v='\'')
+t_char_bs=@demo.Probe.AChar(v='\\')
+t_char_bsp=@demo.Probe.AChar(v='\b')
+t_char_c1=@demo.Probe.AChar(v='\u0001')
+t_char_c80=@demo.Probe.AChar(v='\u0080')
+t_char_cr=@demo.Probe.AChar(v='\r')
+t_char_del=@demo.Probe.AChar(v='\u007f')
+t_char_dq=@demo.Probe.AChar(v='"')
+t_char_e=@demo.Probe.AChar(v='\u00e9')
+t_char_euro=@demo.Probe.AChar(v='\u20ac')
+t_char_ff=@demo.Probe.AChar(v='\f')
+t_char_fffd=@demo.Probe.AChar(v='\ufffd')
+t_char_ffff=@demo.Probe.AChar(v='\uffff')
+t_char_lone=@demo.Probe.AChar(v='\ud800')
+t_char_lone2=@demo.Probe.AChar(v='\udfff')
+t_char_nl=@demo.Probe.AChar(v='\n')
+t_char_nul=@demo.Probe.AChar(v='\u0000')
+t_char_sep=@demo.Probe.AChar(v='\u2028')
+t_char_sp=@demo.Probe.AChar(v=' ')
+t_char_tab=@demo.Probe.AChar(v='\t')
+t_char_zero=@demo.Probe.AChar(v='0')
+t_class_anno=@demo.Probe.AClass(v=demo.PAnno.class)
+t_class_arr=@demo.Probe.AClass(v=int[].class)
+t_class_arr2=@demo.Probe.AClass(v=java.lang.String[][].class)
+t_class_boolean=@demo.Probe.AClass(v=boolean.class)
+t_class_bytearr=@demo.Probe.AClass(v=byte[].class)
+t_class_deep=@demo.Probe.AClass(v=demo.Probe.Inner.Deep.class)
+t_class_entry=@demo.Probe.AClass(v=java.util.Map.Entry.class)
+t_class_enum=@demo.Probe.AClass(v=demo.Probe.E.class)
+t_class_innerarr=@demo.Probe.AClass(v=demo.Probe.Inner[].class)
+t_class_int=@demo.Probe.AClass(v=int.class)
+t_class_nested=@demo.Probe.AClass(v=demo.Probe.Inner.class)
+t_class_object=@demo.Probe.AClass(v=java.lang.Object.class)
+t_class_string=@demo.Probe.AClass(v=java.lang.String.class)
+t_class_top=@demo.Probe.AClass(v=demo.PAnno.class)
+t_class_void=@demo.Probe.AClass(v=void.class)
+t_concat=x@demo.Probe.MAnno2(a="hi", b=3)y
+t_const=@demo.Probe.Const(v=2)
+t_const2=@demo.Probe.Const(v=3)
+t_ctor=@demo.Probe.AStr(v="ctor")
+t_declared=3:@demo.PAnno("m"):@demo.Probe.MAnno2(a="k", b=2):@demo.Probe.AInt(v=5)
+t_deep=@demo.Probe.Inner.Deep("x")
+t_dflt12=@demo.Probe.Def12(nine=11, iota=5, six=10, left=0, four=2, psi=4, delta=6, pi=9, kappa=3, indigo=8, two=7, omega=1)
+t_dflt12_over=@demo.Probe.Def12(nine=99, iota=5, six=10, left=98, four=2, psi=4, delta=6, pi=9, kappa=3, indigo=8, two=7, omega=1)
+t_dflt13=@demo.Probe.Def13(nine=8, six=9, chi=2, psi=11, violet=7, seven=4, omega=10, phi=0, xi=1, blue=6, left=5, kappa=12, five=3)
+t_dflt13_over=@demo.Probe.Def13(nine=8, six=9, chi=2, psi=11, violet=7, seven=4, omega=10, phi=98, xi=1, blue=6, left=5, kappa=99, five=3)
+t_dflt16=@demo.Probe.Def16(zeta=0, iota=14, six=3, chi=2, upsilon=12, yellow=1, tau=10, omega=8, eight=15, red=5, xi=6, lambda=7, eta=9, blue=11, west=4, ten=13)
+t_dflt16_over=@demo.Probe.Def16(zeta=98, iota=14, six=3, chi=2, upsilon=12, yellow=1, tau=10, omega=8, eight=99, red=5, xi=6, lambda=7, eta=9, blue=11, west=4, ten=13)
+t_dflt2=@demo.Probe.Def2(blue=0, five=1)
+t_dflt24=@demo.Probe.Def24(sigma=12, nine=11, six=3, chi=21, nu=20, yellow=16, seven=6, right=10, down=18, omega=2, eight=7, red=17, xi=15, east=0, blue=8, left=1, four=19, alpha=9, rho=22, pi=5, up=13, ten=23, five=14, beta=4)
+t_dflt24_over=@demo.Probe.Def24(sigma=12, nine=11, six=3, chi=21, nu=20, yellow=16, seven=6, right=10, down=18, omega=2, eight=7, red=17, xi=15, east=98, blue=8, left=1, four=19, alpha=9, rho=22, pi=5, up=13, ten=99, five=14, beta=4)
+t_dflt25=@demo.Probe.Def25(south=6, nu=18, delta=20, seven=10, three=8, eight=2, lambda=4, omicron=14, four=23, alpha=13, kappa=5, up=0, sigma=15, iota=7, green=12, chi=1, one=24, mu=21, tau=16, right=11, blue=17, rho=22, pi=9, indigo=19, gamma=3)
+t_dflt25_over=@demo.Probe.Def25(south=6, nu=18, delta=20, seven=10, three=8, eight=2, lambda=4, omicron=14, four=23, alpha=13, kappa=5, up=98, sigma=15, iota=7, green=12, chi=1, one=99, mu=21, tau=16, right=11, blue=17, rho=22, pi=9, indigo=19, gamma=3)
+t_dflt2_over=@demo.Probe.Def2(blue=98, five=99)
+t_dflt3=@demo.Probe.Def3(blue=1, two=2, indigo=0)
+t_dflt3_over=@demo.Probe.Def3(blue=1, two=99, indigo=98)
+t_dflt4=@demo.Probe.Def4(mu=2, seven=0, two=3, nu=1)
+t_dflt4_over=@demo.Probe.Def4(mu=2, seven=98, two=99, nu=1)
+t_dflt5=@demo.Probe.Def5(zeta=3, kappa=2, blue=0, four=4, upsilon=1)
+t_dflt5_over=@demo.Probe.Def5(zeta=3, kappa=2, blue=98, four=99, upsilon=1)
+t_dflt6=@demo.Probe.Def6(phi=4, pi=0, indigo=3, blue=5, beta=2, eight=1)
+t_dflt6_over=@demo.Probe.Def6(phi=4, pi=98, indigo=3, blue=99, beta=2, eight=1)
+t_dflt7=@demo.Probe.Def7(epsilon=5, iota=6, one=1, mu=4, tau=2, three=3, eight=0)
+t_dflt7_over=@demo.Probe.Def7(epsilon=5, iota=99, one=1, mu=4, tau=2, three=3, eight=98)
+t_dflt8=@demo.Probe.Def8(sigma=1, east=4, six=6, left=5, psi=7, right=3, gamma=0, eight=2)
+t_dflt8_over=@demo.Probe.Def8(sigma=1, east=4, six=6, left=5, psi=99, right=3, gamma=98, eight=2)
+t_double_big=@demo.Probe.ADouble(v=1.2345678901234568E17)
+t_double_e10=@demo.Probe.ADouble(v=1.0E10)
+t_double_em10=@demo.Probe.ADouble(v=1.0E-10)
+t_double_h=@demo.Probe.ADouble(v=100.0)
+t_double_inf=@demo.Probe.ADouble(v=1.0/0.0)
+t_double_m=@demo.Probe.ADouble(v=1.0E7)
+t_double_m2=@demo.Probe.ADouble(v=9999999.0)
+t_double_m3=@demo.Probe.ADouble(v=0.001)
+t_double_m4=@demo.Probe.ADouble(v=1.0E-4)
+t_double_max=@demo.Probe.ADouble(v=1.7976931348623157E308)
+t_double_min=@demo.Probe.ADouble(v=4.9E-324)
+t_double_minn=@demo.Probe.ADouble(v=2.2250738585072014E-308)
+t_double_nan=@demo.Probe.ADouble(v=0.0/0.0)
+t_double_neg=@demo.Probe.ADouble(v=-0.5)
+t_double_ninf=@demo.Probe.ADouble(v=-1.0/0.0)
+t_double_nzero=@demo.Probe.ADouble(v=-0.0)
+t_double_one=@demo.Probe.ADouble(v=1.0)
+t_double_p01=@demo.Probe.ADouble(v=0.1)
+t_double_p2=@demo.Probe.ADouble(v=0.002)
+t_double_pi=@demo.Probe.ADouble(v=3.141592653589793)
+t_double_third=@demo.Probe.ADouble(v=0.3333333333333333)
+t_double_zero=@demo.Probe.ADouble(v=0.0)
+t_dual0=@demo.Probe.Dual(a={1, 2}, s="s", k=java.lang.Object.class, e=B)
+t_dual1=@demo.Probe.Dual(a={1, 2}, s="z", k=java.lang.Object.class, e=B)
+t_dual2=@demo.Probe.Dual(a={3}, s="s", k=java.lang.Object.class, e=A)
+t_enum_a=@demo.Probe.AEnum(v=A)
+t_enum_b=@demo.Probe.AEnum(v=B)
+t_enum_body=@demo.Probe.AEnum(v=C)
+t_enum_jdk=@demo.Probe.AEnumJ(v=SECONDS)
+t_enumtop=@demo.Probe.ATopEnum(v=X)
+t_field=@demo.Probe.AStr(v="field")
+t_float_big=@demo.Probe.AFloat(v=1.6777216E7f)
+t_float_e10=@demo.Probe.AFloat(v=1.0E10f)
+t_float_em10=@demo.Probe.AFloat(v=1.0E-10f)
+t_float_h=@demo.Probe.AFloat(v=100.0f)
+t_float_inf=@demo.Probe.AFloat(v=1.0f/0.0f)
+t_float_m=@demo.Probe.AFloat(v=1.0E7f)
+t_float_m2=@demo.Probe.AFloat(v=9999999.0f)
+t_float_m3=@demo.Probe.AFloat(v=0.001f)
+t_float_m4=@demo.Probe.AFloat(v=1.0E-4f)
+t_float_max=@demo.Probe.AFloat(v=3.4028235E38f)
+t_float_min=@demo.Probe.AFloat(v=1.4E-45f)
+t_float_minn=@demo.Probe.AFloat(v=1.1754944E-38f)
+t_float_nan=@demo.Probe.AFloat(v=0.0f/0.0f)
+t_float_neg=@demo.Probe.AFloat(v=-0.5f)
+t_float_ninf=@demo.Probe.AFloat(v=-1.0f/0.0f)
+t_float_nzero=@demo.Probe.AFloat(v=-0.0f)
+t_float_one=@demo.Probe.AFloat(v=1.0f)
+t_float_p01=@demo.Probe.AFloat(v=0.1f)
+t_float_pi=@demo.Probe.AFloat(v=3.1415927f)
+t_float_third=@demo.Probe.AFloat(v=0.33333334f)
+t_float_zero=@demo.Probe.AFloat(v=0.0f)
+t_int_big=@demo.Probe.AInt(v=123456789)
+t_int_max=@demo.Probe.AInt(v=2147483647)
+t_int_min=@demo.Probe.AInt(v=-2147483648)
+t_int_neg=@demo.Probe.AInt(v=-1)
+t_int_zero=@demo.Probe.AInt(v=0)
+t_jdk_deprecated=@java.lang.Deprecated(forRemoval=false, since="9")
+t_jdk_functional=@java.lang.FunctionalInterface()
+t_long_big=@demo.Probe.ALong(v=1234567890123L)
+t_long_max=@demo.Probe.ALong(v=9223372036854775807L)
+t_long_min=@demo.Probe.ALong(v=-9223372036854775808L)
+t_long_neg=@demo.Probe.ALong(v=-1L)
+t_long_zero=@demo.Probe.ALong(v=0L)
+t_many0=@demo.Probe.Many(zeta=5, epsilon=4, lambda=10, iota=8, eta=6, alpha=0, delta=3, mu=11, kappa=9, theta=7, beta=1, gamma=2)
+t_many1=@demo.Probe.Many(zeta=5, epsilon=4, lambda=10, iota=8, eta=6, alpha=0, delta=3, mu=100, kappa=9, theta=7, beta=1, gamma=2)
+t_many2=@demo.Probe.Many(zeta=100, epsilon=4, lambda=10, iota=8, eta=6, alpha=200, delta=3, mu=11, kappa=9, theta=7, beta=1, gamma=2)
+t_many3=@demo.Probe.Many(zeta=6, epsilon=7, lambda=1, iota=3, eta=5, alpha=11, delta=8, mu=12, kappa=2, theta=4, beta=10, gamma=9)
+t_member_order_a=@demo.Probe.MAnno2(a="hi", b=3)
+t_member_order_b=@demo.Probe.MAnno2(b=3, a="hi")
+t_method=@demo.Probe.AStr(v="method")
+t_mix0=@demo.Probe.Mix(dflt=1, abc="abc", req="r", zed=1L, mm=true)
+t_mix1=@demo.Probe.Mix(dflt=1, abc="abc", mm=false, zed=2L, req="q")
+t_mix2=@demo.Probe.Mix(dflt=4, abc="A", zed=3L, mm=true, req="x")
+t_multi1=@demo.PAnno("m")
+t_multi2=@demo.Probe.MAnno2(a="k", b=2)
+t_multi3=@demo.Probe.AInt(v=5)
+t_nest_empty=@demo.Probe.ANest(v=@demo.PAnno(""))
+t_nest_esc=@demo.Probe.ANest(v=@demo.PAnno("a\"b"))
+t_nest_p=@demo.Probe.ANest(v=@demo.PAnno("n"))
+t_noel=@demo.Probe.NoEl()
+t_onev_def=@demo.Probe.OneV(v="ov")
+t_onev_set=@demo.Probe.OneV(v="set")
+t_params=3:1:@demo.Probe.AStr(v="param"):0:2:@demo.PAnno("two"):@demo.Probe.AInt(v=1)
+t_rep=@demo.Probe.Reps({@demo.Probe.Rep(1), @demo.Probe.Rep(2)})
+t_rep0=@demo.Probe.Reps({})
+t_rep1=@demo.Probe.Reps({@demo.Probe.Rep(1)})
+t_repeat=@demo.Probe.Reps({@demo.Probe.Rep(1), @demo.Probe.Rep(2)})
+t_repeat_none=null
+t_repeat_one=@demo.Probe.Rep(7)
+t_req2=@demo.Probe.Req2(a="hi", b=3)
+t_req2r=@demo.Probe.Req2(b=3, a="hi")
+t_req3=@demo.Probe.Req3(a="x", b=1, c=2L)
+t_req3m=@demo.Probe.Req3(b=1, c=2L, a="x")
+t_req3r=@demo.Probe.Req3(c=2L, b=1, a="x")
+t_sbool_empty=@demo.Probe.SBool(v={})
+t_sbool_one=@demo.Probe.SBool(v={true})
+t_sbool_two=@demo.Probe.SBool(v={true, false})
+t_sbyte_empty=@demo.Probe.SByte(v={})
+t_sbyte_ex=@demo.Probe.SByte(v={(byte)0x7f, (byte)0x80})
+t_sbyte_one=@demo.Probe.SByte(v={(byte)0x01})
+t_sbyte_two=@demo.Probe.SByte(v={(byte)0x01, (byte)0xff})
+t_schar_empty=@demo.Probe.SChar(v={})
+t_schar_one=@demo.Probe.SChar(v={'a'})
+t_schar_q=@demo.Probe.SChar(v={'\'', '"'})
+t_schar_two=@demo.Probe.SChar(v={'a', '\n'})
+t_sclass_bare=@demo.Probe.SClass(v={java.lang.String.class})
+t_sclass_empty=@demo.Probe.SClass(v={})
+t_sclass_mix=@demo.Probe.SClass(v={int[].class, demo.Probe.Inner.class, void.class})
+t_sclass_one=@demo.Probe.SClass(v={java.lang.String.class})
+t_sclass_two=@demo.Probe.SClass(v={java.lang.String.class, int.class})
+t_sdouble_empty=@demo.Probe.SDouble(v={})
+t_sdouble_inf=@demo.Probe.SDouble(v={1.0/0.0, -1.0/0.0})
+t_sdouble_one=@demo.Probe.SDouble(v={1.5})
+t_sdouble_two=@demo.Probe.SDouble(v={1.5, 0.0/0.0})
+t_senum_empty=@demo.Probe.SEnum(v={})
+t_senum_one=@demo.Probe.SEnum(v={A})
+t_senum_two=@demo.Probe.SEnum(v={A, B})
+t_sfloat_empty=@demo.Probe.SFloat(v={})
+t_sfloat_inf=@demo.Probe.SFloat(v={1.0f/0.0f, -1.0f/0.0f})
+t_sfloat_one=@demo.Probe.SFloat(v={1.5f})
+t_sfloat_two=@demo.Probe.SFloat(v={1.5f, 0.0f/0.0f})
+t_short_max=@demo.Probe.AShort(v=32767)
+t_short_min=@demo.Probe.AShort(v=-32768)
+t_short_neg=@demo.Probe.AShort(v=-1)
+t_short_one=@demo.Probe.AShort(v=1)
+t_short_zero=@demo.Probe.AShort(v=0)
+t_sint_bare=@demo.Probe.SInt(v={4})
+t_sint_empty=@demo.Probe.SInt(v={})
+t_sint_neg=@demo.Probe.SInt(v={-1, 0, -2147483648})
+t_sint_one=@demo.Probe.SInt(v={1})
+t_sint_two=@demo.Probe.SInt(v={1, 2})
+t_slong_empty=@demo.Probe.SLong(v={})
+t_slong_one=@demo.Probe.SLong(v={1L})
+t_slong_two=@demo.Probe.SLong(v={1L, -2L})
+t_snest_empty=@demo.Probe.SNest(v={})
+t_snest_one=@demo.Probe.SNest(v={@demo.PAnno("a")})
+t_snest_two=@demo.Probe.SNest(v={@demo.PAnno("a"), @demo.PAnno("b")})
+t_sshort_empty=@demo.Probe.SShort(v={})
+t_sshort_one=@demo.Probe.SShort(v={1})
+t_sshort_two=@demo.Probe.SShort(v={1, -1})
+t_sstr_bare=@demo.Probe.SStr(v={"solo"})
+t_sstr_empty=@demo.Probe.SStr(v={})
+t_sstr_esc=@demo.Probe.SStr(v={"q\"", "\n", "\u00e9"})
+t_sstr_one=@demo.Probe.SStr(v={"a"})
+t_sstr_three=@demo.Probe.SStr(v={"x", "", "z"})
+t_sstr_two=@demo.Probe.SStr(v={"a", "b"})
+t_str_ctl=@demo.Probe.AStr(v="l\nb\tt\rr\bb\ff")
+t_str_ctl2=@demo.Probe.AStr(v="\u0000\u0001\u001f\u007f\u0080\u009f")
+t_str_empty=@demo.Probe.AStr(v="")
+t_str_fffd=@demo.Probe.AStr(v="a\ufffdb")
+t_str_lone=@demo.Probe.AStr(v="a\ud800b")
+t_str_lone2=@demo.Probe.AStr(v="\udc00\ud800")
+t_str_pstring=@demo.Probe.AStr(v="marked")
+t_str_quote=@demo.Probe.AStr(v="q\"b\\s'")
+t_str_sep=@demo.Probe.AStr(v="\u2028\u2029\u00a0\u200b\u0085")
+t_str_slash=@demo.Probe.AStr(v="a/b\\c")
+t_str_supp=@demo.Probe.AStr(v="\ud83d\ude00x")
+t_str_tilde=@demo.Probe.AStr(v="~ !#$%&")
+t_str_uni=@demo.Probe.AStr(v="\u00e9\u20ac\u00f1\u65e5\u672c\u8a9e")
+t_top=@demo.TopAnno(n=3)
+t_top2=@demo.TopAnno(n=-4)
+t_twov=@demo.Probe.TwoV(n=1, value="t")
+t_twov2=@demo.Probe.TwoV(n=2, value="t")
+t_twovd=@demo.Probe.TwoVd(value="vd", n=1)
+t_twovd2=@demo.Probe.TwoVd(value="vd", n=9)
+t_twovd3=@demo.Probe.TwoVd(value="w", n=1)
+t_type=demo.Probe$MAnno2
+t_val_arr0=@demo.Probe.VArr({})
+t_val_arr1=@demo.Probe.VArr({"a"})
+t_val_arr2=@demo.Probe.VArr({"a", "b"})
+t_val_def=@demo.Probe.VDef("vd")
+t_val_def2=@demo.Probe.VDef("over")
+t_val_defarr=@demo.Probe.VDefArr({})
+t_val_defarr2=@demo.Probe.VDefArr({"p", "q"})
+t_val_enum=@demo.Probe.VEnum(A)
+t_val_int=@demo.Probe.VInt(7)
+t_val_nest=@demo.Probe.VNest(@demo.PAnno("z"))
+t_val_str=@demo.Probe.VStr("marked")
+t_val_strkw=@demo.Probe.VStr("marked")
+t_valueof=@demo.Probe.MAnno2(a="hi", b=3)
+t_wrap0=@demo.Probe.Wrap(many={}, one=@demo.PAnno("o"), deep=@demo.Probe.ANest(v=@demo.PAnno("d")))
+t_wrap1=@demo.Probe.Wrap(many={@demo.PAnno("m1"), @demo.PAnno("m2")}, one=@demo.PAnno("o"), deep=@demo.Probe.ANest(v=@demo.PAnno("d")))
+x_arr_len=false/false/false
+x_arr_perm=false/false/false
+x_arr_same=true/true/true
+x_class_diff=false/false
+x_class_same=true/true
+x_default=true/true/true
+x_diff=false/false/false
+x_enum_diff=false/false
+x_enum_same=true/true
+x_hash_eq_str=false
+x_hash_many0=-797522932
+x_hash_noel=0
+x_hash_req2=28091
+x_many=true/true/true
+x_many_def=false/false/false
+x_nan_d=true/true/true
+x_nan_f=true/true/true
+x_nest_diff=false/false/false
+x_nest_same=true/true/true
+x_noel=true/true/true
+x_null=false
+x_order=true/true/true
+x_same=true/true/true
+x_self=true
+x_strarr_diff=false/false/false
+x_strarr_same=true/true/true
+x_string=false
+x_type=false/false
+x_zero_d=false/false/false
+x_zero_f=false/false/false

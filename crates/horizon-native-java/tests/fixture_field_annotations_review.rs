@@ -61,7 +61,7 @@ public final class Probe {
   }
 
   public static String specials() {
-    return Special.class.getAnnotation(A.class).toString();
+    return "" + Special.class.getAnnotation(A.class).toString();
   }
 
   @A(f=Float.NaN, d=Double.POSITIVE_INFINITY)
@@ -109,25 +109,34 @@ public final class Probe {
 }
 "#;
 
+// `A` has 17 defaulted elements, so the JDK prints them in the bucket order of the
+// `HashMap` it keeps the defaults in, and three pairs of them (`en`/`i`, `n`/`sa`,
+// `na`/`s`) share a bucket: their relative order is the order `getDeclaredMethods()`
+// listed them in, which the JVM does not define. Java 25.0.5.1 printed
+//
+//   @demo.A(b=(byte)0x03, c='x', d=2.5, f=1.5f, i=5, en=B, cls=java.lang.String.class,
+//   l=6L, sa={"x", "y"}, n=@demo.N(x=4), s="hi", na={@demo.N(x=4), @demo.N(x=8)}, sh=4,
+//   ia={1, 2}, z=true, ea={A, B}, ca={java.lang.String.class, int.class})
+//
+// so the print is counted rather than answered in an order that is only sometimes
+// right. `annotation_tostring` holds the exact rows (no shared bucket).
 #[test]
-fn annotation_objects_match_java_25_oracle() {
+fn annotation_object_with_shared_default_buckets_is_counted() {
     let fixture = Fixture::build("field-annotations-review", &[("demo/Probe.java", PROBE)]);
     let mut host = fixture.jar.seed_host(StdHost::new());
-    let objects = fixture.text_on(&mut host, "objects");
-    assert_eq!(
-        objects,
-        "@A(b=(byte)0x03, c='x', d=2.5, f=1.5f, i=5, en=B, cls=java.lang.String.class, l=6L, sa={\"x\", \"y\"}, n=@N(x=4), na={@N(x=4), @N(x=8)}, s=\"hi\", sh=4, ia={1, 2}, z=true, ea={A, B}, ca={java.lang.String.class, int.class})|true"
-    );
+    let _ = fixture.text_on(&mut host, "objects");
+    assert!(host.unknown_host_call_count() > 0);
 }
 
 #[test]
-fn special_float_annotation_values_match_java_25_oracle() {
+fn special_float_annotation_values_are_counted_with_shared_default_buckets() {
     let fixture = Fixture::build("field-annotations-specials", &[("demo/Probe.java", PROBE)]);
     let mut host = fixture.jar.seed_host(StdHost::new());
-    assert_eq!(
-        fixture.text_on(&mut host, "specials"),
-        "@A(b=(byte)0x01, c='q', d=1.0/0.0, f=0.0f/0.0f, i=3, en=A, cls=java.lang.String.class, l=4L, sa={}, n=@N(x=7), na={}, s=\"def\", sh=2, ia={}, z=false, ea={}, ca={})"
-    );
+    // Java 25.0.5.1: `@demo.A(b=(byte)0x01, c='q', d=1.0/0.0, f=0.0f/0.0f, i=3, en=A,
+    // cls=java.lang.String.class, l=4L, sa={}, n=@demo.N(x=7), s="def", na={}, sh=2,
+    // ia={}, z=false, ea={}, ca={})`; the same shared buckets as above.
+    let _ = fixture.text_on(&mut host, "specials");
+    assert!(host.unknown_host_call_count() > 0);
 }
 
 #[test]
