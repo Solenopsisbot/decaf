@@ -509,6 +509,7 @@ pub(crate) fn register_block_parts(
     state: &Arc<Mutex<State>>,
     registrar: &mut dyn Registrar,
     context: &RegistrationContext,
+    client: &Arc<Mutex<crate::client::State>>,
 ) {
     let owned = owned_namespaces(context);
     let mut attached = BTreeSet::new();
@@ -561,6 +562,10 @@ pub(crate) fn register_block_parts(
                 continue;
             }
             registrar.menu_part(id, crate::live_menu::JavaMenuPart::new(Arc::clone(state)));
+            // Its client screen: the one the jar registers with `MenuScreens.register`, found
+            // when the client opens the menu (client entrypoints run later, at client setup).
+            // A menu type no jar gave a screen opens none, as vanilla's `MenuScreens.create`.
+            crate::client::menu_screen::register_screen(registrar, id, client);
         }
     }
     if !menus.is_empty() {

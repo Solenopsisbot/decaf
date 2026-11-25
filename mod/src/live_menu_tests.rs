@@ -817,7 +817,7 @@ fn on_a_big_stack(name: &str, run: impl FnOnce() + Send + 'static) {
 /// `fixtures/live_menu`, whose oracle pins these sources' click semantics on Java 25.
 /// `BenchMenu.onTake` also prints the player's `tickCount`, the fact Sunrise supplies.
 /// `demo.NullBench`'s provider builds no menu (`createMenu` answers `null`).
-const DEMO_SOURCES: &[(&str, &str)] = &[
+pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
     (
         "demo/Probe.java",
         "package demo;\n\
@@ -1003,7 +1003,7 @@ fn bench_jar() -> Vec<u8> {
 
 /// The game classes the fixture compiles against: the runtime's `fixtures/live_menu` stubs,
 /// with `Entity.tickCount` on `Player`.
-const STUBS: &[(&str, &str)] = &[
+pub(crate) const STUBS: &[(&str, &str)] = &[
     (
         "net/fabricmc/api/ModInitializer.java",
         "package net.fabricmc.api; public interface ModInitializer { void onInitialize(); }",

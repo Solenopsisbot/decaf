@@ -13,6 +13,9 @@ use runtime::{ExecutionBudget, NativeJar, StdHost, Value};
 
 use crate::runtime;
 
+#[path = "menu_screen.rs"]
+pub(crate) mod menu_screen;
+
 #[derive(Default)]
 pub(crate) struct State {
     loaded: bool,
@@ -20,6 +23,10 @@ pub(crate) struct State {
     jars: Vec<LoadedJar>,
     refused: Vec<Row>,
     retired: Vec<Row>,
+    /// The Java screen open on a Sunrise mod menu window (`menu_screen.rs`), if one is.
+    screen: Option<menu_screen::Opening>,
+    /// The last opening's serial: a reused window id is still a new opening.
+    screen_serial: u64,
     #[cfg(test)]
     fixture_files: Option<Vec<(String, Vec<u8>)>>,
 }
@@ -233,6 +240,7 @@ impl State {
 
     pub(crate) fn level_unloaded(&mut self) {
         self.world_loaded = false;
+        self.forget_menu_screen();
         for jar in &mut self.jars {
             jar.host.forget_all_game_objects();
         }
@@ -240,6 +248,7 @@ impl State {
     }
 
     pub(crate) fn player_logged_out(&mut self) {
+        self.forget_menu_screen();
         for jar in &mut self.jars {
             jar.host.forget_all_game_objects();
         }
@@ -497,6 +506,7 @@ impl State {
         rows.extend(self.jars.drain(..).map(|jar| jar.row));
         let count = rows.len();
         self.retired.extend(rows);
+        self.forget_menu_screen();
         self.loaded = false;
         self.world_loaded = false;
         count

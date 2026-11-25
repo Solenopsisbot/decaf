@@ -223,25 +223,10 @@ impl<H: Host> Runtime<'_, H> {
                             &[],
                         )?;
                     }
-                } else if let Some(owner) =
-                    self.jar_screen_override(screen, "repositionElements", "()V")?
-                {
-                    let _ = self.invoke(
-                        &owner,
-                        "repositionElements",
-                        "()V",
-                        Some(screen.clone()),
-                        &[],
-                    )?;
                 } else {
-                    // Screen.repositionElements (offsets 0-4) calls rebuildWidgets(),
-                    // which is not modelled: count it explicitly.
-                    let r = MethodRef {
-                        owner: SCREEN.into(),
-                        name: "repositionElements".into(),
-                        descriptor: "()V".into(),
-                    };
-                    self.host.unknown_operand_call(&r)?;
+                    // Offset 29: virtual repositionElements() (a jar override, else
+                    // Screen.repositionElements below).
+                    self.dispatch_screen_virtual(screen, "repositionElements", "()V", &[])?;
                 }
                 self.host.set_menu_screen_initialized(screen, true);
                 // Offset 39: virtual `triggerImmediateNarration(false)`.
@@ -265,6 +250,73 @@ impl<H: Host> Runtime<'_, H> {
             }
             // 26.3 Screen.added() offset 0: return (allows `super.added()` from jar overrides).
             ("added", "()V") => Ok(Some(Value::Void)),
+            // 26.3 Screen.resize(int, int) offsets 0-14 (`Minecraft.resizeDisplay`):
+            //   0-7:   this.width = width; this.height = height;
+            //   10-11: this.repositionElements()  (virtual)
+            ("resize", "(II)V") => {
+                let [Value::Int(w), Value::Int(h)] = args else {
+                    return Ok(None);
+                };
+                for (name, value) in [("width", *w), ("height", *h)] {
+                    self.host.menu_field_set(
+                        screen,
+                        &MethodRef {
+                            owner: SCREEN.into(),
+                            name: name.into(),
+                            descriptor: "I".into(),
+                        },
+                        &Value::Int(value),
+                    );
+                }
+                self.dispatch_screen_virtual(screen, "repositionElements", "()V", &[])?;
+                Ok(Some(Value::Void))
+            }
+            // 26.3 Screen.repositionElements() offsets 0-4: this.rebuildWidgets() (virtual).
+            // Neither AbstractContainerScreen nor ItemCombinerScreen overrides it.
+            ("repositionElements", "()V") => {
+                self.dispatch_screen_virtual(screen, "rebuildWidgets", "()V", &[])?;
+                Ok(Some(Value::Void))
+            }
+            // 26.3 Screen.rebuildWidgets() offsets 0-16:
+            //   0-1:   this.clearWidgets()   (offsets 0-27: renderables/children/narratables.clear())
+            //   4-5:   this.clearFocus()     (offsets 0-16: getCurrentFocusPath(), applyFocus(false))
+            //   8-9:   this.init()           (virtual)
+            //   12-13: this.setInitialFocus()
+            // Every widget or focus change a screen can make (`addRenderableWidget`,
+            // `setFocused`, ...) is unmodelled and counted where it happens, so on an uncounted
+            // run the three lists are empty and nothing is focused: clearWidgets and clearFocus
+            // change nothing. A jar override of either (or of the focus reads clearFocus makes)
+            // is not run here: it is counted.
+            ("rebuildWidgets", "()V") => {
+                for (name, desc) in [
+                    ("clearWidgets", "()V"),
+                    ("clearFocus", "()V"),
+                    (
+                        "getCurrentFocusPath",
+                        "()Lnet/minecraft/client/gui/ComponentPath;",
+                    ),
+                    (
+                        "getFocused",
+                        "()Lnet/minecraft/client/gui/components/events/GuiEventListener;",
+                    ),
+                ] {
+                    if let Some(owner) = self.jar_screen_override(screen, name, desc)? {
+                        self.host.unknown_operand_call(&MethodRef {
+                            owner,
+                            name: name.into(),
+                            descriptor: desc.into(),
+                        })?;
+                    }
+                }
+                self.dispatch_screen_virtual(screen, "init", "()V", &[])?;
+                // As `init(int, int)` offset 21: Screen.setInitialFocus with no children
+                // focuses nothing; a jar override runs.
+                if let Some(owner) = self.jar_screen_override(screen, "setInitialFocus", "()V")? {
+                    let _ =
+                        self.invoke(&owner, "setInitialFocus", "()V", Some(screen.clone()), &[])?;
+                }
+                Ok(Some(Value::Void))
+            }
             ("removed", "()V") => match vanilla_class {
                 // 26.3 ItemCombinerScreen.removed() offsets 0-15:
                 //   0-1:  super.removed()  (AbstractContainerScreen.removed)
@@ -609,6 +661,110 @@ impl<H: Host> Runtime<'_, H> {
     }
 }
 
+/// The 26.3 `Screen` / `AbstractContainerScreen` / `ItemCombinerScreen` members a Sunrise mod
+/// menu screen performs itself, not by running the Java screen: slot and item drawing, the
+/// carried stack, labels, tooltips, every mouse and key input, ticking, the pause flag, the
+/// close key, and the `ItemCombinerScreen` slot listener (the client menu holds no synced
+/// contents). Sunrise does what the vanilla body does (`mod/src/menu_screen.rs` checks each
+/// against its own container screen). A jar override of one would run in vanilla and is not
+/// run here: [`NativeJar::count_sunrise_screen_overrides`] counts it.
+pub const SUNRISE_SCREEN_METHODS: &[(&str, &str)] = &[
+    (
+        "extractRenderState",
+        "(Lnet/minecraft/client/gui/GuiGraphicsExtractor;IIF)V",
+    ),
+    (
+        "extractContents",
+        "(Lnet/minecraft/client/gui/GuiGraphicsExtractor;IIF)V",
+    ),
+    (
+        "extractCarriedItem",
+        "(Lnet/minecraft/client/gui/GuiGraphicsExtractor;II)V",
+    ),
+    (
+        "extractSlots",
+        "(Lnet/minecraft/client/gui/GuiGraphicsExtractor;II)V",
+    ),
+    (
+        "extractSlot",
+        "(Lnet/minecraft/client/gui/GuiGraphicsExtractor;Lnet/minecraft/world/inventory/Slot;II)V",
+    ),
+    (
+        "extractTooltip",
+        "(Lnet/minecraft/client/gui/GuiGraphicsExtractor;II)V",
+    ),
+    (
+        "getTooltipFromContainerItem",
+        "(Lnet/minecraft/world/item/ItemStack;)Ljava/util/List;",
+    ),
+    (
+        "extractLabels",
+        "(Lnet/minecraft/client/gui/GuiGraphicsExtractor;II)V",
+    ),
+    (
+        "mouseClicked",
+        "(Lnet/minecraft/client/input/MouseButtonEvent;Z)Z",
+    ),
+    (
+        "mouseReleased",
+        "(Lnet/minecraft/client/input/MouseButtonEvent;)Z",
+    ),
+    (
+        "mouseDragged",
+        "(Lnet/minecraft/client/input/MouseButtonEvent;DD)Z",
+    ),
+    ("mouseScrolled", "(DDDD)Z"),
+    ("mouseMoved", "(DD)V"),
+    ("hasClickedOutside", "(DDII)Z"),
+    ("isHovering", "(IIIIDD)Z"),
+    (
+        "slotClicked",
+        "(Lnet/minecraft/world/inventory/Slot;IILnet/minecraft/world/inventory/ContainerInput;)V",
+    ),
+    (
+        "onMouseClickAction",
+        "(Lnet/minecraft/world/inventory/Slot;Lnet/minecraft/world/inventory/ContainerInput;)V",
+    ),
+    ("handleSlotStateChanged", "(IIZ)V"),
+    ("keyPressed", "(Lnet/minecraft/client/input/KeyEvent;)Z"),
+    ("keyReleased", "(Lnet/minecraft/client/input/KeyEvent;)Z"),
+    (
+        "charTyped",
+        "(Lnet/minecraft/client/input/CharacterEvent;)Z",
+    ),
+    (
+        "checkHotbarKeyPressed",
+        "(Lnet/minecraft/client/input/KeyEvent;)Z",
+    ),
+    ("containerTick", "()V"),
+    ("isPauseScreen", "()Z"),
+    ("onClose", "()V"),
+    (
+        "slotChanged",
+        "(Lnet/minecraft/world/inventory/AbstractContainerMenu;ILnet/minecraft/world/item/ItemStack;)V",
+    ),
+    (
+        "dataChanged",
+        "(Lnet/minecraft/world/inventory/AbstractContainerMenu;II)V",
+    ),
+];
+
+/// A component of vanilla's text-component JSON (`{"text":..}`, `{"translate":..}`, a bare
+/// string), as `Component` objects are made: a screen title the embedder hands over.
+/// `None` when the JSON does not parse.
+pub fn component_from_json(json: &str) -> Option<Value> {
+    let parsed: serde_json::Value = serde_json::from_str(json).ok()?;
+    let object =
+        match parsed {
+            serde_json::Value::String(text) => serde_json::Value::Object(
+                serde_json::Map::from_iter([("text".to_owned(), serde_json::Value::String(text))]),
+            ),
+            object @ serde_json::Value::Object(_) => object,
+            _ => return None,
+        };
+    Some(crate::host_component::component(&object))
+}
+
 impl NativeJar {
     /// Construct a client-side menu through `MenuType.create(containerId, inventory)`
     /// (26.3 `MenuScreens$ScreenConstructor.fromPacket` offsets 0-11).
@@ -807,5 +963,127 @@ impl NativeJar {
             Ok(screen)
         })?;
         Ok(host.client_draws()[before..].to_vec())
+    }
+}
+
+impl NativeJar {
+    /// The active client screen's layout as it is now (after `init` or a resize).
+    pub fn active_client_screen_layout(&self, host: &StdHost) -> Option<ScreenLayout> {
+        let screen = host.client_active_screen_value()?;
+        host.client_screen_layout(&screen)
+    }
+
+    /// Count each [`SUNRISE_SCREEN_METHODS`] member the active screen's jar classes override:
+    /// one counted call per member (`<jar class>#<name><descriptor>`), returned as the keys.
+    pub fn count_sunrise_screen_overrides(
+        &self,
+        host: &mut StdHost,
+    ) -> Result<Vec<String>, NativeError> {
+        let screen = host
+            .client_active_screen_value()
+            .ok_or_else(|| NativeError::Metadata("no active client screen".into()))?;
+        let mut counted = Vec::new();
+        self.with_persistent_runtime(host, std::slice::from_ref(&screen), |runtime| {
+            for (name, desc) in SUNRISE_SCREEN_METHODS {
+                if let Some(owner) = runtime.jar_screen_override(&screen, name, desc)? {
+                    let r = MethodRef {
+                        owner,
+                        name: (*name).into(),
+                        descriptor: (*desc).into(),
+                    };
+                    // Counted, not run: the run goes on.
+                    let _ = runtime.host.unknown_operand_call(&r);
+                    counted.push(format!("{}#{}{}", r.owner, r.name, r.descriptor));
+                }
+            }
+            Ok(Value::Void)
+        })?;
+        Ok(counted)
+    }
+
+    /// One frame of the active client screen's own drawing: `Screen.resize(w, h)` first when
+    /// the frame's GUI size differs from the one it was laid out for (`Minecraft.resizeDisplay`),
+    /// then virtual `extractBackground(graphics, mouseX, mouseY, partialTick)`. Returns the
+    /// recorded [`DrawOp`]s, also when the run stops at a counted call (the ops it drew so far).
+    ///
+    /// `partial_tick` is `None` when the embedder doesn't have it: then a jar
+    /// `extractBackground` override (the only body here that receives it) counts
+    /// `DeltaTracker.getGameTimeDeltaPartialTick` and runs with `0.0f`.
+    pub fn draw_active_client_screen(
+        &self,
+        host: &mut StdHost,
+        mouse: [i32; 2],
+        partial_tick: Option<f32>,
+    ) -> (Vec<DrawOp>, Result<(), NativeError>) {
+        let before = host.client_draws().len();
+        let result = self.draw_active_client_screen_inner(host, mouse, partial_tick);
+        (host.client_draws()[before..].to_vec(), result)
+    }
+
+    fn draw_active_client_screen_inner(
+        &self,
+        host: &mut StdHost,
+        [mouse_x, mouse_y]: [i32; 2],
+        partial_tick: Option<f32>,
+    ) -> Result<(), NativeError> {
+        let [gui_w, gui_h] = host
+            .client_gui_size()
+            .ok_or_else(|| NativeError::Metadata("client frame is not active".into()))?;
+        let (menu_type, menu, title, size, screen) = host
+            .client_active_screen()
+            .ok_or_else(|| NativeError::Metadata("no active client screen".into()))?;
+        let resize = size != [gui_w, gui_h];
+        if resize {
+            host.set_client_active_screen(menu_type, menu, title, [gui_w, gui_h], screen.clone());
+        }
+        self.with_persistent_runtime(host, std::slice::from_ref(&screen), |runtime| {
+            if resize {
+                runtime.dispatch_screen_virtual(
+                    &screen,
+                    "resize",
+                    "(II)V",
+                    &[Value::Int(gui_w), Value::Int(gui_h)],
+                )?;
+            }
+            let partial = match partial_tick {
+                Some(partial) => partial,
+                None => {
+                    if runtime
+                        .jar_screen_override(&screen, "extractBackground", EXTRACT_BG_DESC)?
+                        .is_some()
+                    {
+                        let _ = runtime.host.unknown_operand_call(&MethodRef {
+                            owner: "net/minecraft/client/DeltaTracker".into(),
+                            name: "getGameTimeDeltaPartialTick".into(),
+                            descriptor: "(Z)F".into(),
+                        });
+                    }
+                    0.0
+                }
+            };
+            runtime.run_screen_extract_background(
+                &screen,
+                crate::game_object::client_value("client/gui-graphics".to_owned()),
+                mouse_x,
+                mouse_y,
+                partial,
+            )?;
+            Ok(Value::Void)
+        })?;
+        Ok(())
+    }
+
+    /// Close the active client screen as `Gui.setScreen(null)` does (offset 77, virtual
+    /// `removed()`: `ItemCombinerScreen` removes its slot listener, `AbstractContainerScreen`
+    /// runs the client menu's `removed(player)`). False when no screen is active.
+    pub fn close_active_client_screen(&self, host: &mut StdHost) -> Result<bool, NativeError> {
+        let Some(screen) = host.take_client_active_screen() else {
+            return Ok(false);
+        };
+        self.with_persistent_runtime(host, std::slice::from_ref(&screen), |runtime| {
+            runtime.run_screen_removed(&screen)?;
+            Ok(Value::Void)
+        })?;
+        Ok(true)
     }
 }

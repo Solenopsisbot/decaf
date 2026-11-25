@@ -100,9 +100,10 @@ with each mod beside its declared dependencies. Definitions: [docs/unmodelled-ca
   `createBlockStateDefinition` (#581, makes Runes' altar render) and its item-combiner menu run by
   the interpreter (#584, #652) are in, and so is the server half of the Java-menu to Sunrise-menu
   bridge (`mod/src/live_menu.rs`: the menu type declared by the bake, opens, clicks, ticks and
-  closes run by the Java menu and mirrored on Sunrise). Left: the client screen for a Java menu
-  (`MenuScreens.register` → a Sunrise screen factory), without which a Sunrise client shows no
-  window for it.
+  closes run by the Java menu and mirrored on Sunrise), and its client half: the screen a jar
+  registers with `MenuScreens.register` opens on the Sunrise window and draws its own background
+  (`mod/src/menu_screen.rs`), while Sunrise's container screen draws the slots and labels and
+  takes the input.
 - Drive one mod set (the RPG series) end to end in a real game.
 
 The tables are rewritten after every merge batch from that batch's census
