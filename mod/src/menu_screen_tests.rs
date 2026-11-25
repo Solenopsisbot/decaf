@@ -474,6 +474,7 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
         "package demo;\n\
          import net.minecraft.world.SimpleContainer;\n\
          public class Holder {\n\
+           public static final SimpleContainer ALONE = new SimpleContainer(1);\n\
            public final SimpleContainer[] boxes = { new SimpleContainer(1) };\n\
          }",
     ),
@@ -486,13 +487,19 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
          import net.minecraft.network.chat.Component;\n\
          import net.minecraft.resources.Identifier;\n\
          import net.minecraft.world.entity.player.Inventory;\n\
+         import java.util.ArrayList;\n\
+         import java.util.List;\n\
+         import net.minecraft.world.SimpleContainer;\n\
          public class StashScreen extends AbstractContainerScreen<StashMenu> {\n\
            private static final Identifier TEXTURE = Identifier.fromNamespaceAndPath(\"demo\", \"textures/gui/stash.png\");\n\
-           public StashScreen(StashMenu menu, Inventory inventory, Component title) { super(menu, inventory, title); }\n\
+           private final List<SimpleContainer> kept = new ArrayList<>();\n\
+           private int frames;\n\
+           public StashScreen(StashMenu menu, Inventory inventory, Component title) { super(menu, inventory, title); this.kept.add(new SimpleContainer(1)); }\n\
            @Override public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {\n\
              super.extractBackground(graphics, mouseX, mouseY, partialTick);\n\
              graphics.blit(RenderPipelines.GUI_TEXTURED, TEXTURE, this.leftPos, this.topPos, 0.0f, 0.0f, this.imageWidth, this.imageHeight, 256, 256);\n\
-             if (this.menu.holder.boxes[0].getItem(0).isEmpty()) graphics.fill(this.leftPos, this.topPos, this.leftPos + 4, this.topPos + 4, 0xFFFF0000);\n\
+             SimpleContainer[] sources = { this.menu.holder.boxes[0], Holder.ALONE, this.kept.get(0) };\n\
+             if (sources[this.frames++ % sources.length].getItem(0).isEmpty()) graphics.fill(this.leftPos, this.topPos, this.leftPos + 4, this.topPos + 4, 0xFFFF0000);\n\
            }\n\
          }",
     ),
@@ -1150,9 +1157,10 @@ fn reads_in_removed_and_of_reused_containers_are_counted() {
     });
 }
 
-/// A container the menu keeps outside its slots, behind a jar object and an array
-/// (`menu.holder.boxes[0]`), is reached by the walk over the menu's fields: its read in
-/// `extractBackground` is counted, after the blit.
+/// In a container screen's frame every container content read counts, whoever holds the
+/// container: the menu outside its slots behind a jar object and an array
+/// (`menu.holder.boxes[0]`, first frame), only a `static` field (`Holder.ALONE`, second frame),
+/// only a list the screen keeps (`kept.get(0)`, third frame). Each read comes after the blit.
 #[test]
 fn a_container_outside_the_slots_is_counted() {
     on_a_big_stack("menu-screen-stash", || {
@@ -1164,12 +1172,19 @@ fn a_container_outside_the_slots_is_counted() {
                 mod_api::__private::create_menu_screen(&host, open(14, "demo:stash", &title, 1))
                     .expect("the menu type has a screen factory");
             let screen = screen.unwrap().expect("the Java screen opened");
-            let mut painted = Painted::default();
-            screen.draw(&host, frame([320, 240], [176, 166]), &mut painted);
-            assert_eq!(
-                painted.0,
-                vec![blit("demo:gui/stash", [72, 37], [176, 166])]
-            );
+            for frame_number in 1..=3 {
+                let mut painted = Painted::default();
+                screen.draw(&host, frame([320, 240], [176, 166]), &mut painted);
+                assert_eq!(
+                    painted.0,
+                    vec![blit("demo:gui/stash", [72, 37], [176, 166])]
+                );
+                let get_item = counted_since(java, &before)
+                    .into_iter()
+                    .find(|(key, _)| key.starts_with("net/minecraft/world/SimpleContainer#getItem"))
+                    .map(|(_, count)| count);
+                assert_eq!(get_item, Some(frame_number), "frame {frame_number}");
+            }
             drop(screen);
             assert_eq!(
                 counted_since(java, &before),
@@ -1177,12 +1192,12 @@ fn a_container_outside_the_slots_is_counted() {
                     (
                         "net/minecraft/client/DeltaTracker#getGameTimeDeltaPartialTick(Z)F"
                             .to_owned(),
-                        1
+                        3
                     ),
                     (
                         "net/minecraft/world/SimpleContainer#getItem(I)Lnet/minecraft/world/item/ItemStack;"
                             .to_owned(),
-                        1
+                        3
                     ),
                 ]
             );
@@ -1191,10 +1206,10 @@ fn a_container_outside_the_slots_is_counted() {
 }
 
 /// A screen whose constructor throws never shows: vanilla's `fromPacket` throws before
-/// `Gui.setScreen`, so the bench screen already open stays the client's, still drawing, and
-/// its menu the guarded one. A screen whose `removed()` throws while another replaces it ends
-/// as vanilla's would: `Gui.screen` still that screen, its `removed()` run once, the switch
-/// counted (vanilla then disconnects). Nothing of it is left to draw or close, and the next
+/// `Gui.setScreen`, so the bench screen already open stays the client's, still drawing. A
+/// screen whose `removed()` throws while another replaces it has its `removed()` run once and
+/// the switch counted: vanilla would leave it installed and crash the client
+/// (`onPacketError`); Decaf switches it out instead. Nothing of it is left to draw or close, and the next
 /// opening starts fresh.
 #[test]
 fn a_screen_that_fails_to_construct_or_to_close_leaves_no_stale_state() {

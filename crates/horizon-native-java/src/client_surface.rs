@@ -80,20 +80,6 @@ mod config;
 pub const MINECRAFT: &str = "client/minecraft";
 /// `Minecraft.level`, a `ClientLevel`.
 pub const LEVEL: &str = "client/level";
-/// The key the client-menu walk follows a reference by: a modelled object's or a jar object's
-/// (`expect_ref`), or an array's handle (its elements are under that key in the heap).
-fn walk_target(value: &Value) -> Option<String> {
-    match value {
-        Value::Host(handle) if handle.kind() == crate::HostKind::Array => {
-            Some(handle.key().to_owned())
-        }
-        _ => crate::expect_ref(value).cloned(),
-    }
-}
-
-/// The objects the client-menu reachability walk visits before it gives up and counts every
-/// modelled slot and container (`StdHost::refresh_client_screen_menu_graph`).
-pub(crate) const SCREEN_MENU_WALK_BOUND: usize = 4096;
 /// `Minecraft.player`, the `LocalPlayer`.
 pub const PLAYER: &str = "client/player";
 /// A join/disconnect listener's `ClientPacketListener`.
@@ -928,18 +914,6 @@ pub(crate) struct ClientState {
     /// `draw_client_screen_bg`, and closed via virtual `removed()` before opening
     /// a different screen so slot listeners never leak).
     active_screen: Option<ActiveScreen>,
-    /// The `menu_states` objects of the client menu a screen frame built (`screen_models.rs`):
-    /// its slots and containers, whose contents vanilla's client takes from the server's
-    /// `ClientboundContainerSetContentPacket`, which Decaf's client menu never gets. A read of
-    /// their contents is no fact: `Runtime::screen_menu_unsynced_call` counts it. The data
-    /// slots are left out: the screen bridge writes Sunrise's synced values into them.
-    pub(crate) screen_menu_graph: std::collections::BTreeSet<String>,
-    /// The client menus screen frames built whose screens have not been switched out yet: the
-    /// current one, and during a replacement the previous one too, until its `removed()` has
-    /// returned. `screen_menu_graph` is what is reachable from them.
-    pub(crate) screen_menus: Vec<Value>,
-    /// The reachability walk hit its bound: every modelled slot and container counts.
-    pub(crate) screen_menu_graph_all: bool,
     /// The data values the bridge last wrote into the active client menu (`setData`), by
     /// data-slot index.
     pub(crate) screen_menu_data: Vec<Option<i32>>,
@@ -1465,91 +1439,9 @@ impl StdHost {
         self.client.active_screen.take().map(|active| active.screen)
     }
 
-    /// Forget the screen frames' client menus (once their screens' `removed()` has run, or
-    /// when no Java runs any more: a world's objects forgotten).
+    /// Forget the data values written into the active client menu (its screen is gone).
     pub(crate) fn clear_client_screen_menus(&mut self) {
-        self.client.screen_menus.clear();
-        self.client.screen_menu_graph_all = false;
-        self.client.screen_menu_graph.clear();
         self.client.screen_menu_data.clear();
-    }
-
-    /// Rebuild `screen_menu_graph` from `screen_menus` by reachability. The walk follows
-    /// each menu's slot list, its slots, the containers they point at, a combiner's input and
-    /// result, and also every instance field (a jar class's, inherited ones included) and every
-    /// reference array, transitively through jar objects. A container a menu keeps outside
-    /// its slots is reached too: a client listener may fill it from synced slots, which Decaf
-    /// never gets. A container another piece of client code shares is then counted as well,
-    /// which over-counts but never guesses. Containers made at any time are covered: a static
-    /// one, or one from an earlier opening. Data slots are not followed: the bridge writes the
-    /// server's values into them. Past [`SCREEN_MENU_WALK_BOUND`] objects the walk stops and
-    /// `screen_menu_graph_all` makes every modelled slot and container count.
-    pub(crate) fn refresh_client_screen_menu_graph(&mut self) {
-        use crate::menu_models::Object;
-        let states = &self.menu_states;
-        let heap = &self.heap;
-        let mut graph = std::collections::BTreeSet::new();
-        let mut seen = std::collections::BTreeSet::new();
-        let mut queue: Vec<String> = self
-            .client
-            .screen_menus
-            .iter()
-            .filter_map(|menu| crate::expect_ref(menu).cloned())
-            .collect();
-        let mut overflow = false;
-        while let Some(key) = queue.pop() {
-            if !seen.insert(key.clone()) {
-                continue;
-            }
-            if seen.len() > SCREEN_MENU_WALK_BOUND {
-                overflow = true;
-                break;
-            }
-            match states.get(&key) {
-                Some(Object::Menu(state)) => {
-                    graph.insert(key.clone());
-                    if let Some(combiner) = &state.combiner {
-                        queue.push(combiner.input.clone());
-                        queue.push(combiner.result.clone());
-                    }
-                    queue.push(state.slots.clone());
-                }
-                Some(Object::SlotList { slots }) => {
-                    graph.insert(key.clone());
-                    queue.extend(slots.iter().cloned());
-                }
-                Some(Object::Slot(slot)) => {
-                    graph.insert(key.clone());
-                    if let Some(container) = crate::expect_ref(slot.container()) {
-                        queue.push(container.clone());
-                    }
-                }
-                // Contents are stacks, not further objects to guard.
-                Some(Object::Container { .. } | Object::Inventory { .. }) => {
-                    graph.insert(key.clone());
-                }
-                // Synced by the bridge, or not a menu part.
-                Some(_) => continue,
-                None => {}
-            }
-            // The object's instance fields (`<key>|<owner>#<name><descriptor>`) and, for an
-            // array, its elements.
-            let prefix = format!("{key}|");
-            for (_, value) in heap
-                .fields
-                .range(prefix.clone()..)
-                .take_while(|(field, _)| field.starts_with(&prefix))
-            {
-                if let Some(target) = walk_target(value) {
-                    queue.push(target);
-                }
-            }
-            if let Some(crate::array_data::ArrayData::Ref(values)) = heap.arrays.get(&key) {
-                queue.extend(values.iter().filter_map(walk_target));
-            }
-        }
-        self.client.screen_menu_graph = graph;
-        self.client.screen_menu_graph_all = overflow;
     }
 
     pub(crate) fn client_active_screen_value(&self) -> Option<Value> {

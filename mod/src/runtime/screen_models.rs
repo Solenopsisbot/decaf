@@ -643,12 +643,19 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
-    /// The choke point for a screen frame's client menu (`create_client_menu` arms it): a call
-    /// on one of its slots or containers that would read contents the server never sent is
-    /// counted, never answered from the empty client copy. An allow-list keeps what observes no
-    /// synced state: construction, the menu's type, slot lookup, data writes (`setData`, the
-    /// sync itself), listeners, `removed`, `broadcastChanges` (`screen_menu_broadcast_unobservable`
-    /// decides), and a slot's or container's shape.
+    /// The choke point for a container screen's frame ([`ClientSnapshot::screen_scope`]): any
+    /// call on a modelled menu, slot list, slot, container or inventory that reads contents is
+    /// counted, never answered from Decaf's copy. Sunrise never puts the client's slot contents
+    /// into Java (it draws the items itself from the `MenuScreenLayout`), so no content read in
+    /// that frame can be exact: not of the screen's own menu, not of a container held anywhere
+    /// else (a `static`, a list, another object). A container only client code fills is then
+    /// over-counted, which is sound. An allow-list keeps what observes no contents: construction
+    /// and adding slots, the menu's type, slot lookup, data writes (`setData`, the sync itself),
+    /// listeners, `removed`, `broadcastChanges` (`screen_menu_broadcast_unobservable` decides),
+    /// and a slot's or container's shape. Data slots are not covered: the bridge writes the
+    /// server's values into them (`sync_client_menu_data`).
+    ///
+    /// [`ClientSnapshot::screen_scope`]: crate::runtime::client_surface::ClientSnapshot::screen_scope
     #[inline(never)]
     pub(crate) fn screen_menu_unsynced_call(
         &mut self,
@@ -658,25 +665,22 @@ impl<H: Host> Runtime<'_, H> {
         let Some(host) = self.host.as_std_host() else {
             return Ok(None);
         };
-        if host.client.screen_menu_graph.is_empty() && !host.client.screen_menu_graph_all {
+        if !host.client_screen_scope() {
             return Ok(None);
         }
         let Some(key) = crate::runtime::expect_ref(receiver) else {
             return Ok(None);
         };
-        let guarded = host.client.screen_menu_graph.contains(key)
-            || (host.client.screen_menu_graph_all
-                && matches!(
-                    host.menu_states.get(key),
-                    Some(
-                        crate::runtime::menu_models::Object::Menu(_)
-                            | crate::runtime::menu_models::Object::SlotList { .. }
-                            | crate::runtime::menu_models::Object::Slot(_)
-                            | crate::runtime::menu_models::Object::Container { .. }
-                            | crate::runtime::menu_models::Object::Inventory { .. }
-                    )
-                ));
-        if !guarded {
+        if !matches!(
+            host.menu_states.get(key),
+            Some(
+                crate::runtime::menu_models::Object::Menu(_)
+                    | crate::runtime::menu_models::Object::SlotList { .. }
+                    | crate::runtime::menu_models::Object::Slot(_)
+                    | crate::runtime::menu_models::Object::Container { .. }
+                    | crate::runtime::menu_models::Object::Inventory { .. }
+            )
+        ) {
             return Ok(None);
         }
         let shape = matches!(
@@ -684,6 +688,24 @@ impl<H: Host> Runtime<'_, H> {
             ("<init>", _)
                 | ("getType", "()Lnet/minecraft/world/inventory/MenuType;")
                 | ("getSlot", "(I)Lnet/minecraft/world/inventory/Slot;")
+                | (
+                    "addSlot",
+                    "(Lnet/minecraft/world/inventory/Slot;)Lnet/minecraft/world/inventory/Slot;"
+                )
+                | (
+                    "addDataSlot",
+                    "(Lnet/minecraft/world/inventory/DataSlot;)Lnet/minecraft/world/inventory/DataSlot;"
+                )
+                | (
+                    "addDataSlots",
+                    "(Lnet/minecraft/world/inventory/ContainerData;)V"
+                )
+                | (
+                    "addStandardInventorySlots"
+                        | "addInventoryExtendedSlots"
+                        | "addInventoryHotbarSlots",
+                    "(Lnet/minecraft/world/Container;II)V"
+                )
                 | ("isValidSlotIndex", "(I)Z")
                 | ("setData", "(II)V")
                 | (
@@ -719,12 +741,12 @@ impl<H: Host> Runtime<'_, H> {
         let Some(host) = self.host.as_std_host() else {
             return Ok(false);
         };
+        if !host.client_screen_scope() {
+            return Ok(false);
+        }
         let Some(key) = crate::runtime::expect_ref(menu) else {
             return Ok(false);
         };
-        if !host.client.screen_menu_graph.contains(key) {
-            return Ok(false);
-        }
         let Some(crate::runtime::menu_models::Object::Menu(state)) = host.menu_states.get(key) else {
             return Ok(false);
         };
@@ -963,15 +985,8 @@ impl NativeJar {
                     })
             },
         )?;
-        // In a screen frame, the new menu's slots and containers wait for contents the server
-        // would send (`ClientboundContainerSetContentPacket`); Decaf never gets them, so from
-        // here on a read of them counts (`screen_menu_unsynced_call`). The data slots are synced
-        // by the bridge (`sync_client_menu_data`).
+        // A new menu starts with none of the server's data values written into it.
         if screen_scope {
-            // The previous screen's menu stays in until its `removed()` has run
-            // (`open_client_screen`), so a read there is still counted.
-            host.client.screen_menus.push(menu.clone());
-            host.refresh_client_screen_menu_graph();
             host.client.screen_menu_data.clear();
         }
         Ok(menu)
@@ -1091,16 +1106,18 @@ impl NativeJar {
     }
 
     /// `MenuScreens$ScreenConstructor.fromPacket` + `Gui.setScreen` for `switch`, with the
-    /// screen frames' guarded client menus (`ClientState::screen_menus`) and the active screen
-    /// left as vanilla leaves them on every exit, an exception included.
+    /// active screen left as vanilla leaves it on every exit, an exception included, or an
+    /// adaptation that is counted.
     ///
     /// 26.3 order: `fromPacket` constructs the new screen first (offset 22); if construction
     /// throws or returns null, the previous screen is untouched. Then `Gui.setScreen` runs the
     /// previous screen's `removed()` (offset 77), switches the screen (offset 220), and runs
-    /// `added()` (234) and `init(w, h)` (298-319). Neither has an exception table: an exception
-    /// leaves `Gui.screen` as far as it got and ends the packet's handling, which disconnects.
-    /// Decaf cannot disconnect, so a `removed()` or `init` that throws is counted
-    /// (`Gui.setScreen`); a construction that fails is the caller's to count.
+    /// `added()` (234) and `init(w, h)` (298-319). Neither method, nor
+    /// `ClientPacketListener.handleOpenScreen`, has an exception table, so an exception leaves
+    /// `Gui.screen` as far as it got. `PacketProcessor$ListenerAndPacket.handle` then catches it
+    /// and calls `PacketListener.onPacketError`, whose default throws a `ReportedException`: a
+    /// client crash report. A construction that fails is the caller's to count; a `removed()`
+    /// or `init` that throws is counted here (`Gui.setScreen`).
     fn switch_client_screen(
         &self,
         host: &mut StdHost,
@@ -1175,33 +1192,23 @@ impl NativeJar {
             descriptor: "(Lnet/minecraft/client/gui/screens/Screen;)V".into(),
         };
         match (&result, stage) {
-            // The new screen never showed: its menu is no client's; the previous screen and
-            // its menu stay as they were.
-            (Err(_), Stage::Construct) => {
-                if host.client.screen_menus.contains(&menu) {
-                    host.client.screen_menus.retain(|kept| *kept != menu);
-                    host.refresh_client_screen_menu_graph();
-                }
-            }
-            // The previous screen's `removed()` threw: vanilla's `Gui.screen` is still that
-            // screen, its `removed()` already run, and the connection goes. No screen is left
-            // to draw here, and no menu to guard.
+            // The new screen never showed: the previous screen stays as it was.
+            (Err(_), Stage::Construct) => {}
+            // The previous screen's `removed()` threw. Vanilla leaves that screen installed in
+            // `Gui.screen`, its `removed()` already run, and the client then crashes (above).
+            // Decaf does not crash the game: it switches the screen out (no screen is left to
+            // draw), a deliberate adaptation, counted as `Gui.setScreen`.
             (Err(_), Stage::RemovePrevious) => {
                 let _ = host.unknown_host_call(&set_screen);
                 let _ = host.take_client_active_screen();
                 host.clear_client_screen_menus();
             }
-            // Switched (a throwing `init` is counted as above): the previous screen's
-            // `removed()` has returned, so only the new screen's menu is left.
-            (result, _) => {
-                if result.is_err() {
-                    let _ = host.unknown_host_call(&set_screen);
-                }
-                if !host.client.screen_menus.is_empty() {
-                    host.client.screen_menus.retain(|kept| *kept == menu);
-                    host.refresh_client_screen_menu_graph();
-                }
+            // Switched, then `init` threw: `Gui.screen` is the new screen, as in vanilla
+            // before its crash report; counted.
+            (Err(_), Stage::Switched) => {
+                let _ = host.unknown_host_call(&set_screen);
             }
+            (Ok(_), _) => {}
         }
         result
     }
@@ -1234,7 +1241,6 @@ impl NativeJar {
         let screen = host
             .client_active_screen_value()
             .ok_or_else(|| NativeError::Metadata("no active client screen".into()))?;
-        host.refresh_client_screen_menu_graph();
         let mut counted = Vec::new();
         self.with_persistent_runtime(host, std::slice::from_ref(&screen), |runtime| {
             for (name, desc) in SUNRISE_SCREEN_METHODS {
@@ -1286,8 +1292,6 @@ impl NativeJar {
         let (menu_type, menu, title, size, screen) = host
             .client_active_screen()
             .ok_or_else(|| NativeError::Metadata("no active client screen".into()))?;
-        // A slot added since the last frame is reachable now.
-        host.refresh_client_screen_menu_graph();
         let resize = size != [gui_w, gui_h];
         if resize {
             host.set_client_active_screen(menu_type, menu, title, [gui_w, gui_h], screen.clone());
