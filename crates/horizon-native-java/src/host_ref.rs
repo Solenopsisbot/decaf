@@ -635,6 +635,9 @@ pub enum HostKind {
     /// `String` (`host_jdk_constant.rs`). Its search state is kept by serial in
     /// `regex_matcher.rs`.
     RegexMatcher,
+    /// A `java.util.function.Predicate` from `Pattern.asPredicate()`: a serial
+    /// (one object per call) and the pattern text (`host_jdk_constant.rs`).
+    RegexPredicate,
     /// Vanilla's ItemStackTemplate (`host_item_stack_template.rs`).
     ItemStackTemplate,
     /// Vanilla's `DataComponentPatch` (`recipe_models.rs`).
@@ -2899,6 +2902,20 @@ const KINDS: &[KindInfo] = &[
         // A serial per `matcher` call.
         canonical: always_canonical,
         methods: &crate::host_jdk_constant::MATCHER_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::RegexPredicate,
+        tag: "rxp",
+        // The JDK's object is a hidden lambda class (`Pattern$$Lambda/0x...`),
+        // not the interface: its class is not modelled, so `getClass()` and
+        // what follows from it are counted; `instanceof` is exact
+        // (`PREDICATE_METHODS`).
+        class: ClassRule::Unknown {
+            declared: crate::host_jdk_constant::predicate_types,
+        },
+        // A serial per `asPredicate` call.
+        canonical: always_canonical,
+        methods: &crate::host_jdk_constant::PREDICATE_METHODS,
     },
     KindInfo {
         kind: HostKind::ItemStackTemplate,

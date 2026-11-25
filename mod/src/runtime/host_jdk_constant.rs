@@ -21,6 +21,10 @@
 //!   needs a per-allocation key.
 //! * **`Pattern`** (`final`): key `[serial, text]`, a serial per `compile`: one key one object.
 //!   `toString`/`pattern()` is the text, `equals` identity, `hashCode` identity (counted).
+//! * **`Predicate` from `Pattern.asPredicate()`**: key `[serial, text]`, a serial per call (the
+//!   JDK builds a new lambda each time). Only `test(String)` is answered (`regex_calls.rs`); `toString`,
+//!   `hashCode` and the class are counted (the JDK's is a hidden lambda class, `ClassRule::Unknown`),
+//!   `instanceof` is `Object`/`Predicate` only, `equals` is identity.
 //! * **`ArtifactVersion`** (NeoForge's `DefaultArtifactVersion`, Maven's `ComparableVersion`
 //!   behind it): key its text, class unknown (`ArtifactVersion`, `Comparable` declared).
 //!   `toString` is the text; `equals` is `compareTo == 0`: `true` for one text, counted for two
@@ -330,6 +334,35 @@ fn handle_pattern(handle: &HostRef) -> Option<String> {
     }
 }
 
+static NEXT_PREDICATE: AtomicU64 = AtomicU64::new(0);
+
+/// `pattern.asPredicate()`: a new `Predicate` object (a serial per call, as the
+/// JDK allocates a new lambda each time) carrying the pattern's text, so its
+/// `test` can run the same `java_regex` engine `Matcher#matches` uses.
+pub(crate) fn predicate(pattern: &str) -> Value {
+    Value::Host(HostRef::of_values(
+        HostKind::RegexPredicate,
+        &[
+            Value::Long(NEXT_PREDICATE.fetch_add(1, Ordering::Relaxed) as i64),
+            Value::Ref(Some(pattern.to_owned())),
+        ],
+    ))
+}
+
+/// The pattern text of a `Predicate` handle.
+pub(crate) fn predicate_text(value: &Value) -> Option<String> {
+    let Value::Host(handle) = value else {
+        return None;
+    };
+    if handle.kind() != HostKind::RegexPredicate {
+        return None;
+    }
+    match <[Value; 2]>::try_from(handle.values()?) {
+        Ok([_, Value::Ref(Some(text))]) => Some(text),
+        _ => None,
+    }
+}
+
 /// NeoForge's `ArtifactVersion` of `text`.
 pub(crate) fn artifact_version(text: &str) -> Value {
     Value::Host(HostRef::new(HostKind::ArtifactVersion, text))
@@ -434,6 +467,37 @@ pub(crate) const MATCHER_METHODS: Methods = Methods {
 
 pub(crate) const PATTERN_METHODS: Methods = Methods {
     to_string: |handle, _| Ok(handle_pattern(handle)),
+    ..CONSTANT_METHODS
+};
+
+/// The types a `Pattern.asPredicate()` object surely is: its hidden lambda
+/// class implements `Predicate` and nothing else.
+pub(crate) fn predicate_types(_: &str) -> &'static [&'static str] {
+    &["java/util/function/Predicate"]
+}
+
+/// `instanceof`/casts on a `Pattern.asPredicate()` object. The JDK 25 object is
+/// a final hidden lambda class whose superclass is `Object` and whose only
+/// interface is `Predicate` (`getInterfaces()` has the one entry), so it is an
+/// `Object` and a `Predicate` and nothing else; its name and modifiers are not
+/// modelled (`getClass()` is counted).
+fn predicate_instance_of(
+    _: &HostRef,
+    wanted: &str,
+    _: &dyn crate::runtime::host_ref::ClassHierarchy,
+) -> Option<bool> {
+    Some(matches!(
+        wanted,
+        "java/lang/Object" | "java/util/function/Predicate"
+    ))
+}
+
+/// A `Predicate` from `Pattern.asPredicate()`: `toString`/`hashCode` and the
+/// class are not modelled (counted); `equals` is identity.
+pub(crate) const PREDICATE_METHODS: Methods = Methods {
+    to_string: |_, _| Ok(None),
+    hash_code: |_, _| Ok(None),
+    instance_of: predicate_instance_of,
     ..CONSTANT_METHODS
 };
 

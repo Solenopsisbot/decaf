@@ -233,6 +233,28 @@ impl<H: Host> Runtime<'_, H> {
         Ok(false)
     }
 
+    /// A JDK body that runs a `Pattern.asPredicate()` predicate (a collection's
+    /// `removeIf`, a stream's `filter` and `anyMatch`/`allMatch`/`noneMatch`,
+    /// `Optional.filter`, a predicate combinator) stops where `test` was
+    /// counted: `counted_before` is the host's count taken before that call.
+    /// The call is counted already, and the host's neutral `false` is not what
+    /// the JDK computed (the element is not a `String`, or has a supplementary
+    /// character the engine refuses), so the enclosing operation does not go on
+    /// to remove, keep, count or answer from it. Any other callback keeps the
+    /// answer it always had.
+    pub(crate) fn stop_at_counted_pattern_test(
+        &self,
+        callback: &Value,
+        counted_before: usize,
+    ) -> Result<(), NativeError> {
+        if crate::runtime::host_jdk_constant::predicate_text(callback).is_some()
+            && self.host.counted_unknown_calls() > counted_before
+        {
+            return Err(NativeError::Metadata(crate::runtime::jdk_call::ABANDONED.into()));
+        }
+        Ok(())
+    }
+
     /// `Predicate.test`, as a boolean. A predicate the runtime cannot run did
     /// not select the element, which is what the host's neutral answer was.
     pub(crate) fn predicate_holds(
@@ -248,6 +270,26 @@ impl<H: Host> Runtime<'_, H> {
             name: TEST.1.to_owned(),
             descriptor: TEST.2.to_owned(),
         };
+        // A `Predicate` from `Pattern.asPredicate()` is a host handle, not a
+        // callback: run its `test` (`regex_calls.rs`). One the engine cannot
+        // answer (an input with a supplementary character) goes to the host as
+        // the `test` call it is, so it is counted rather than read as "false".
+        if crate::runtime::host_jdk_constant::predicate_text(callback).is_some() {
+            let counted = self.host.counted_unknown_calls();
+            let answer =
+                match self.invoke_regex(&call, Some(callback), std::slice::from_ref(value))? {
+                    Some(answer) => answer,
+                    None => {
+                        self.host
+                            .invoke_instance(&call, callback, std::slice::from_ref(value))?
+                    }
+                };
+            // The count is the enclosing operation's too: its neutral `false`
+            // is not an answer (`removeIf` would keep the element, as if the
+            // JDK had tested it).
+            self.stop_at_counted_pattern_test(callback, counted)?;
+            return Ok(matches!(answer, Value::Int(flag) if flag != 0));
+        }
         if let Some((owner, jar_owned)) = self.dispatch_owner(&call, 0xb9, Some(callback))
             && jar_owned
         {

@@ -172,6 +172,15 @@ impl Regex {
             .then(|| Match::owned(&matcher, self)))
     }
 
+    /// `Matcher.find()` on a fresh matcher: search from position 0. Java's
+    /// first `find` on a fresh matcher is exactly this; repeated finds advance
+    /// past empty matches, but `Predicate.test` is a fresh matcher each time.
+    pub(crate) fn find_anywhere(&self, input: &str) -> R<bool> {
+        let chars = units(input)?;
+        let mut matcher = Matcher::new(&self.program, &chars, Limits::JAVA);
+        matcher.search(0)
+    }
+
     /// `Matcher.find()` from a fresh matcher, repeated: each match in order
     /// goes to `each`, with Java's rule that a search after an empty match
     /// starts one `char` later, until `each` answers `false` or no match is
@@ -434,6 +443,18 @@ pub(crate) fn matches(pattern: &str, input: &str) -> R<bool> {
     Ok(Regex::compile(pattern, 0)?
         .match_start(input, true)?
         .is_some())
+}
+
+/// Whether the engine compiles `pattern` (flags 0): false for a pattern Java
+/// rejects and for one outside the modelled subset, which are not told apart.
+pub(crate) fn compiles(pattern: &str) -> bool {
+    Regex::compile(pattern, 0).is_ok()
+}
+
+/// `Matcher.find()` on a fresh matcher: does the pattern occur anywhere in
+/// the input? This is what `Pattern.asPredicate()`'s `test(Object)` uses.
+pub(crate) fn find(pattern: &str, input: &str) -> R<bool> {
+    Regex::compile(pattern, 0)?.find_anywhere(input)
 }
 
 /// `String.replaceAll` (`all`) / `replaceFirst`.

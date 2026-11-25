@@ -356,6 +356,12 @@ pub(crate) fn static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value,
         // `PatternSyntaxException` compiles here. For valid text this matches
         // the JVM: the caller stores the pattern and only a matcher needs it.
         ("java/util/regex/Pattern", "compile", "(Ljava/lang/String;)Ljava/util/regex/Pattern;") => {
+            // A null text is a `NullPointerException` on the JVM; reading it as
+            // the empty pattern would answer a `Pattern` for a call that throws.
+            // Counted (the caller's handler for the NPE cannot be reached).
+            if matches!(args.first()?, Value::Ref(None)) {
+                return None;
+            }
             let pattern = expect_string(args.first()?);
             Some(Ok(crate::runtime::host_jdk_constant::pattern(pattern)))
         }

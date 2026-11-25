@@ -29242,14 +29242,19 @@ impl<H: Host> Runtime<'_, H> {
         (owner, name, descriptor): (&str, &str, &str),
         args: &[Value],
     ) -> Result<Value, NativeError> {
-        self.call_virtual(
+        let counted = self.host.counted_unknown_calls();
+        let answer = self.call_virtual(
             crate::runtime::jdk_call::Site::Interface,
             owner,
             name,
             descriptor,
             side,
             args,
-        )
+        )?;
+        // `and`/`or`/`negate` over a `Pattern.asPredicate()` whose `test` was
+        // counted does not combine the host's neutral `false`.
+        self.stop_at_counted_pattern_test(side, counted)?;
+        Ok(answer)
     }
 
     fn invoke_callback(
@@ -29709,6 +29714,17 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(Some(value));
         }
         if r.name == "filter" {
+            // A `Pattern.asPredicate()` is a host handle, not a callback: its
+            // `test` runs as `removeIf`'s does, and one the runtime cannot
+            // answer stops the `filter` rather than empty the `Optional`.
+            if host_jdk_constant::predicate_text(callback).is_some() {
+                let holds = self.predicate_holds(callback, &value)?;
+                return Ok(Some(if holds {
+                    receiver.clone()
+                } else {
+                    empty_optional()
+                }));
+            }
             let Some(result) = self.invoke_callback(callback, std::slice::from_ref(&value))? else {
                 return Ok(None);
             };

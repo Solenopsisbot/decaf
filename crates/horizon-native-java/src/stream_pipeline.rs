@@ -1078,14 +1078,22 @@ impl<H: crate::Host> crate::Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Value, NativeError> {
         match sam(interface) {
-            Some((name, descriptor)) => self.call_virtual(
-                crate::jdk_call::Site::Interface,
-                interface,
-                name,
-                descriptor,
-                callback,
-                args,
-            ),
+            Some((name, descriptor)) => {
+                let counted = self.host.counted_unknown_calls();
+                let answer = self.call_virtual(
+                    crate::jdk_call::Site::Interface,
+                    interface,
+                    name,
+                    descriptor,
+                    callback,
+                    args,
+                )?;
+                // A `filter`/`anyMatch`/`allMatch`/`noneMatch` whose
+                // `Pattern.asPredicate()` test was counted stops there: the
+                // stream does not answer from the host's neutral `false`.
+                self.stop_at_counted_pattern_test(callback, counted)?;
+                Ok(answer)
+            }
             None => self.apply_callback(callback, args),
         }
     }
