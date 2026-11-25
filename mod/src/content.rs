@@ -101,6 +101,10 @@ pub(crate) fn state_for_placement_content(
 /// declaration fence checks.
 pub(crate) const MOD_ID: &str = "horizon_java";
 
+/// Attaches [`crate::JavaPlacementPart`] (the jar block's `getStateForPlacement`) to every jar
+/// block a part may be attached to ([`attachable_registrations`]): exactly the blocks
+/// [`register_block_parts`] gives a block-use part, so a block of a baked content package (Runes'
+/// altar, in the `runes` package) gets its placement as it gets its block use.
 pub(crate) fn register_placement_parts(
     state: &mut State,
     context: &RegistrationContext,
@@ -108,23 +112,14 @@ pub(crate) fn register_placement_parts(
     shared: Arc<Mutex<State>>,
 ) {
     state.ensure_loaded(context, registration_game_version(context));
-    let owned = owned_namespaces(context);
-    for jar in &state.jars {
-        for declaration in runtime::content::declarations(jar.host.registrations()) {
-            let runtime::content::ContentDeclaration::Block(block) = declaration else {
-                continue;
-            };
-            if !usable_id(&block.id) || !owns(&owned, &block.id) {
-                continue;
-            }
-            let key = registrar.block_key(&block.id);
-            registrar.block_part(
-                key,
-                crate::JavaPlacementPart {
-                    state: Arc::clone(&shared),
-                },
-            );
-        }
+    for id in attachable_registrations(&state.jars, context, "minecraft:block") {
+        let key = registrar.block_key(&id);
+        registrar.block_part(
+            key,
+            crate::JavaPlacementPart {
+                state: Arc::clone(&shared),
+            },
+        );
     }
 }
 
@@ -511,33 +506,17 @@ pub(crate) fn register_block_parts(
     context: &RegistrationContext,
     client: &Arc<Mutex<crate::client::State>>,
 ) {
-    let owned = owned_namespaces(context);
-    let mut attached = BTreeSet::new();
     let mut guard = state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.ensure_loaded(context, registration_game_version(context));
-    for jar in &guard.jars {
-        for entry in jar.host.registrations() {
-            if entry.registry != "minecraft:block" {
-                continue;
-            }
-            let id = entry.id.as_str();
-            if !usable_id(id) {
-                continue;
-            }
-            if !owns(&owned, id) && !owns_assets(context, id) {
-                continue;
-            }
-            if !attached.insert(id.to_owned()) {
-                continue;
-            }
-            let key = registrar.block_key(id);
-            registrar.block_part(
-                key,
-                crate::block_use::JavaBlockUsePart::new(Arc::clone(state), id.to_owned()),
-            );
-        }
+    let attached = attachable_registrations(&guard.jars, context, "minecraft:block");
+    for id in &attached {
+        let key = registrar.block_key(id);
+        registrar.block_part(
+            key,
+            crate::block_use::JavaBlockUsePart::new(Arc::clone(state), id.clone()),
+        );
     }
     if !attached.is_empty() {
         log::info!(
@@ -548,25 +527,13 @@ pub(crate) fn register_block_parts(
     // Each menu type a jar registered: its clicks run the Java menu (`live_menu.rs`). The bake
     // declares the Sunrise menu type from the same registration; a type Sunrise doesn't know is
     // never opened, so its part is never asked.
-    let mut menus = BTreeSet::new();
-    for jar in &guard.jars {
-        for entry in jar.host.registrations() {
-            if entry.registry != "minecraft:menu" {
-                continue;
-            }
-            let id = entry.id.as_str();
-            if !usable_id(id) || !(owns(&owned, id) || owns_assets(context, id)) {
-                continue;
-            }
-            if !menus.insert(id.to_owned()) {
-                continue;
-            }
-            registrar.menu_part(id, crate::live_menu::JavaMenuPart::new(Arc::clone(state)));
-            // Its client screen: the one the jar registers with `MenuScreens.register`, found
-            // when the client opens the menu (client entrypoints run later, at client setup).
-            // A menu type no jar gave a screen opens none, as vanilla's `MenuScreens.create`.
-            crate::client::menu_screen::register_screen(registrar, id, client);
-        }
+    let menus = attachable_registrations(&guard.jars, context, "minecraft:menu");
+    for id in &menus {
+        registrar.menu_part(id, crate::live_menu::JavaMenuPart::new(Arc::clone(state)));
+        // Its client screen: the one the jar registers with `MenuScreens.register`, found
+        // when the client opens the menu (client entrypoints run later, at client setup).
+        // A menu type no jar gave a screen opens none, as vanilla's `MenuScreens.create`.
+        crate::client::menu_screen::register_screen(registrar, id, client);
     }
     if !menus.is_empty() {
         log::info!(
@@ -574,6 +541,39 @@ pub(crate) fn register_block_parts(
             menus.len()
         );
     }
+}
+
+/// The ids every jar registered in `registry` (`minecraft:block`, `minecraft:menu`) that this
+/// mod attaches its Sunrise parts to, each once, in jar then registration order. An id qualifies
+/// when it is usable and its namespace is one this mod owns ([`owned_namespaces`]) or one an
+/// installed content package owns ([`owns_assets`]: a baked jar package such as `runes`, whose
+/// content the package declares and this mod runs), so Sunrise's key validation succeeds.
+///
+/// Every part registration (placement, block use, menus) takes its ids from here, so two parts
+/// can't disagree about which blocks are the jar's: #659's placement part once read the typed
+/// declarations and checked this mod's own namespaces alone, so a baked package's block got its
+/// block use but never its placement (BUGS-3d34 #1).
+fn attachable_registrations(
+    jars: &[LoadedJar],
+    context: &RegistrationContext,
+    registry: &str,
+) -> Vec<String> {
+    let owned = owned_namespaces(context);
+    let mut ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    for jar in jars {
+        for entry in jar.host.registrations() {
+            let id = entry.id.as_str();
+            if entry.registry == registry
+                && usable_id(id)
+                && (owns(&owned, id) || owns_assets(context, id))
+                && seen.insert(id.to_owned())
+            {
+                ids.push(id.to_owned());
+            }
+        }
+    }
+    ids
 }
 
 /// Whether an installed content package owns the id's namespace, and so supplies that content's
@@ -786,6 +786,8 @@ impl LoadedJar {
         self.row.verdict = verdict;
         self.row.unknown_host_calls = unknown;
         self.row.reason = reason;
+        // The loading stages were the last of the jar's start.
+        self.row.start_counting(&self.host);
         if changed {
             log::info!("{LOG}: after the loading stages: {}", self.row);
         }

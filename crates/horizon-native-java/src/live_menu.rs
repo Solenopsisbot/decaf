@@ -298,7 +298,9 @@ pub struct LiveMenuOutcome {
     /// Unmodelled host calls this call made.
     pub unknown_host_calls: BTreeMap<String, usize>,
     pub unknown_host_call_count: usize,
-    /// Why the call didn't finish (an exception Java didn't catch, a budget).
+    /// Why the call didn't finish (an exception Java didn't catch, a budget). A click whose
+    /// `doClick` threw fails with `clicked`'s `ReportedException`, and the line names the
+    /// exception it wrapped (`...; caused by ...`).
     pub failure: Option<String>,
 }
 
@@ -2834,12 +2836,16 @@ fn acm_clicked(
     player: &Value,
 ) -> R<()> {
     match acm_do_click(rt, menu, slot, button, input, player) {
-        Err(Flow::Java(NativeError::UncaughtException { class, .. })) => {
+        Err(Flow::Java(error @ NativeError::UncaughtException { .. })) => {
+            let NativeError::UncaughtException { class, .. } = &error else {
+                unreachable!("matched an uncaught exception")
+            };
+            let class = class.clone();
             match is_java_exception(rt, &class) {
-                Some(true) => Err(throw(
-                    "net/minecraft/ReportedException",
-                    "Container click".to_owned(),
-                )),
+                Some(true) => {
+                    note_wrapped_click_cause(rt, &error);
+                    Err(throw(REPORTED_EXCEPTION, CONTAINER_CLICK.to_owned()))
+                }
                 Some(false) => Err(Flow::Java(NativeError::UncaughtException {
                     class,
                     message: None,
@@ -2849,6 +2855,39 @@ fn acm_clicked(
             }
         }
         other => other,
+    }
+}
+
+/// `ReportedException` and the crash report title `clicked` gives it.
+const REPORTED_EXCEPTION: &str = "net/minecraft/ReportedException";
+const CONTAINER_CLICK: &str = "Container click";
+
+/// Keep the exception `clicked` wrapped on the running call, for its failure line (vanilla's
+/// `ReportedException.getCause()`): nothing Java reads. Outside a live call (no active use)
+/// there is no failure line to name it in.
+fn note_wrapped_click_cause(rt: &mut Runtime<'_, impl Host>, error: &NativeError) {
+    if let Some(host) = rt.host.as_std_host_mut()
+        && let Some(active) = host.block_use.active_use.as_mut()
+    {
+        active.wrapped_click_cause = Some(error.to_string());
+    }
+}
+
+/// A live call's failure line: the error, and when it is `clicked`'s `ReportedException`, the
+/// exception that handler wrapped (`caused by ...`), as a crash report's `Caused by:` names it.
+fn failure_line(error: &NativeError, wrapped_click_cause: Option<&str>) -> String {
+    match (error, wrapped_click_cause) {
+        (
+            NativeError::UncaughtException {
+                class,
+                message: Some(message),
+                ..
+            },
+            Some(cause),
+        ) if class == REPORTED_EXCEPTION && message == CONTAINER_CLICK => {
+            format!("{error}; caused by {cause}")
+        }
+        _ => error.to_string(),
     }
 }
 
@@ -5875,6 +5914,7 @@ impl NativeJar {
             menu_effects: Vec::new(),
             facts: Some(facts.clone()),
             live_effects: Vec::new(),
+            wrapped_click_cause: None,
         });
         if closing {
             // The window is gone; the menu stays installed until `doCloseContainer` offset 19.
@@ -5907,8 +5947,14 @@ impl NativeJar {
         host.rewind_call_log(mark);
         let (unknown_host_calls, unknown_host_call_count) =
             block_use::unknown_calls_since(host, &unknowns_before);
-        let (effects, menu_effects) = finished_active
-            .map(|active| (active.live_effects, active.menu_effects))
+        let (effects, menu_effects, wrapped_click_cause) = finished_active
+            .map(|active| {
+                (
+                    active.live_effects,
+                    active.menu_effects,
+                    active.wrapped_click_cause,
+                )
+            })
             .unwrap_or_default();
         let still_held = host
             .block_use
@@ -5930,7 +5976,9 @@ impl NativeJar {
             handled,
             unknown_host_calls,
             unknown_host_call_count,
-            failure: call_result.err().map(|error| error.to_string()),
+            failure: call_result
+                .err()
+                .map(|error| failure_line(&error, wrapped_click_cause.as_deref())),
         }))
     }
 }
@@ -6180,6 +6228,7 @@ impl NativeJar {
             menu_effects: Vec::new(),
             facts: None,
             live_effects: Vec::new(),
+            wrapped_click_cause: None,
         });
         let roots = [menu_type.clone(), level, player, inventory.clone()];
         let mut refusal = None;

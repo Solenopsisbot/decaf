@@ -523,6 +523,7 @@ fn block_use_opens_combiner_menu_via_simple_menu_provider() {
     // 1. Inherited BlockBehaviour.useItemOn -> TRY_WITH_EMPTY_HAND (0 unknowns).
     let ctx = default_context("demo:altar", BlockUseSide::Server, [10, 64, -5]);
     let item_on = fixture.jar.block_use_item_on(&mut host, &ctx).unwrap();
+    assert_eq!(item_on.failure, None, "{:?}", item_on.unknown_host_calls);
     assert_eq!(item_on.unknown_host_call_count, 0);
     assert_eq!(
         item_on.result,
@@ -533,6 +534,7 @@ fn block_use_opens_combiner_menu_via_simple_menu_provider() {
     // 2. Server-side useWithoutItem -> CONSUME + typed OpenMenuEffect. `initMenu` (the
     //    player's slot listener and synchronizer) is the one counted call.
     let server = fixture.jar.block_use_without_item(&mut host, &ctx).unwrap();
+    assert_eq!(server.failure, None, "{:?}", server.unknown_host_calls);
     assert_only_unknown(&server, &[INIT_MENU]);
     assert_eq!(
         server.result,
@@ -582,6 +584,7 @@ fn block_use_opens_combiner_menu_via_simple_menu_provider() {
         .jar
         .block_use_without_item(&mut host, &showing)
         .unwrap();
+    assert_eq!(second.failure, None, "{:?}", second.unknown_host_calls);
     assert!(
         !second
             .unknown_host_calls
@@ -610,6 +613,7 @@ fn block_use_opens_combiner_menu_via_simple_menu_provider() {
         .jar
         .block_use_without_item(&mut host, &client_ctx)
         .unwrap();
+    assert_eq!(client.failure, None, "{:?}", client.unknown_host_calls);
     assert_eq!(client.unknown_host_call_count, 0);
     assert_eq!(
         client.result,
@@ -769,6 +773,7 @@ fn block_use_returns_every_interaction_result_kind() {
     for (x, expected) in cases {
         let ctx = default_context("demo:results", BlockUseSide::Server, [*x, 64, 0]);
         let outcome = fixture.jar.block_use_item_on(&mut host, &ctx).unwrap();
+        assert_eq!(outcome.failure, None, "x={x}");
         assert_eq!(outcome.unknown_host_call_count, 0, "x={x}");
         assert_eq!(outcome.result.as_ref(), Some(expected), "x={x}");
     }
@@ -776,6 +781,7 @@ fn block_use_returns_every_interaction_result_kind() {
     // Case 7: heldItemTransformedTo(stack) preserves the transformed ItemStack value.
     let ctx7 = default_context("demo:results", BlockUseSide::Server, [7, 64, 0]);
     let outcome7 = fixture.jar.block_use_item_on(&mut host, &ctx7).unwrap();
+    assert_eq!(outcome7.failure, None, "{:?}", outcome7.unknown_host_calls);
     assert_eq!(outcome7.unknown_host_call_count, 0);
     match outcome7.result {
         Some(InteractionResultValue::Success {
@@ -855,6 +861,7 @@ fn block_use_client_side_only_and_client_open_menu_noop() {
             &default_context("demo:client_only", BlockUseSide::Server, [1, 2, 3]),
         )
         .unwrap();
+    assert_eq!(server.failure, None, "{:?}", server.unknown_host_calls);
     assert_eq!(server.unknown_host_call_count, 0);
     assert_eq!(server.result, Some(InteractionResultValue::Pass));
     assert!(server.menu_effects.is_empty());
@@ -866,6 +873,7 @@ fn block_use_client_side_only_and_client_open_menu_noop() {
             &default_context("demo:client_only", BlockUseSide::Client, [1, 2, 3]),
         )
         .unwrap();
+    assert_eq!(client.failure, None, "{:?}", client.unknown_host_calls);
     assert_eq!(client.unknown_host_call_count, 0);
     assert_eq!(
         client.result,
@@ -983,6 +991,7 @@ fn block_use_counts_unmodelled_calls_and_unmodelled_superclasses() {
             &default_context("demo:unknown_call", BlockUseSide::Server, [5, 70, 5]),
         )
         .unwrap();
+    assert_eq!(unk.failure, None, "{:?}", unk.unknown_host_calls);
     assert_eq!(unk.unknown_host_call_count, 2);
     assert!(
         unk.unknown_host_calls
@@ -1008,6 +1017,11 @@ fn block_use_counts_unmodelled_calls_and_unmodelled_superclasses() {
             &default_context("demo:crafting_sub", BlockUseSide::Server, [1, 2, 3]),
         )
         .unwrap();
+    assert_eq!(
+        craft_item.failure, None,
+        "{:?}",
+        craft_item.unknown_host_calls
+    );
     assert_eq!(craft_item.unknown_host_call_count, 0);
     assert_eq!(
         craft_item.result,
@@ -1020,6 +1034,11 @@ fn block_use_counts_unmodelled_calls_and_unmodelled_superclasses() {
             &default_context("demo:crafting_sub", BlockUseSide::Server, [1, 2, 3]),
         )
         .unwrap();
+    assert_eq!(
+        craft_empty.failure, None,
+        "{:?}",
+        craft_empty.unknown_host_calls
+    );
     assert_eq!(craft_empty.unknown_host_call_count, 1);
     assert!(
         craft_empty
@@ -1038,6 +1057,7 @@ fn block_use_counts_unmodelled_calls_and_unmodelled_superclasses() {
             &default_context("demo:plain", BlockUseSide::Server, [1, 2, 3]),
         )
         .unwrap();
+    assert_eq!(plain.failure, None, "{:?}", plain.unknown_host_calls);
     assert_eq!(plain.unknown_host_call_count, 0);
     assert_eq!(plain.result, Some(InteractionResultValue::Pass));
 
@@ -1051,6 +1071,11 @@ fn block_use_counts_unmodelled_calls_and_unmodelled_superclasses() {
             &default_context("demo:null_menu", BlockUseSide::Server, [1, 2, 3]),
         )
         .unwrap();
+    assert_eq!(
+        null_menu.failure, None,
+        "{:?}",
+        null_menu.unknown_host_calls
+    );
     assert_eq!(null_menu.unknown_host_call_count, 0);
     assert!(
         matches!(
@@ -1173,7 +1198,10 @@ fn click_order(
 ) -> BlockUseOutcome {
     let mut ctx = default_context("demo:order", BlockUseSide::Server, [4, 64, 4]);
     ctx.player = player.clone();
-    fixture.jar.block_use_without_item(host, &ctx).unwrap()
+    let outcome = fixture.jar.block_use_without_item(host, &ctx).unwrap();
+    // Every order click returns: what it did to the menus is only the whole story then.
+    assert_eq!(outcome.failure, None, "{:?}", outcome.unknown_host_calls);
+    outcome
 }
 
 fn opened_ids(outcome: &BlockUseOutcome) -> Vec<i32> {
@@ -1264,6 +1292,7 @@ fn open_menu_holds_one_menu_per_player_and_releases_it() {
         )
         .unwrap()
         .expect("menu 12 is held");
+    assert_eq!(closed.failure, None);
     assert_eq!(closed.container_id, 12);
     assert_eq!(
         closed.unknown_host_call_count, 0,
@@ -1516,11 +1545,17 @@ fn inherited_block_methods_follow_the_vanilla_declaring_class() {
     );
     let run = |host: &mut StdHost, id: &str, with_item: bool| {
         let ctx = default_context(id, BlockUseSide::Server, [3, 3, 3]);
-        if with_item {
+        let outcome = if with_item {
             fixture.jar.block_use_item_on(host, &ctx).unwrap()
         } else {
             fixture.jar.block_use_without_item(host, &ctx).unwrap()
-        }
+        };
+        assert_eq!(
+            outcome.failure, None,
+            "{id}: {:?}",
+            outcome.unknown_host_calls
+        );
+        outcome
     };
 
     // FurnaceBlock: `super.useItemOn` is BlockBehaviour's (answered); both getMenuProvider
@@ -1784,6 +1819,7 @@ fn a_removed_that_opens_a_menu_follows_vanillas_nested_close() {
     let mut player = BlockUsePlayerData::default();
 
     let first = use_block(&fixture, &mut host, "demo:reentrant_block", &player);
+    assert_eq!(first.failure, None, "{:?}", first.unknown_host_calls);
     assert_eq!(effect_trace(&first.menu_effects), ["O1"]);
     assert_eq!(nested_static(&host, "logJ"), 401);
 
@@ -1793,6 +1829,7 @@ fn a_removed_that_opens_a_menu_follows_vanillas_nested_close() {
     // `containerMenu = inventoryMenu` discards 2; then 3 is built and installed.
     player.container = PlayerContainer::Open(1);
     let second = use_block(&fixture, &mut host, "demo:plain_block", &player);
+    assert_eq!(second.failure, None, "{:?}", second.unknown_host_calls);
     assert_eq!(
         effect_trace(&second.menu_effects),
         ["C1", "C1", "O2", "X2", "O3"]
@@ -1810,6 +1847,7 @@ fn a_removed_that_opens_a_menu_follows_vanillas_nested_close() {
     // packet, the nested open's own close and open, and its menu discarded at offset 19.
     player.container = PlayerContainer::Open(3);
     let third = use_block(&fixture, &mut host, "demo:reentrant_block", &player);
+    assert_eq!(third.failure, None, "{:?}", third.unknown_host_calls);
     assert_eq!(effect_trace(&third.menu_effects), ["C3", "O4"]);
     assert_eq!(nested_static(&host, "logJ"), 301_102_103_203_404);
     let closed = fixture
@@ -1842,6 +1880,7 @@ fn a_removed_that_throws_leaves_its_menu_installed() {
     let mut player = BlockUsePlayerData::default();
 
     let first = use_block(&fixture, &mut host, "demo:throwing_block", &player);
+    assert_eq!(first.failure, None, "{:?}", first.unknown_host_calls);
     assert_eq!(effect_trace(&first.menu_effects), ["O1"]);
 
     // The throw escapes `openMenu` and the use: the close packet went out, nothing else ran.
@@ -1901,6 +1940,7 @@ fn a_removed_that_throws_leaves_its_menu_installed() {
     // and the next openMenu closes it again.
     player.container = PlayerContainer::Open(2);
     let throwing = use_block(&fixture, &mut host, "demo:throwing_block", &player);
+    assert_eq!(throwing.failure, None, "{:?}", throwing.unknown_host_calls);
     assert_eq!(effect_trace(&throwing.menu_effects), ["C2", "O3"]);
     let closed = fixture
         .jar
@@ -1925,6 +1965,7 @@ fn a_removed_that_throws_leaves_its_menu_installed() {
     assert_eq!(host.player_open_menu(1).map(|m| m.container_id), Some(3));
     player.container = PlayerContainer::Inventory;
     let again = use_block(&fixture, &mut host, "demo:catching_block", &player);
+    assert_eq!(again.failure, None, "{:?}", again.unknown_host_calls);
     assert_eq!(effect_trace(&again.menu_effects), ["C3"]);
     assert_eq!(nested_static(&host, "caughtI"), 2);
 

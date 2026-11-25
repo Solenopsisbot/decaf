@@ -42,6 +42,17 @@ struct LoadedJar {
     orderings: Vec<PhaseOrdering>,
 }
 
+impl LoadedJar {
+    /// The jar's row with its counted calls as its host has them now: the one counter every
+    /// counted call of this jar lands in, whichever bridge counted it.
+    fn synced_row(&self) -> Row {
+        let mut row = self.row.clone();
+        row.unknown_host_calls = self.host.unknown_host_call_count();
+        row.counted = self.host.unknown_host_calls().into_iter().collect();
+        row
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct StageCounts {
     attempted: usize,
@@ -66,6 +77,11 @@ struct Row {
     listeners: usize,
     unsupported: BTreeMap<String, usize>,
     refused_registrations: Vec<String>,
+    /// Every call the jar's host counted, by name (`unknown_host_calls` is their total): the
+    /// client entrypoints' and every bridge's since (the menu screen's
+    /// `sunrise#menu_screen:...` tags among them). Read from the host when the report is
+    /// written ([`LoadedJar::synced_row`]), so no call site can leave it behind.
+    counted: BTreeMap<String, usize>,
 }
 
 impl Row {
@@ -86,6 +102,7 @@ impl Row {
             "verdict": self.verdict,
             "host_calls": self.host_calls,
             "unknown_host_call_count": self.unknown_host_calls,
+            "counted": self.counted,
             "reason": self.reason,
             "client": {
                 "entrypoints_ran": self.entrypoints_ran,
@@ -232,7 +249,7 @@ impl State {
         self.retired
             .iter()
             .map(Row::json)
-            .chain(self.jars.iter().map(|jar| jar.row.json()))
+            .chain(self.jars.iter().map(|jar| jar.synced_row().json()))
             .chain(self.refused.iter().map(Row::json))
     }
 
@@ -506,7 +523,7 @@ impl State {
     /// until the next client setup so the final report can be rewritten after teardown.
     pub(crate) fn teardown(&mut self) -> usize {
         let mut rows = std::mem::take(&mut self.refused);
-        rows.extend(self.jars.drain(..).map(|jar| jar.row));
+        rows.extend(self.jars.drain(..).map(|jar| jar.synced_row()));
         let count = rows.len();
         self.retired.extend(rows);
         self.forget_menu_screen();

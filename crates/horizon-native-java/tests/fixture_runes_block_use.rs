@@ -63,6 +63,7 @@ fn run_runes_crafting_altar_test(jar_path: &str) {
     let item_on = jar
         .block_use_item_on(&mut host, &server_ctx)
         .expect("run useItemOn");
+    assert_eq!(item_on.failure, None);
     assert_eq!(
         item_on.unknown_host_call_count, 0,
         "unexpected unknowns in useItemOn: {:?}",
@@ -79,6 +80,7 @@ fn run_runes_crafting_altar_test(jar_path: &str) {
     let server = jar
         .block_use_without_item(&mut host, &server_ctx)
         .expect("run server useWithoutItem");
+    assert_eq!(server.failure, None);
     assert_eq!(
         server.unknown_host_calls,
         BTreeMap::from([(INIT_MENU.to_owned(), 1)]),
@@ -118,6 +120,7 @@ fn run_runes_crafting_altar_test(jar_path: &str) {
     let again = jar
         .block_use_without_item(&mut host, &showing)
         .expect("run second server useWithoutItem");
+    assert_eq!(again.failure, None);
     assert!(matches!(
         again.menu_effects.as_slice(),
         [MenuEffect::Closed { container_id: 1 }, MenuEffect::Opened(open)] if open.container_id == 2
@@ -136,6 +139,7 @@ fn run_runes_crafting_altar_test(jar_path: &str) {
     let client = jar
         .block_use_without_item(&mut host, &client_ctx)
         .expect("run client useWithoutItem");
+    assert_eq!(client.failure, None);
     assert_eq!(
         client.unknown_host_call_count, 0,
         "unexpected unknowns in client useWithoutItem: {:?}",

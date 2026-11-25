@@ -700,6 +700,7 @@ fn drag_over_both_inputs_counts_the_unknowable_order() {
                 .jar
                 .block_use_without_item(&mut host, &context)
                 .unwrap();
+            assert_eq!(opened.failure, None);
             let mut inventory = opened.inventory.unwrap();
             let mut player = player();
             player.container = PlayerContainer::Open(1);
@@ -730,6 +731,7 @@ fn drag_over_both_inputs_counts_the_unknowable_order() {
                     )
                     .unwrap()
                     .unwrap();
+                assert_eq!(outcome.failure, None, "slot {slot} button {button}");
                 inventory = outcome.inventory.clone().unwrap();
                 last = Some(outcome);
             }
