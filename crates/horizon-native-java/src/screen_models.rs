@@ -658,13 +658,25 @@ impl<H: Host> Runtime<'_, H> {
         let Some(host) = self.host.as_std_host() else {
             return Ok(None);
         };
-        if host.client.screen_menu_graph.is_empty() {
+        if host.client.screen_menu_graph.is_empty() && !host.client.screen_menu_graph_all {
             return Ok(None);
         }
         let Some(key) = crate::expect_ref(receiver) else {
             return Ok(None);
         };
-        if !host.client.screen_menu_graph.contains(key) {
+        let guarded = host.client.screen_menu_graph.contains(key)
+            || (host.client.screen_menu_graph_all
+                && matches!(
+                    host.menu_states.get(key),
+                    Some(
+                        crate::menu_models::Object::Menu(_)
+                            | crate::menu_models::Object::SlotList { .. }
+                            | crate::menu_models::Object::Slot(_)
+                            | crate::menu_models::Object::Container { .. }
+                            | crate::menu_models::Object::Inventory { .. }
+                    )
+                ));
+        if !guarded {
             return Ok(None);
         }
         let shape = matches!(
@@ -1007,52 +1019,18 @@ impl NativeJar {
             .client_menu_value_for_type(&menu_type)
             .ok_or_else(|| NativeError::Metadata("no constructed menu matches menu type".into()))?;
         let inventory = host.client_inventory_value();
-        let previous = host.client_active_screen_value();
-        let mut roots = vec![
-            menu_type.clone(),
-            constructor.clone(),
-            menu.clone(),
-            inventory.clone(),
-            title.clone(),
-        ];
-        if let Some(prev) = &previous {
-            roots.push(prev.clone());
-        }
-        // 26.3 order: `MenuScreens$ScreenConstructor.fromPacket` constructs the new screen
-        // first (offset 22); if construction throws or returns null, the previous active
-        // screen is left untouched. Only after non-null construction does `Gui.setScreen`
-        // run `prev.removed()` (offset 77), switch active screen (offset 220), then
-        // `added()` (offset 234) and `init(w, h)` (offsets 298-319).
-        let screen = self.with_persistent_runtime(host, &roots, |runtime| {
-            let screen = runtime.invoke_screen_constructor(
-                &constructor,
-                menu.clone(),
+        let screen = self.switch_client_screen(
+            host,
+            ScreenSwitch {
+                menu_type,
+                menu,
+                title,
+                constructor,
                 inventory,
-                title.clone(),
-            )?;
-            if matches!(screen, Value::Ref(None)) {
-                return Err(NativeError::Metadata(
-                    "MenuScreens constructor returned null".into(),
-                ));
-            }
-            if let Some(prev) = previous {
-                runtime.run_screen_removed(&prev)?;
-            }
-            runtime.host.set_client_active_screen_slot(
-                menu_type.clone(),
-                menu.clone(),
-                title.clone(),
-                [gui_w, gui_h],
-                screen.clone(),
-            );
-            runtime.run_screen_init(&screen, gui_w, gui_h)?;
-            Ok(screen)
-        })?;
-        // The previous screen's `removed()` has returned: only the new screen's menu is left.
-        if !host.client.screen_menus.is_empty() {
-            host.client.screen_menus.retain(|kept| *kept == menu);
-            host.refresh_client_screen_menu_graph();
-        }
+                gui_size: [gui_w, gui_h],
+                background: false,
+            },
+        )?;
         let layout = host.client_screen_layout(&screen).ok_or_else(|| {
             NativeError::Metadata("screen constructor did not initialize a container screen".into())
         })?;
@@ -1097,6 +1075,52 @@ impl NativeJar {
             })?;
             return Ok(host.client_draws()[before..].to_vec());
         }
+        self.switch_client_screen(
+            host,
+            ScreenSwitch {
+                menu_type,
+                menu,
+                title,
+                constructor,
+                inventory,
+                gui_size: [gui_w, gui_h],
+                background: true,
+            },
+        )?;
+        Ok(host.client_draws()[before..].to_vec())
+    }
+
+    /// `MenuScreens$ScreenConstructor.fromPacket` + `Gui.setScreen` for `switch`, with the
+    /// screen frames' guarded client menus (`ClientState::screen_menus`) and the active screen
+    /// left as vanilla leaves them on every exit, an exception included.
+    ///
+    /// 26.3 order: `fromPacket` constructs the new screen first (offset 22); if construction
+    /// throws or returns null, the previous screen is untouched. Then `Gui.setScreen` runs the
+    /// previous screen's `removed()` (offset 77), switches the screen (offset 220), and runs
+    /// `added()` (234) and `init(w, h)` (298-319). Neither has an exception table: an exception
+    /// leaves `Gui.screen` as far as it got and ends the packet's handling, which disconnects.
+    /// Decaf cannot disconnect, so a `removed()` or `init` that throws is counted
+    /// (`Gui.setScreen`); a construction that fails is the caller's to count.
+    fn switch_client_screen(
+        &self,
+        host: &mut StdHost,
+        switch: ScreenSwitch,
+    ) -> Result<Value, NativeError> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Stage {
+            Construct,
+            RemovePrevious,
+            Switched,
+        }
+        let ScreenSwitch {
+            menu_type,
+            menu,
+            title,
+            constructor,
+            inventory,
+            gui_size,
+            background,
+        } = switch;
         let previous = host.client_active_screen_value();
         let mut roots = vec![
             menu_type.clone(),
@@ -1108,7 +1132,8 @@ impl NativeJar {
         if let Some(prev) = &previous {
             roots.push(prev.clone());
         }
-        let _screen = self.with_persistent_runtime(host, &roots, |runtime| {
+        let mut stage = Stage::Construct;
+        let result = self.with_persistent_runtime(host, &roots, |runtime| {
             let screen = runtime.invoke_screen_constructor(
                 &constructor,
                 menu.clone(),
@@ -1120,6 +1145,7 @@ impl NativeJar {
                     "MenuScreens constructor returned null".into(),
                 ));
             }
+            stage = Stage::RemovePrevious;
             if let Some(prev) = previous {
                 runtime.run_screen_removed(&prev)?;
             }
@@ -1127,21 +1153,69 @@ impl NativeJar {
                 menu_type.clone(),
                 menu.clone(),
                 title.clone(),
-                [gui_w, gui_h],
+                gui_size,
                 screen.clone(),
             );
-            runtime.run_screen_init(&screen, gui_w, gui_h)?;
-            runtime.run_screen_extract_background(
-                &screen,
-                crate::game_object::client_value("client/gui-graphics".to_owned()),
-                0,
-                0,
-                0.0,
-            )?;
+            stage = Stage::Switched;
+            runtime.run_screen_init(&screen, gui_size[0], gui_size[1])?;
+            if background {
+                runtime.run_screen_extract_background(
+                    &screen,
+                    crate::game_object::client_value("client/gui-graphics".to_owned()),
+                    0,
+                    0,
+                    0.0,
+                )?;
+            }
             Ok(screen)
-        })?;
-        Ok(host.client_draws()[before..].to_vec())
+        });
+        let set_screen = MethodRef {
+            owner: "net/minecraft/client/gui/Gui".into(),
+            name: "setScreen".into(),
+            descriptor: "(Lnet/minecraft/client/gui/screens/Screen;)V".into(),
+        };
+        match (&result, stage) {
+            // The new screen never showed: its menu is no client's; the previous screen and
+            // its menu stay as they were.
+            (Err(_), Stage::Construct) => {
+                if host.client.screen_menus.contains(&menu) {
+                    host.client.screen_menus.retain(|kept| *kept != menu);
+                    host.refresh_client_screen_menu_graph();
+                }
+            }
+            // The previous screen's `removed()` threw: vanilla's `Gui.screen` is still that
+            // screen, its `removed()` already run, and the connection goes. No screen is left
+            // to draw here, and no menu to guard.
+            (Err(_), Stage::RemovePrevious) => {
+                let _ = host.unknown_host_call(&set_screen);
+                let _ = host.take_client_active_screen();
+                host.clear_client_screen_menus();
+            }
+            // Switched (a throwing `init` is counted as above): the previous screen's
+            // `removed()` has returned, so only the new screen's menu is left.
+            (result, _) => {
+                if result.is_err() {
+                    let _ = host.unknown_host_call(&set_screen);
+                }
+                if !host.client.screen_menus.is_empty() {
+                    host.client.screen_menus.retain(|kept| *kept == menu);
+                    host.refresh_client_screen_menu_graph();
+                }
+            }
+        }
+        result
     }
+}
+
+/// One screen switch's inputs (`NativeJar::switch_client_screen`).
+struct ScreenSwitch {
+    menu_type: Value,
+    menu: Value,
+    title: Value,
+    constructor: Value,
+    inventory: Value,
+    gui_size: [i32; 2],
+    background: bool,
 }
 
 impl NativeJar {

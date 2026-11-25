@@ -196,11 +196,14 @@ impl State {
         let (index, menu_type) = found?;
         // `Gui.setScreen` switches the previous screen out first; another jar's screen still
         // open is closed on its own host.
-        if let Some(previous) = self.screen.take()
+        if let Some(previous) = self.screen
             && previous.jar != index
-            && let Some(loaded) = self.jars.get_mut(previous.jar)
         {
-            close_on(loaded);
+            self.screen = None;
+            self.screen_layout = None;
+            if let Some(loaded) = self.jars.get_mut(previous.jar) {
+                close_on(loaded);
+            }
         }
         let player = host.local_player().map(|player| player.uuid());
         let loaded = &mut self.jars[index];
@@ -219,6 +222,7 @@ impl State {
         loaded
             .host
             .begin_client_frame(screen_frame(size, player), &[]);
+        let screen_before = loaded.host.client_active_screen_value();
         let built = build_screen(loaded, open, menu_type, title);
         loaded.host.end_client_frame();
         loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
@@ -230,6 +234,19 @@ impl State {
                     loaded.row.id,
                     open.menu
                 );
+                // Sunrise keeps its current window. Which Java screen is left:
+                // - the previous one, untouched (the new one failed to construct): keep it;
+                // - none (the previous one's `removed()` threw: the runtime ended it);
+                // - the new one, shown to no one (it switched in, then this bridge declined
+                //   it): switch it out with its `removed()`; the previous opening is over.
+                let now = loaded.host.client_active_screen_value();
+                if now != screen_before {
+                    if now.is_some() {
+                        close_on(loaded);
+                    }
+                    self.screen = None;
+                    self.screen_layout = None;
+                }
                 return None;
             }
         };

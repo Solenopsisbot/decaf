@@ -220,6 +220,9 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"cost\"), CostMenu.TYPE);\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"bare\"), BareMenu.TYPE);\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"peek\"), PeekMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"stash\"), StashMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"boom\"), BoomMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"sour\"), SourMenu.TYPE);\n\
            }\n\
          }",
     ),
@@ -410,6 +413,119 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
          }",
     ),
     (
+        "demo/StashMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.AbstractContainerMenu;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         public class StashMenu extends AbstractContainerMenu {\n\
+           public static final MenuType<StashMenu> TYPE = new MenuType<>(StashMenu::new, FeatureFlags.VANILLA_SET);\n\
+           public final Holder holder = new Holder();\n\
+           public StashMenu(int id, Inventory inventory) {\n\
+             super(TYPE, id);\n\
+             this.addSlot(new Slot(new SimpleContainer(1), 0, 80, 35));\n\
+             this.addStandardInventorySlots(inventory, 8, 84);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/BoomMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.AbstractContainerMenu;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         public class BoomMenu extends AbstractContainerMenu {\n\
+           public static final MenuType<BoomMenu> TYPE = new MenuType<>(BoomMenu::new, FeatureFlags.VANILLA_SET);\n\
+           \n\
+           public BoomMenu(int id, Inventory inventory) {\n\
+             super(TYPE, id);\n\
+             this.addSlot(new Slot(new SimpleContainer(1), 0, 80, 35));\n\
+             this.addStandardInventorySlots(inventory, 8, 84);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/SourMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.AbstractContainerMenu;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         public class SourMenu extends AbstractContainerMenu {\n\
+           public static final MenuType<SourMenu> TYPE = new MenuType<>(SourMenu::new, FeatureFlags.VANILLA_SET);\n\
+           \n\
+           public SourMenu(int id, Inventory inventory) {\n\
+             super(TYPE, id);\n\
+             this.addSlot(new Slot(new SimpleContainer(1), 0, 80, 35));\n\
+             this.addStandardInventorySlots(inventory, 8, 84);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/Holder.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         public class Holder {\n\
+           public final SimpleContainer[] boxes = { new SimpleContainer(1) };\n\
+         }",
+    ),
+    (
+        "demo/StashScreen.java",
+        "package demo;\n\
+         import net.minecraft.client.gui.GuiGraphicsExtractor;\n\
+         import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;\n\
+         import net.minecraft.client.renderer.RenderPipelines;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.resources.Identifier;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         public class StashScreen extends AbstractContainerScreen<StashMenu> {\n\
+           private static final Identifier TEXTURE = Identifier.fromNamespaceAndPath(\"demo\", \"textures/gui/stash.png\");\n\
+           public StashScreen(StashMenu menu, Inventory inventory, Component title) { super(menu, inventory, title); }\n\
+           @Override public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {\n\
+             super.extractBackground(graphics, mouseX, mouseY, partialTick);\n\
+             graphics.blit(RenderPipelines.GUI_TEXTURED, TEXTURE, this.leftPos, this.topPos, 0.0f, 0.0f, this.imageWidth, this.imageHeight, 256, 256);\n\
+             if (this.menu.holder.boxes[0].getItem(0).isEmpty()) graphics.fill(this.leftPos, this.topPos, this.leftPos + 4, this.topPos + 4, 0xFFFF0000);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/BoomScreen.java",
+        "package demo;\n\
+         import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         public class BoomScreen extends AbstractContainerScreen<BoomMenu> {\n\
+           public BoomScreen(BoomMenu menu, Inventory inventory, Component title) {\n\
+             super(menu, inventory, title);\n\
+             throw new IllegalStateException(\"boom\");\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/SourScreen.java",
+        "package demo;\n\
+         import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         public class SourScreen extends AbstractContainerScreen<SourMenu> {\n\
+           public static int removals;\n\
+           public SourScreen(SourMenu menu, Inventory inventory, Component title) { super(menu, inventory, title); }\n\
+           @Override public void removed() {\n\
+             super.removed();\n\
+             removals++;\n\
+             throw new IllegalStateException(\"sour\");\n\
+           }\n\
+         }",
+    ),
+    (
         "demo/ClientProbe.java",
         "package demo;\n\
          import net.fabricmc.api.ClientModInitializer;\n\
@@ -421,6 +537,9 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
              MenuScreens.register(CostMenu.TYPE, CostScreen::new);\n\
              MenuScreens.register(BareMenu.TYPE, BareScreen::new);\n\
              MenuScreens.register(PeekMenu.TYPE, PeekScreen::new);\n\
+             MenuScreens.register(StashMenu.TYPE, StashScreen::new);\n\
+             MenuScreens.register(BoomMenu.TYPE, BoomScreen::new);\n\
+             MenuScreens.register(SourMenu.TYPE, SourScreen::new);\n\
            }\n\
          }",
     ),
@@ -1028,6 +1147,128 @@ fn reads_in_removed_and_of_reused_containers_are_counted() {
                 ]
             );
         });
+    });
+}
+
+/// A container the menu keeps outside its slots, behind a jar object and an array
+/// (`menu.holder.boxes[0]`), is reached by the walk over the menu's fields: its read in
+/// `extractBackground` is counted, after the blit.
+#[test]
+fn a_container_outside_the_slots_is_counted() {
+    on_a_big_stack("menu-screen-stash", || {
+        with_client(screens_jar(), &["demo:stash"], |java| {
+            let before = counted(java);
+            let host = ScreenHost::new([640, 480], 2);
+            let title = Text::literal("Stash");
+            let (_, screen) =
+                mod_api::__private::create_menu_screen(&host, open(14, "demo:stash", &title, 1))
+                    .expect("the menu type has a screen factory");
+            let screen = screen.unwrap().expect("the Java screen opened");
+            let mut painted = Painted::default();
+            screen.draw(&host, frame([320, 240], [176, 166]), &mut painted);
+            assert_eq!(
+                painted.0,
+                vec![blit("demo:gui/stash", [72, 37], [176, 166])]
+            );
+            drop(screen);
+            assert_eq!(
+                counted_since(java, &before),
+                vec![
+                    (
+                        "net/minecraft/client/DeltaTracker#getGameTimeDeltaPartialTick(Z)F"
+                            .to_owned(),
+                        1
+                    ),
+                    (
+                        "net/minecraft/world/SimpleContainer#getItem(I)Lnet/minecraft/world/item/ItemStack;"
+                            .to_owned(),
+                        1
+                    ),
+                ]
+            );
+        });
+    });
+}
+
+/// A screen whose constructor throws never shows: vanilla's `fromPacket` throws before
+/// `Gui.setScreen`, so the bench screen already open stays the client's, still drawing, and
+/// its menu the guarded one. A screen whose `removed()` throws while another replaces it ends
+/// as vanilla's would: `Gui.screen` still that screen, its `removed()` run once, the switch
+/// counted (vanilla then disconnects). Nothing of it is left to draw or close, and the next
+/// opening starts fresh.
+#[test]
+fn a_screen_that_fails_to_construct_or_to_close_leaves_no_stale_state() {
+    on_a_big_stack("menu-screen-fail", || {
+        with_client(
+            screens_jar(),
+            &["demo:bench", "demo:boom", "demo:sour"],
+            |java| {
+                let before = counted(java);
+                let host = ScreenHost::new([640, 480], 2);
+                let title = Text::literal("Failing");
+                let open_as = |window, menu, backing| {
+                    mod_api::__private::create_menu_screen(
+                        &host,
+                        open(window, menu, &title, backing),
+                    )
+                    .expect("the menu type has a screen factory")
+                    .1
+                    .unwrap()
+                };
+                let bench_ops = |screen: &mod_api::__private::OwnedMenuScreen| {
+                    let mut painted = Painted::default();
+                    screen.draw(&host, frame([320, 240], [176, 166]), &mut painted);
+                    painted.0
+                };
+                let bench = open_as(20, "demo:bench", 3).expect("the bench screen opened");
+                assert!(open_as(21, "demo:boom", 1).is_none());
+                assert!(java.lock_client().menu_screen_open());
+                assert_eq!(
+                    bench_ops(&bench),
+                    vec![
+                        blit("demo:gui/bench", [72, 37], [176, 166]),
+                        GuiDraw::Fill {
+                            x0: 171,
+                            y0: 82,
+                            x1: 199,
+                            y1: 103,
+                            color: 0xFF8B_8B8B,
+                        },
+                    ]
+                );
+                drop(bench);
+                assert!(!java.lock_client().menu_screen_open());
+
+                let removals = |java: &HorizonJava| {
+                    java.lock_client()
+                        .static_value(0, "demo/SourScreen", "removalsI")
+                        .or(Some(crate::runtime::Value::Int(0)))
+                };
+                let sour = open_as(30, "demo:sour", 1).expect("the sour screen opened");
+                assert!(open_as(31, "demo:bench", 3).is_none());
+                assert!(!java.lock_client().menu_screen_open());
+                assert_eq!(removals(java), Some(crate::runtime::Value::Int(1)));
+                drop(sour);
+                assert_eq!(removals(java), Some(crate::runtime::Value::Int(1)));
+                let bench = open_as(32, "demo:bench", 3).expect("a fresh opening works");
+                assert!(java.lock_client().menu_screen_open());
+                drop(bench);
+                assert_eq!(
+                counted_since(java, &before),
+                vec![
+                    (
+                        "game-hook re-entry: sunrise#menu_screen:screen_not_built".to_owned(),
+                        2
+                    ),
+                    (
+                        "net/minecraft/client/gui/Gui#setScreen(Lnet/minecraft/client/gui/screens/Screen;)V"
+                            .to_owned(),
+                        1
+                    ),
+                ]
+            );
+            },
+        );
     });
 }
 
