@@ -15239,31 +15239,61 @@ impl Host for StdHost {
                     })?;
                 Ok(Value::Int(i32::from(unit)))
             }
-            ("java/lang/String", "toLowerCase", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
-                expect_string(receiver).to_ascii_lowercase(),
-            ))),
-            ("java/lang/String", "toUpperCase", "()Ljava/lang/String;") => Ok(Value::Ref(Some(
-                expect_string(receiver).to_ascii_uppercase(),
-            ))),
-            // The `Locale` overloads (`Locale.ROOT` in ids and file names): the
-            // root locale is Unicode's default case mapping, no locale tailoring.
-            // Java tailors Turkish, Azerbaijani and Lithuanian (`"I"` is `"ı"` in
-            // `tr`): those are counted.
+            // `String#toLowerCase`/`toUpperCase` without a `Locale`: Java 25's
+            // answer is the full Unicode mapping (`"ß".toUpperCase()` is
+            // `"SS"`, `"A\u03A3".toLowerCase()` is `"a\u03C2`) under the
+            // process default locale. This host models neither, and the
+            // player's default locale is not known here (the formatter counts
+            // what it can observe in the same way). Answer only an ASCII text
+            // whose folding no tailored default locale changes: Turkish and
+            // Azerbaijani map `I` to `\u0131` and `i` to `\u0130`, and
+            // Lithuanian only acts on a combining accent, which ASCII lacks.
+            // Count everything else instead of silently approximating it. A
+            // receiver that is a jar-object marker (`String#n`) or a host
+            // handle is not text and is counted too.
+            ("java/lang/String", "toLowerCase", "()Ljava/lang/String;")
+            | ("java/lang/String", "toUpperCase", "()Ljava/lang/String;") => {
+                if jar_object::spells_key(receiver) || matches!(receiver, Value::Host(_)) {
+                    return self.unknown_host_call(r);
+                }
+                let text = expect_string(receiver);
+                let upper = r.name == "toUpperCase";
+                if text.is_ascii() && !default_locale_changes_ascii_case(text, upper) {
+                    Ok(Value::Ref(Some(if upper {
+                        text.to_ascii_uppercase()
+                    } else {
+                        text.to_ascii_lowercase()
+                    })))
+                } else {
+                    self.unknown_host_call(r)
+                }
+            }
+            // The `Locale` overloads: ASCII folding is locale-independent, so an
+            // ASCII receiver answers for any locale Java does not tailor.
+            // Java tailors Turkish, Azerbaijani and Lithuanian, and its full
+            // Unicode mapping is not modelled here: a non-ASCII receiver, a
+            // tailored locale, or a null or unknown locale is counted, as is a
+            // receiver that is a jar-object marker or a host handle.
             (
                 "java/lang/String",
                 "toLowerCase" | "toUpperCase",
                 "(Ljava/util/Locale;)Ljava/lang/String;",
-            ) if args
-                .first()
-                .is_some_and(|locale| self.tailored_case_locale(locale)) =>
-            {
-                self.unknown_host_call(r)
-            }
-            ("java/lang/String", "toLowerCase", "(Ljava/util/Locale;)Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(expect_string(receiver).to_lowercase())))
-            }
-            ("java/lang/String", "toUpperCase", "(Ljava/util/Locale;)Ljava/lang/String;") => {
-                Ok(Value::Ref(Some(expect_string(receiver).to_uppercase())))
+            ) => {
+                if jar_object::spells_key(receiver) || matches!(receiver, Value::Host(_)) {
+                    return self.unknown_host_call(r);
+                }
+                let text = expect_string(receiver);
+                let locale = args.first();
+                if text.is_ascii()
+                    && matches!(locale, Some(locale) if self.untailored_case_locale(locale))
+                {
+                    Ok(Value::Ref(Some(match r.name.as_str() {
+                        "toLowerCase" => text.to_ascii_lowercase(),
+                        _ => text.to_ascii_uppercase(),
+                    })))
+                } else {
+                    self.unknown_host_call(r)
+                }
             }
             ("java/lang/String", "equals", "(Ljava/lang/Object;)Z") => {
                 let other = Self::argument(r, args, 0)?;
@@ -16561,6 +16591,14 @@ fn expect_ref(value: &Value) -> Option<&String> {
 
 fn expect_string(value: &Value) -> &str {
     expect_ref(value).map_or("", String::as_str)
+}
+
+/// Whether the process default locale can change the case mapping of an ASCII
+/// `text`: under `tr`/`az` the lowercase of `I` is `\u0131` and the uppercase of
+/// `i` is `\u0130`. No other ASCII letter maps differently in any locale Java
+/// tailors (`lt` acts on a following combining accent, never present in ASCII).
+fn default_locale_changes_ascii_case(text: &str, upper: bool) -> bool {
+    text.contains(if upper { 'i' } else { 'I' })
 }
 
 /// `java.io.File.hashCode` on Linux: `path.hashCode() ^ 1234321`.

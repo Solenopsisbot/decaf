@@ -73,9 +73,12 @@ pub(crate) fn locale_text(language: &str, country: &str) -> String {
 }
 
 impl StdHost {
-    /// Whether `locale` (a `Locale` handle or a jar's `new Locale`) is one whose case
-    /// mapping Java tailors (`ConditionalSpecialCasing`: `tr`, `az`, `lt`).
-    pub(crate) fn tailored_case_locale(&self, locale: &Value) -> bool {
+    /// Whether `locale` (a `Locale` handle or a jar's `new Locale`) is a locale
+    /// this model knows and whose case mapping Java does not tailor
+    /// (`ConditionalSpecialCasing`: `tr`, `az`, `lt`). A null, a value that is
+    /// no `Locale`, and a locale the model does not hold are not known: the
+    /// caller counts them (Java throws `NullPointerException` for a null).
+    pub(crate) fn untailored_case_locale(&self, locale: &Value) -> bool {
         let language = crate::runtime::host_jdk_constant::locale_parts(locale)
             .map(|(language, _)| language)
             .or_else(|| {
@@ -84,7 +87,7 @@ impl StdHost {
                     .get(marker)
                     .map(|(language, _)| language.as_str())
             });
-        matches!(language, Some("tr" | "az" | "lt"))
+        matches!(language, Some(language) if !matches!(language, "tr" | "az" | "lt"))
     }
 
     /// `java.util.Locale` construction and its identity/format queries.

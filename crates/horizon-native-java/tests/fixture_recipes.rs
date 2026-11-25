@@ -610,9 +610,11 @@ public final class AlloyRecipe implements Recipe<AlloyInput> {
       Codec.STRING.optionalFieldOf("label").xmap(
           opt -> {
             if (opt.isPresent()) labelXmapCalls++;
-            return opt.map(String::toUpperCase);
+            // `Locale.ROOT`: the no-argument forms use the default locale, which the
+            // runtime does not know and counts when `i`/`I` could map differently.
+            return opt.map(s -> s.toUpperCase(java.util.Locale.ROOT));
           },
-          opt -> opt.map(String::toLowerCase)).forGetter(r -> r.label),
+          opt -> opt.map(s -> s.toLowerCase(java.util.Locale.ROOT))).forGetter(r -> r.label),
       ExtraCodecs.intRange(1, 99).optionalFieldOf("weight", 1).forGetter(r -> r.weight)
   ).apply(i, (ci, b, c, r, t, l, w) -> {
     ctorCalls++;
