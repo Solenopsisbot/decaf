@@ -16,6 +16,9 @@ use super::*;
 pub(crate) enum SwitchLabel {
     Class(String),
     String(String),
+    /// A `String` label over a lone surrogate (`Cp::LossyString`): text no
+    /// value here equals, so testing the value against it is counted (#447).
+    LossyString,
     Int(i32),
 }
 
@@ -50,6 +53,7 @@ impl ClassFile {
                     Cp::Utf8(text) => Some(SwitchLabel::String(text.clone())),
                     _ => None,
                 },
+                Cp::LossyString => Some(SwitchLabel::LossyString),
                 Cp::Integer(value) => Some(SwitchLabel::Int(*value)),
                 _ => None,
             })
@@ -90,6 +94,13 @@ impl<H: Host> Runtime<'_, H> {
                 (SwitchLabel::Class(class), _) => self.switch_instance_of(value, class),
                 (SwitchLabel::String(text), _) => {
                     expect_ref(value).is_some_and(|marker| marker == text)
+                }
+                // Not answered: the label's text is not what Java compares
+                // with. Counted, and no match (the neutral answer).
+                (SwitchLabel::LossyString, _) => {
+                    self.host
+                        .unknown_operand_call(&crate::runtime::lossy_string_constant_call())?;
+                    false
                 }
                 (SwitchLabel::Int(expected), _) => boxed_int(value) == Some(*expected),
             };

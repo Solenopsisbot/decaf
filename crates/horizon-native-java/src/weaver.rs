@@ -4607,7 +4607,7 @@ fn constant_type(pool: &[Cp], index: u16) -> Result<ValueType, String> {
     Ok(match pool.get(index as usize) {
         Some(Cp::Integer(_)) => ValueType::Int,
         Some(Cp::Float(_)) => ValueType::Float,
-        Some(Cp::String(_)) => ValueType::Object("java/lang/String".to_owned()),
+        Some(Cp::String(_) | Cp::LossyString) => ValueType::Object("java/lang/String".to_owned()),
         Some(Cp::Class(_)) => ValueType::Object("java/lang/Class".to_owned()),
         Some(Cp::MethodType { .. }) => ValueType::Object("java/lang/invoke/MethodType".to_owned()),
         Some(Cp::MethodHandle { .. }) => {

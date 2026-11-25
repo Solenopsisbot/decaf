@@ -7,11 +7,25 @@
 //! `length` or comparison after it was wrong.
 //!
 //! The bytes decode to UTF-16 code units, which then become Rust text. A
-//! constant that holds a lone surrogate cannot be Rust text and keeps the old
-//! replacement-character reading, as do malformed bytes.
+//! constant that holds a lone surrogate cannot be Rust text, and neither can
+//! malformed bytes: each reads as U+FFFD, and [`Decoded::exact`] says so, so a
+//! `String` constant built from one is counted where it is used instead of
+//! passing for the text Java would have (#447).
+
+/// One `CONSTANT_Utf8_info` payload, read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Decoded {
+    /// The text. A lone surrogate half or a malformed byte is one U+FFFD.
+    pub(crate) text: String,
+    /// `false` when `text` is not what the bytes spell (a U+FFFD stands for a
+    /// lone surrogate or a malformed byte). A genuine U+FFFD in the bytes is
+    /// exact.
+    pub(crate) exact: bool,
+}
 
 /// Decode one `CONSTANT_Utf8_info` payload.
-pub(crate) fn decode(bytes: &[u8]) -> String {
+pub(crate) fn decode(bytes: &[u8]) -> Decoded {
+    let mut exact = true;
     let mut units: Vec<u16> = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
@@ -33,6 +47,7 @@ pub(crate) fn decode(bytes: &[u8]) -> String {
                     at += 2;
                 }
                 None => {
+                    exact = false;
                     units.push(0xFFFD);
                     at += 1;
                 }
@@ -43,6 +58,7 @@ pub(crate) fn decode(bytes: &[u8]) -> String {
                     at += 3;
                 }
                 _ => {
+                    exact = false;
                     units.push(0xFFFD);
                     at += 1;
                 }
@@ -50,17 +66,38 @@ pub(crate) fn decode(bytes: &[u8]) -> String {
             // Four-byte forms and stray continuation bytes are not modified
             // UTF-8.
             _ => {
+                exact = false;
                 units.push(0xFFFD);
                 at += 1;
             }
         }
     }
-    String::from_utf16(&units).unwrap_or_else(|_| String::from_utf16_lossy(&units))
+    match String::from_utf16(&units) {
+        Ok(text) => Decoded { text, exact },
+        Err(_) => Decoded {
+            text: String::from_utf16_lossy(&units),
+            exact: false,
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::decode;
+    use super::{Decoded, decode};
+
+    fn exact(text: &str) -> Decoded {
+        Decoded {
+            text: text.to_owned(),
+            exact: true,
+        }
+    }
+
+    fn lossy(text: &str) -> Decoded {
+        Decoded {
+            text: text.to_owned(),
+            exact: false,
+        }
+    }
 
     // The bytes are what `javac` writes for each literal (`javap -v` shows
     // them in the constant pool; `DataOutputStream.writeUTF` writes the same).
@@ -69,22 +106,42 @@ mod tests {
         // "ab😀" with U+1F600 as the pair D83D DE00, three bytes each.
         assert_eq!(
             decode(&[0x61, 0x62, 0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80]),
-            "ab\u{1F600}"
+            exact("ab\u{1F600}")
         );
         // "a\0b": NUL is C0 80.
-        assert_eq!(decode(&[0x61, 0xC0, 0x80, 0x62]), "a\u{0}b");
+        assert_eq!(decode(&[0x61, 0xC0, 0x80, 0x62]), exact("a\u{0}b"));
         // "é€": two- and three-byte forms, as in UTF-8.
-        assert_eq!(decode(&[0xC3, 0xA9, 0xE2, 0x82, 0xAC]), "é€");
+        assert_eq!(decode(&[0xC3, 0xA9, 0xE2, 0x82, 0xAC]), exact("é€"));
+    }
+
+    #[test]
+    fn a_genuine_replacement_character_is_exact() {
+        // "\ufffd" is EF BF BD, three bytes like any other BMP character.
+        assert_eq!(decode(&[0xEF, 0xBF, 0xBD]), exact("\u{FFFD}"));
     }
 
     #[test]
     fn a_lone_surrogate_or_malformed_byte_reads_as_a_replacement_character() {
         // A high surrogate with no low one after it.
-        assert_eq!(decode(&[0x78, 0xED, 0xA0, 0xBD]), "x\u{FFFD}");
+        assert_eq!(decode(&[0x78, 0xED, 0xA0, 0xBD]), lossy("x\u{FFFD}"));
+        // A low surrogate first, then a high one: two lone halves, not a pair.
+        assert_eq!(
+            decode(&[0xED, 0xB0, 0x80, 0xED, 0xA0, 0xBD]),
+            lossy("\u{FFFD}\u{FFFD}")
+        );
         // A four-byte UTF-8 form is not modified UTF-8.
         assert_eq!(
             decode(&[0xF0, 0x9F, 0x98, 0x80]),
-            "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"
+            lossy("\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}")
+        );
+    }
+
+    #[test]
+    fn a_pair_beside_a_lone_half_keeps_the_pair() {
+        // "\ud83d\ude00\ud83d": the pair stays one character, the last half is lost.
+        assert_eq!(
+            decode(&[0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80, 0xED, 0xA0, 0xBD]),
+            lossy("\u{1F600}\u{FFFD}")
         );
     }
 }

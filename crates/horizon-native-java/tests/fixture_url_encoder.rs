@@ -41,6 +41,12 @@ fn url_encoder_utf8_matches_java25() {
             &[],
             &mut counted_host,
         );
-        assert_eq!(counted_host.unknown_host_calls(), vec![(sig.into(), 1)]);
+        // `"\uD800"` is a `String` constant with a lone surrogate: its load is counted too (#447).
+        let mut expected = Vec::new();
+        if method == "loneSurrogate" {
+            expected.push(("java/lang/String#ldc()Ljava/lang/String;".into(), 1));
+        }
+        expected.push((sig.into(), 1));
+        assert_eq!(counted_host.unknown_host_calls(), expected);
     }
 }

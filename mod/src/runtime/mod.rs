@@ -21030,6 +21030,29 @@ impl ClassFile {
         interfaces
     }
 
+    /// Whether a `StringConcatFactory` call site's recipe or constants hold a
+    /// `Cp::LossyString`: its text cannot be joined as Java joins it (#447).
+    fn string_concat_is_lossy(&self, index: u16) -> bool {
+        let Some(Cp::InvokeDynamic { bootstrap, .. }) = self.pool.get(index as usize) else {
+            return false;
+        };
+        let Some(bootstrap) = self.bootstrap_methods.get(*bootstrap as usize) else {
+            return false;
+        };
+        let Some(Cp::MethodHandle {
+            reference_index, ..
+        }) = self.pool.get(bootstrap.method_ref as usize)
+        else {
+            return false;
+        };
+        self.method_ref(*reference_index)
+            .is_ok_and(|target| target.owner == "java/lang/invoke/StringConcatFactory")
+            && bootstrap
+                .arguments
+                .iter()
+                .any(|argument| matches!(self.pool.get(*argument as usize), Some(Cp::LossyString)))
+    }
+
     /// The recipe a `StringConcatFactory` call site joined its arguments with.
     ///
     /// `makeConcatWithConstants` keeps the recipe as the bootstrap's first
@@ -21089,6 +21112,12 @@ enum Cp {
     Double(f64),
     Class(u16),
     String(u16),
+    /// A `CONSTANT_String` over text Rust cannot hold: the `CONSTANT_Utf8` has
+    /// a lone surrogate (or a malformed byte), which reads as U+FFFD, so the
+    /// text is not what Java has (`hashCode`, `charAt`, `length`, `equals`
+    /// all differ). Every use of one is counted; it is never answered as the
+    /// replaced text (#447).
+    LossyString,
     FieldRef {
         class: u16,
         nt: u16,
@@ -29830,6 +29859,21 @@ impl<H: Host> Runtime<'_, H> {
         Ok(value)
     }
 
+    /// `ldc`/`ldc_w` of the constant at `pool[index]`.
+    ///
+    /// A `String` constant over a lone surrogate (`Cp::LossyString`) is text
+    /// a Rust `String` cannot hold, and U+FFFD is not what Java has: its
+    /// `hashCode`, `charAt`, `length` and `equals` all differ (#447). Each
+    /// load is counted as a `String.ldc` unknown call and answers a counted
+    /// `String`, which counts on every later use like the result of a counted
+    /// constructor (#423).
+    fn load_constant(&mut self, pool: &[Cp], index: u16) -> Result<Value, NativeError> {
+        if matches!(pool.get(index as usize), Some(Cp::LossyString)) {
+            return self.counted_unknown(&lossy_string_constant_call());
+        }
+        constant_value(pool, index)
+    }
+
     pub(crate) fn contains_counted_string_deep(&self, value: &Value) -> bool {
         fn visit<H: Host>(
             runtime: &Runtime<'_, H>,
@@ -38428,7 +38472,7 @@ impl<H: Host> Runtime<'_, H> {
                 0x12 => {
                     let i = *code.get(pc).ok_or(NativeError::Truncated)? as u16;
                     pc += 1;
-                    let value = constant_value(&file.pool, i)?;
+                    let value = self.load_constant(&file.pool, i)?;
                     if let Value::Ref(Some(text)) = &value
                         && matches!(file.pool.get(i as usize), Some(Cp::String(_)))
                     {
@@ -38438,7 +38482,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0x13 => {
                     let i = read_u16(code, &mut pc)?;
-                    let value = constant_value(&file.pool, i)?;
+                    let value = self.load_constant(&file.pool, i)?;
                     if let Value::Ref(Some(text)) = &value
                         && matches!(file.pool.get(i as usize), Some(Cp::String(_)))
                     {
@@ -40939,6 +40983,20 @@ impl<H: Host> Runtime<'_, H> {
                     // recipe's text instead of leaving an opaque marker: mods
                     // build keys, ids and exception messages through these
                     // sites, and a marker there is not the string Java returns.
+                    if file.string_concat_is_lossy(index) {
+                        // A lone surrogate in the recipe: the join is counted,
+                        // never made from U+FFFD.
+                        let counted = invoke_or_catch!(
+                            at,
+                            self.counted_unknown(&MethodRef {
+                                owner: "java/lang/invoke/StringConcatFactory".into(),
+                                name: "makeConcatWithConstants".into(),
+                                descriptor: descriptor.clone(),
+                            })
+                        );
+                        stack.push(counted);
+                        continue;
+                    }
                     if let Some((recipe, constants)) = file.string_concat_recipe(index) {
                         if let Some(answer) = invoke_or_catch!(
                             at,
@@ -41565,10 +41623,24 @@ fn constant_value(pool: &[Cp], index: u16) -> Result<Value, NativeError> {
             Some(Cp::Utf8(s)) => Ok(Value::Ref(Some(s.clone()))),
             x => Err(NativeError::InvalidConstant(index, format!("{x:?}"))),
         },
+        // Text Rust cannot hold: no value stands for it. The `ldc` sites count
+        // it and load a counted `String` (`Runtime::lossy_string_constant`);
+        // a read that has no host to count with refuses.
+        Some(Cp::LossyString) => Err(NativeError::UnknownHostCall(lossy_string_constant_call())),
         Some(Cp::Integer(v)) => Ok(Value::Int(*v)),
         Some(Cp::Float(v)) => Ok(Value::Float(f64::from(*v))),
         Some(Cp::Long(v)) => Ok(Value::Long(*v)),
         x => Err(NativeError::InvalidConstant(index, format!("{x:?}"))),
+    }
+}
+
+/// The call a `String` constant holding a lone surrogate is counted as, each
+/// time it is loaded (`Cp::LossyString`, #447).
+fn lossy_string_constant_call() -> MethodRef {
+    MethodRef {
+        owner: "java/lang/String".into(),
+        name: "ldc".into(),
+        descriptor: "()Ljava/lang/String;".into(),
     }
 }
 
@@ -42735,13 +42807,21 @@ fn required_from(
 fn read_pool(r: &mut Reader<'_>) -> Result<Vec<Cp>, NativeError> {
     let count = r.u2()? as usize;
     let mut pool = vec![Cp::Empty];
+    // `CONSTANT_Utf8` entries whose text is not what the bytes spell (a lone
+    // surrogate, a malformed byte): `Cp::String` constants over them become
+    // `Cp::LossyString` below (#447).
+    let mut inexact_utf8: Vec<u16> = Vec::new();
     let mut i = 1;
     while i < count {
         let tag = r.u1()?;
         let c = match tag {
             1 => {
                 let length = r.u2()? as usize;
-                Cp::Utf8(modified_utf8::decode(r.bytes(length)?))
+                let decoded = modified_utf8::decode(r.bytes(length)?);
+                if !decoded.exact {
+                    inexact_utf8.push(pool.len() as u16);
+                }
+                Cp::Utf8(decoded.text)
             }
             3 => Cp::Integer(r.u4()? as i32),
             7 => Cp::Class(r.u2()?),
@@ -42809,6 +42889,15 @@ fn read_pool(r: &mut Reader<'_>) -> Result<Vec<Cp>, NativeError> {
             i += 1;
         }
         i += 1;
+    }
+    if !inexact_utf8.is_empty() {
+        for constant in &mut pool {
+            if let Cp::String(text) = constant
+                && inexact_utf8.contains(text)
+            {
+                *constant = Cp::LossyString;
+            }
+        }
     }
     Ok(pool)
 }

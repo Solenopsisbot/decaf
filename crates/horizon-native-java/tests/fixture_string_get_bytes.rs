@@ -30,7 +30,9 @@ fn string_get_bytes_rows_match_java25() {
         }
     }
     // Each counted `getBytes` result then reaches the probe's `Arrays.toString`, which is counted
-    // too: its argument is an unknown, not an array.
+    // too: its argument is an unknown, not an array. The probe's `"a\uD800b"` constant is a
+    // `String` constant with a lone surrogate, so loading it (once, into the local `u`) is counted
+    // as `String#ldc` rather than read as `"a�b"` (#447).
     assert_eq!(
         host.unknown_host_calls(),
         vec![
@@ -38,6 +40,7 @@ fn string_get_bytes_rows_match_java25() {
                 "java/lang/String#getBytes(Ljava/nio/charset/Charset;)[B".into(),
                 COUNTED_ROWS.len()
             ),
+            ("java/lang/String#ldc()Ljava/lang/String;".into(), 1),
             (
                 "java/util/Arrays#toString([B)Ljava/lang/String;".into(),
                 COUNTED_ROWS.len()

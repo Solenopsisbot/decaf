@@ -75,8 +75,10 @@ const MAX_REFUSAL_CHARS: usize = 512;
 const MAX_INITIALIZED_SUPERINTERFACES: usize = 256;
 
 /// `(name, descriptor, value)` of every static field of a class file that has
-/// a `ConstantValue` attribute whose constant fits the field's type.
-fn static_constant_values(raw: &[u8]) -> Result<Vec<(String, String, Value)>, NativeError> {
+/// a `ConstantValue` attribute whose constant fits the field's type. The value
+/// is `None` for a `String` constant over a lone surrogate (`Cp::LossyString`,
+/// #447): the field has that constant, which no value here can stand for.
+fn static_constant_values(raw: &[u8]) -> Result<Vec<(String, String, Option<Value>)>, NativeError> {
     let mut reader = Reader::new(raw);
     reader.skip(8)?;
     let pool = read_pool(&mut reader)?;
@@ -96,8 +98,12 @@ fn static_constant_values(raw: &[u8]) -> Result<Vec<(String, String, Value)>, Na
                 continue;
             }
             let index = reader.u2()?;
-            if let Some(value) = constant_for_field(&pool, index, &descriptor) {
-                constants.push((name.clone(), descriptor.clone(), value));
+            if descriptor == "Ljava/lang/String;"
+                && matches!(pool.get(index as usize), Some(Cp::LossyString))
+            {
+                constants.push((name.clone(), descriptor.clone(), None));
+            } else if let Some(value) = constant_for_field(&pool, index, &descriptor) {
+                constants.push((name.clone(), descriptor.clone(), Some(value)));
             }
         }
     }
@@ -263,10 +269,19 @@ impl<H: Host> Runtime<'_, H> {
         if file.raw.is_empty() {
             return Ok(None);
         }
-        Ok(static_constant_values(&file.raw)?
+        match static_constant_values(&file.raw)?
             .into_iter()
             .find(|(field, desc, _)| field == name && desc == descriptor)
-            .map(|(_, _, value)| value))
+        {
+            Some((_, _, Some(value))) => Ok(Some(value)),
+            // javac inlines a constant variable, so only reflection or
+            // hand-made bytecode reads this one: refuse it by name rather
+            // than answer a `null` or the replaced text.
+            Some((_, _, None)) => Err(NativeError::UnknownHostCall(
+                crate::lossy_string_constant_call(),
+            )),
+            None => Ok(None),
+        }
     }
 
     /// The recorded cause of an erroneous class, or `None`.
