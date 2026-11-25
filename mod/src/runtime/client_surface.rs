@@ -920,6 +920,10 @@ pub(crate) struct ClientState {
     /// their contents is no fact: `Runtime::screen_menu_unsynced_call` counts it. The data
     /// slots are left out: the screen bridge writes Sunrise's synced values into them.
     pub(crate) screen_menu_graph: std::collections::BTreeSet<String>,
+    /// The client menus screen frames built whose screens have not been switched out yet: the
+    /// current one, and during a replacement the previous one too, until its `removed()` has
+    /// returned. `screen_menu_graph` is what is reachable from them.
+    pub(crate) screen_menus: Vec<Value>,
     /// The data values the bridge last wrote into the active client menu (`setData`), by
     /// data-slot index.
     pub(crate) screen_menu_data: Vec<Option<i32>>,
@@ -1442,9 +1446,52 @@ impl StdHost {
 
     /// Forget the active screen (`Gui.setScreen(null)` switching it out), returning it.
     pub(crate) fn take_client_active_screen(&mut self) -> Option<Value> {
+        self.client.active_screen.take().map(|active| active.screen)
+    }
+
+    /// Forget the screen frames' client menus (once their screens' `removed()` has run, or
+    /// when no Java runs any more: a world's objects forgotten).
+    pub(crate) fn clear_client_screen_menus(&mut self) {
+        self.client.screen_menus.clear();
         self.client.screen_menu_graph.clear();
         self.client.screen_menu_data.clear();
-        self.client.active_screen.take().map(|active| active.screen)
+    }
+
+    /// Rebuild `screen_menu_graph` from `screen_menus` by reachability: each menu, its slot
+    /// list, its slots, the containers they point at (whenever those were made: a container a
+    /// supplier reuses from an earlier opening or a static is no more synced than a new one),
+    /// and a combiner's input and result containers. Data slots are not followed: the bridge
+    /// writes the server's values into them.
+    pub(crate) fn refresh_client_screen_menu_graph(&mut self) {
+        use crate::runtime::menu_models::Object;
+        let states = &self.menu_states;
+        let mut graph = std::collections::BTreeSet::new();
+        for menu in &self.client.screen_menus {
+            let Some(key) = crate::runtime::expect_ref(menu) else {
+                continue;
+            };
+            graph.insert(key.clone());
+            let Some(Object::Menu(state)) = states.get(key) else {
+                continue;
+            };
+            if let Some(combiner) = &state.combiner {
+                graph.insert(combiner.input.clone());
+                graph.insert(combiner.result.clone());
+            }
+            graph.insert(state.slots.clone());
+            let Some(Object::SlotList { slots }) = states.get(&state.slots) else {
+                continue;
+            };
+            for slot in slots {
+                graph.insert(slot.clone());
+                if let Some(Object::Slot(slot)) = states.get(slot)
+                    && let Some(container) = crate::runtime::expect_ref(slot.container())
+                {
+                    graph.insert(container.clone());
+                }
+            }
+        }
+        self.client.screen_menu_graph = graph;
     }
 
     pub(crate) fn client_active_screen_value(&self) -> Option<Value> {

@@ -933,7 +933,6 @@ impl NativeJar {
         }
         let inventory = host.client_inventory_value();
         let screen_scope = host.client_screen_scope();
-        let before: std::collections::BTreeSet<String> = host.menu_states.keys().cloned().collect();
         let menu = self.with_persistent_runtime(
             host,
             &[menu_type.clone(), inventory.clone()],
@@ -957,15 +956,10 @@ impl NativeJar {
         // here on a read of them counts (`screen_menu_unsynced_call`). The data slots are synced
         // by the bridge (`sync_client_menu_data`).
         if screen_scope {
-            host.client.screen_menu_graph = host
-                .menu_states
-                .iter()
-                .filter(|(key, object)| {
-                    !before.contains(*key)
-                        && !matches!(object, crate::menu_models::Object::DataSlot { .. })
-                })
-                .map(|(key, _)| key.clone())
-                .collect();
+            // The previous screen's menu stays in until its `removed()` has run
+            // (`open_client_screen`), so a read there is still counted.
+            host.client.screen_menus.push(menu.clone());
+            host.refresh_client_screen_menu_graph();
             host.client.screen_menu_data.clear();
         }
         Ok(menu)
@@ -1054,6 +1048,11 @@ impl NativeJar {
             runtime.run_screen_init(&screen, gui_w, gui_h)?;
             Ok(screen)
         })?;
+        // The previous screen's `removed()` has returned: only the new screen's menu is left.
+        if !host.client.screen_menus.is_empty() {
+            host.client.screen_menus.retain(|kept| *kept == menu);
+            host.refresh_client_screen_menu_graph();
+        }
         let layout = host.client_screen_layout(&screen).ok_or_else(|| {
             NativeError::Metadata("screen constructor did not initialize a container screen".into())
         })?;
@@ -1161,6 +1160,7 @@ impl NativeJar {
         let screen = host
             .client_active_screen_value()
             .ok_or_else(|| NativeError::Metadata("no active client screen".into()))?;
+        host.refresh_client_screen_menu_graph();
         let mut counted = Vec::new();
         self.with_persistent_runtime(host, std::slice::from_ref(&screen), |runtime| {
             for (name, desc) in SUNRISE_SCREEN_METHODS {
@@ -1212,6 +1212,8 @@ impl NativeJar {
         let (menu_type, menu, title, size, screen) = host
             .client_active_screen()
             .ok_or_else(|| NativeError::Metadata("no active client screen".into()))?;
+        // A slot added since the last frame is reachable now.
+        host.refresh_client_screen_menu_graph();
         let resize = size != [gui_w, gui_h];
         if resize {
             host.set_client_active_screen(menu_type, menu, title, [gui_w, gui_h], screen.clone());
@@ -1414,13 +1416,18 @@ impl NativeJar {
     /// `removed()`: `ItemCombinerScreen` removes its slot listener, `AbstractContainerScreen`
     /// runs the client menu's `removed(player)`). False when no screen is active.
     pub fn close_active_client_screen(&self, host: &mut StdHost) -> Result<bool, NativeError> {
-        let Some(screen) = host.take_client_active_screen() else {
+        let Some(screen) = host.client_active_screen_value() else {
             return Ok(false);
         };
-        self.with_persistent_runtime(host, std::slice::from_ref(&screen), |runtime| {
+        // `removed()` runs while the screen and its menu are still the client's (`Gui.setScreen`
+        // offset 77, before the switch at 220): a read of the menu there is still counted.
+        let result = self.with_persistent_runtime(host, std::slice::from_ref(&screen), |runtime| {
             runtime.run_screen_removed(&screen)?;
             Ok(Value::Void)
-        })?;
+        });
+        let _ = host.take_client_active_screen();
+        host.clear_client_screen_menus();
+        result?;
         Ok(true)
     }
 }

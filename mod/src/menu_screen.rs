@@ -275,8 +275,10 @@ impl State {
                 .jar
                 .draw_active_client_screen(&mut loaded.host, frame.pointer, None);
         // Sunrise draws the in-game backdrop under every mod screen; vanilla draws it only when
-        // the screen's `extractBackground` chain reaches `Screen.extractBackground`.
-        if result.is_ok() && !loaded.host.client_screen_backdrop_ran() {
+        // the screen's `extractBackground` chain reaches `Screen.extractBackground`. Decided
+        // whatever the frame's result: a chain stopped by a counted call before `super` never
+        // reached it either.
+        if !loaded.host.client_screen_backdrop_ran() {
             loaded.host.note_unknown_game_hook(
                 "sunrise#menu_screen:backdrop_without_Screen.extractBackground",
             );

@@ -219,6 +219,7 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"shelf\"), ShelfMenu.TYPE);\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"cost\"), CostMenu.TYPE);\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"bare\"), BareMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"peek\"), PeekMenu.TYPE);\n\
            }\n\
          }",
     ),
@@ -370,6 +371,45 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
          }",
     ),
     (
+        "demo/PeekMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.AbstractContainerMenu;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         public class PeekMenu extends AbstractContainerMenu {\n\
+           public static final MenuType<PeekMenu> TYPE = new MenuType<>(PeekMenu::new, FeatureFlags.VANILLA_SET);\n\
+           public static final SimpleContainer SHARED = new SimpleContainer(1);\n\
+           public final Slot first;\n\
+           public PeekMenu(int id, Inventory inventory) {\n\
+             super(TYPE, id);\n\
+             this.first = this.addSlot(new Slot(SHARED, 0, 80, 35));\n\
+             this.addStandardInventorySlots(inventory, 8, 84);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/PeekScreen.java",
+        "package demo;\n\
+         import net.minecraft.client.gui.GuiGraphicsExtractor;\n\
+         import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         public class PeekScreen extends AbstractContainerScreen<PeekMenu> {\n\
+           public PeekScreen(PeekMenu menu, Inventory inventory, Component title) { super(menu, inventory, title); }\n\
+           @Override public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {\n\
+             if (PeekMenu.SHARED.getItem(0).isEmpty()) graphics.fill(this.leftPos, this.topPos, this.leftPos + 4, this.topPos + 4, 0xFFFF0000);\n\
+             super.extractBackground(graphics, mouseX, mouseY, partialTick);\n\
+           }\n\
+           @Override public void removed() {\n\
+             super.removed();\n\
+             this.menu.first.getItem();\n\
+           }\n\
+         }",
+    ),
+    (
         "demo/ClientProbe.java",
         "package demo;\n\
          import net.fabricmc.api.ClientModInitializer;\n\
@@ -380,6 +420,7 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
              MenuScreens.register(ShelfMenu.TYPE, ShelfScreen::new);\n\
              MenuScreens.register(CostMenu.TYPE, CostScreen::new);\n\
              MenuScreens.register(BareMenu.TYPE, BareScreen::new);\n\
+             MenuScreens.register(PeekMenu.TYPE, PeekScreen::new);\n\
            }\n\
          }",
     ),
@@ -437,6 +478,7 @@ const SCREEN_STUBS: &[(&str, &str)] = &[
            public final Container container; public final int x, y;\n\
            public Slot(Container container, int index, int x, int y) { this.container = container; this.x = x; this.y = y; }\n\
            public net.minecraft.resources.Identifier getNoItemIcon() { return null; }\n\
+           public net.minecraft.world.item.ItemStack getItem() { return null; }\n\
          }",
     ),
     (
@@ -907,6 +949,79 @@ fn a_background_without_super_and_a_label_moved_by_init_are_counted() {
                     ),
                     (
                         "net/minecraft/client/DeltaTracker#getGameTimeDeltaPartialTick(Z)F"
+                            .to_owned(),
+                        2
+                    ),
+                ]
+            );
+        });
+    });
+}
+
+/// The client menu's contents stay counted through a whole opening: a container a supplier
+/// reuses (a `static` one, made at the first opening) is as unsynced at the second; a read in
+/// `removed()` happens before the menu stops being the client's, on the window's close and on
+/// a replacement by another screen. `PeekScreen` reads before `super.extractBackground`, so the
+/// counted read also leaves vanilla's backdrop unreached: counted too.
+#[test]
+fn reads_in_removed_and_of_reused_containers_are_counted() {
+    on_a_big_stack("menu-screen-peek", || {
+        with_client(screens_jar(), &["demo:peek", "demo:bench"], |java| {
+            let before = counted(java);
+            let host = ScreenHost::new([640, 480], 2);
+            let title = Text::literal("Peek");
+            let peek = |window| {
+                mod_api::__private::create_menu_screen(&host, open(window, "demo:peek", &title, 1))
+                    .expect("the menu type has a screen factory")
+                    .1
+                    .unwrap()
+                    .expect("the Java screen opened")
+            };
+            let draw = |screen: &mod_api::__private::OwnedMenuScreen| {
+                let mut painted = Painted::default();
+                screen.draw(&host, frame([320, 240], [176, 166]), &mut painted);
+                painted.0
+            };
+            // First opening: the read stops the frame before anything is drawn; the window's
+            // close runs `removed()`, whose slot read counts.
+            let first = peek(11);
+            assert_eq!(draw(&first), Vec::new());
+            drop(first);
+            // Second opening: `SHARED` was made by the first, and is still counted.
+            let second = peek(12);
+            assert_eq!(draw(&second), Vec::new());
+            // Another screen replaces it: the second's `removed()` runs first, and counts.
+            let bench_title = Text::translate("container.demo.bench", Vec::new());
+            let bench = mod_api::__private::create_menu_screen(
+                &host,
+                open(13, "demo:bench", &bench_title, 3),
+            )
+            .expect("the menu type has a screen factory")
+            .1
+            .unwrap()
+            .expect("the bench screen opened");
+            drop(second);
+            drop(bench);
+            assert_eq!(
+                counted_since(java, &before),
+                vec![
+                    (
+                        "game-hook re-entry: sunrise#menu_screen:backdrop_without_Screen.extractBackground"
+                            .to_owned(),
+                        2
+                    ),
+                    (
+                        "net/minecraft/client/DeltaTracker#getGameTimeDeltaPartialTick(Z)F"
+                            .to_owned(),
+                        2
+                    ),
+                    (
+                        "net/minecraft/world/SimpleContainer#getItem(I)Lnet/minecraft/world/item/ItemStack;"
+                            .to_owned(),
+                        2
+                    ),
+                    (
+                        "net/minecraft/world/inventory/Slot#getItem()Lnet/minecraft/world/item/ItemStack;"
                             .to_owned(),
                         2
                     ),

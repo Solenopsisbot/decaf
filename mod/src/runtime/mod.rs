@@ -4674,6 +4674,7 @@ impl StdHost {
         self.initialized_game_mixins.clear();
         // A client screen belongs to the world it opened in: never carry it into the next.
         let _ = self.take_client_active_screen();
+        self.clear_client_screen_menus();
     }
 
     /// Make an unmodeled host call fail instead of returning its neutral Java
