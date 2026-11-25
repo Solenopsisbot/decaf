@@ -384,6 +384,11 @@ pub(crate) struct ActiveBlockUse {
     pub(crate) facts: Option<crate::runtime::live_menu::MenuPlayerFacts>,
     /// The live-menu effects this call recorded, in order.
     pub(crate) live_effects: Vec<crate::runtime::live_menu::LiveMenuEffect>,
+    /// The exception `AbstractContainerMenu.clicked`'s handler last wrapped into its
+    /// `ReportedException("Container click")` in this call, as the error that reached it:
+    /// vanilla's `ReportedException.getCause()`. Java sees only the wrapper; the embedder's
+    /// failure line names both, so a click that threw says why (`live_menu.rs`).
+    pub(crate) wrapped_click_cause: Option<String>,
 }
 
 /// One `ServerPlayer` object's menu state, as Decaf models it (#629 review P1 1 and 2).
@@ -2656,6 +2661,7 @@ impl NativeJar {
             menu_effects: Vec::new(),
             facts: None,
             live_effects: Vec::new(),
+            wrapped_click_cause: None,
         });
         host.mark_close_sent();
         let roots = vec![level, player_value.clone(), player_inventory, menu];
@@ -2743,6 +2749,7 @@ impl NativeJar {
             menu_effects: Vec::new(),
             facts: facts.clone(),
             live_effects: Vec::new(),
+            wrapped_click_cause: None,
         });
 
         let roots = vec![

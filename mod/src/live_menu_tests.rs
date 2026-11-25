@@ -35,7 +35,7 @@ use mod_api::{
 use mod_api::{EntityTickListenedEvent, EntityTickPostEvent, EntityTickPreEvent, Players};
 use zip::write::SimpleFileOptions;
 
-use crate::block_use::JavaBlockUsePart;
+use crate::block_use::{FailedCall, JavaBlockUsePart};
 use crate::live_menu::JavaMenuPart;
 use crate::runtime::{NativeJar, StdHost};
 use crate::{HorizonJava, LoadedJar, State};
@@ -490,8 +490,79 @@ impl mod_api::prelude::EntitiesHost for MenuTestHost {
 }
 mod_api::impl_host_areas!(
     MenuTestHost,
-    except(block_states, entities, items, keys, living, players, text)
+    except(
+        block_states,
+        config,
+        entities,
+        items,
+        keys,
+        living,
+        players,
+        text
+    )
 );
+
+/// The mod's `config/` folder as the server-stop report writes it: written, then read back
+/// from the rows ([`report_row`]), so its bytes are dropped.
+struct DiscardedReport;
+impl mod_api::ConfigFiles for DiscardedReport {
+    fn read(&self, _file: &mod_api::ConfigPath) -> Result<Vec<u8>, mod_api::ConfigFileError> {
+        Err(mod_api::ConfigFileError::NotFound)
+    }
+    fn write(
+        &self,
+        _file: &mod_api::ConfigPath,
+        _bytes: &[u8],
+    ) -> Result<(), mod_api::ConfigFileError> {
+        Ok(())
+    }
+    fn list(
+        &self,
+        _folder: &mod_api::ConfigPath,
+        _after: Option<&str>,
+        _limit: u32,
+    ) -> Result<Vec<mod_api::ConfigEntry>, mod_api::ConfigFileError> {
+        Ok(Vec::new())
+    }
+    fn stat(
+        &self,
+        _path: &mod_api::ConfigPath,
+    ) -> Result<Option<mod_api::ConfigStat>, mod_api::ConfigFileError> {
+        Ok(None)
+    }
+    fn remove(&self, _file: &mod_api::ConfigPath) -> Result<bool, mod_api::ConfigFileError> {
+        Ok(false)
+    }
+}
+static DISCARDED_REPORT: DiscardedReport = DiscardedReport;
+
+impl mod_api::prelude::ConfigHost for MenuTestHost {
+    fn dist(&self) -> mod_api::Dist {
+        mod_api::Dist::Client
+    }
+    fn game_version(&self) -> &'static str {
+        "26.3"
+    }
+    fn on(&self, _mod_id: &str) -> bool {
+        true
+    }
+    fn setting(&self, _mod_id: &str, _key: &str) -> Option<String> {
+        None
+    }
+    fn set_setting(&self, _mod_id: &str, _key: &str, _value: &str) {}
+    fn config_files(&self) -> &'static dyn mod_api::ConfigFiles {
+        &DISCARDED_REPORT
+    }
+    fn dimension(&self) -> &'static str {
+        "minecraft:overworld"
+    }
+    fn server_has_time(&self) -> bool {
+        true
+    }
+    fn instance_dir(&self) -> PathBuf {
+        PathBuf::from("live-menu-test-instance")
+    }
+}
 
 impl ServerHost for MenuTestHost {
     fn backend_mut(&mut self) -> Option<mod_api::BackendMutRef<'_>> {
@@ -1005,6 +1076,9 @@ impl Hooks for BridgeMod {
     fn player_tick_post(&self, host: HostSide<'_>, event: &mut PlayerTickPostEvent) {
         Hooks::player_tick_post(&*self.java, host, event);
     }
+    fn server_stopping(&self, host: &mut dyn ServerHost, event: &mut mod_api::ServerStoppingEvent) {
+        Hooks::server_stopping(&*self.java, host, event);
+    }
 }
 
 /// A jar run the way this mod runs one, held by a fresh `HorizonJava` whose player logged in.
@@ -1019,12 +1093,18 @@ fn java_with(jar: Arc<NativeJar>) -> Arc<HorizonJava> {
     // The player joined: their `ServerPlayer` is session 1, life 0.
     host.server_player_created(UUID, 1, 0);
     let java = Arc::new(HorizonJava::default());
+    // A jar whose entrypoints ran clean: its start is over, so what it counts from here is the
+    // bridge's.
+    let mut row = crate::JarRow::refused("fixture.jar", "fixture".to_owned(), String::new());
+    row.verdict = "ran-clean";
+    row.reason = None;
+    row.start_counting(&host);
     {
         let mut state: std::sync::MutexGuard<'_, State> = java.state.lock().unwrap();
         state.loaded = true;
         state.lives.insert(UUID, (1, 0));
         state.jars.push(LoadedJar {
-            row: crate::JarRow::refused("fixture.jar", "fixture".to_owned(), String::new()),
+            row,
             jar,
             host,
             listeners: Vec::new(),
@@ -1054,6 +1134,33 @@ fn with_bridge(java: &Arc<HorizonJava>, menus: &'static [&'static str], run: imp
         mod_api::__private::part_tests::install_parts_fixture(&mods).expect("install the parts");
         run();
     });
+    // Every Java failure is one the test asserted and took ([`take_failures`]): a failed call
+    // still moves items, so a test that reads only the items would pass with Java throwing.
+    assert_eq!(
+        take_failures(java),
+        [],
+        "a Java call failed that the test never examined"
+    );
+}
+
+/// The jar's failed block-use and live-menu calls so far, each with the counted calls the same
+/// call made (`block_use::Tally::failures`), taken: [`with_bridge`] fails a test that leaves
+/// any unexamined.
+fn take_failures(java: &HorizonJava) -> Vec<FailedCall> {
+    let mut state: std::sync::MutexGuard<'_, State> = java.state.lock().unwrap();
+    std::mem::take(&mut state.jars[0].row.block_use.failures)
+}
+
+/// The game stops the server: Sunrise's `server_stopping` dispatch reaches the mod, which logs
+/// each jar's line and rewrites its report from the rows.
+fn stop_server(host: &mut MenuTestHost) {
+    mod_api::dispatch_server_stopping(host, false);
+}
+
+/// What the mod's report says of the jar, as the game's `server_stopping` left it.
+fn report_row(java: &HorizonJava) -> serde_json::Value {
+    let state: std::sync::MutexGuard<'_, State> = java.state.lock().unwrap();
+    crate::report_json(&state, &java.lock_client())["jars"][0].clone()
 }
 
 /// The jar's counted calls and hooks so far, by name.
@@ -1943,6 +2050,63 @@ fn javac_bench_menu_opens_clicks_takes_and_closes_through_the_sunrise_hooks() {
     });
 }
 
+/// BUGS-3d34 #3: a counted call of a bridge (here the live menu's `Slot.onTake` tag) reaches the
+/// jar's log line and its report by name through the game's own `server_stopping`, the summary
+/// stops reading `ran-clean`, and the next server counts only its own calls.
+#[test]
+fn a_bridges_counted_call_reaches_the_jars_line_and_report() {
+    on_a_big_stack("live-menu-counted-report", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        let java = java_with(jar);
+        // This server is the process's first, and it has started.
+        java.state.lock().unwrap().servers_started = 1;
+        with_bridge(&java, BENCH_MENUS, || {
+            let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+            open_bench(&java, &mut host);
+            stop_server(&mut host);
+            let row = report_row(&java);
+            assert_eq!(row["summary"], "ran-clean");
+            assert_eq!(row["counted"]["since_start_count"], 0);
+
+            // One cobblestone into the base, the shards shift-clicked in, the result taken.
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            assert!(host.click(0, 1, 0));
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            assert!(host.click(hotbar(3, 1), 0, 1));
+            assert!(host.click(2, 0, 0));
+            assert_eq!(host.cursor(), "4 minecraft:stone_bricks");
+            assert_eq!(counted(&java), [(SLOT_TAKE.to_owned(), 1)]);
+
+            stop_server(&mut host);
+            let row = report_row(&java);
+            assert_eq!(row["verdict"], "ran-clean");
+            assert_eq!(row["summary"], "ran-clean, 1 counted call since start");
+            assert_eq!(row["unknown_host_call_count"], 0, "the start's");
+            assert_eq!(row["counted"]["at_start"], serde_json::json!({}));
+            assert_eq!(
+                row["counted"]["since_start"],
+                serde_json::json!({ SLOT_TAKE: 1 })
+            );
+            assert_eq!(row["counted"]["since_start_count"], 1);
+            let line = java.state.lock().unwrap().jars[0].row.to_string();
+            assert_eq!(
+                line,
+                format!(
+                    "fixture.jar (fixture) ran-clean, 1 counted call since start (0 host calls, \
+                     0 unknown host calls; counted since start: {SLOT_TAKE} x1)"
+                )
+            );
+
+            // The next server counts from its own start.
+            java.state.lock().unwrap().reset_server();
+            stop_server(&mut host);
+            let row = report_row(&java);
+            assert_eq!(row["summary"], "ran-clean");
+            assert_eq!(row["counted"]["since_start"], serde_json::json!({}));
+        });
+    });
+}
+
 /// `ServerPlayer.tick`'s check runs at `entity_tick_pre`, before `gameMode.tick`; a block change
 /// at the menu's position during the player's tick (a delayed break) is one that vanilla's
 /// check would have seen there: counted. `doTick`'s check, after it, closes the menu.
@@ -2158,6 +2322,59 @@ fn a_disconnect_or_a_death_drops_what_the_menu_held() {
                 );
             });
         }
+    });
+}
+
+/// A logout drops the inputs in the menu's slot order (BUGS-3d34 #4). In 26.3,
+/// `ServerGamePacketListenerImpl.removePlayerFromWorld` runs `ServerPlayer.disconnect` (setting
+/// `disconnected`) and then `PlayerList.remove`, which saves the player (offset 14) before
+/// `removePlayerImmediately` (115) reaches `Player.remove` → `doCloseContainer` →
+/// `containerMenu.removed`. There `dropOrPlaceInInventory` sees `hasDisconnected()` and throws
+/// each stack (`ServerPlayer.drop(stack, false, SERVER_ONLY)`): nothing goes back into the
+/// inventory, and `clearContainer` walks the container's slots in order, so slot 0's stack lands
+/// in the world first. Which slot the player's rejoin pickup puts them in is the world's
+/// (its entity order and pickup), not this bridge's.
+#[test]
+fn a_disconnect_drops_the_inputs_in_slot_order() {
+    on_a_big_stack("live-menu-disconnect-order", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        let java = java_with(jar);
+        with_bridge(&java, BENCH_MENUS, || {
+            let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+            open_bench(&java, &mut host);
+            // One cobblestone into the base (slot 0), the shards into the addition (slot 1),
+            // the rest of the cobblestone back into the inventory.
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            assert!(host.click(0, 1, 0));
+            assert!(host.click(hotbar(3, 0), 0, 0));
+            assert!(host.click(hotbar(3, 1), 0, 1));
+            assert_eq!(host.cursor(), "empty");
+            host.tick();
+            host.disconnect();
+            assert_eq!(held_window(&java), None);
+            let spawned: Vec<String> = host
+                .world
+                .spawned
+                .iter()
+                .map(|(stack, _)| host.text(&Some(stack.clone())))
+                .collect();
+            assert_eq!(
+                spawned,
+                ["1 minecraft:cobblestone", "3 minecraft:amethyst_shard"]
+            );
+            assert!(host.world.drops.is_empty());
+            assert_eq!(
+                counted(&java),
+                [
+                    ("game-hook re-entry: sunrise#live_menu:drop".to_owned(), 2),
+                    (
+                        "game-hook re-entry: sunrise#live_menu:drop_without_player_throw"
+                            .to_owned(),
+                        2
+                    ),
+                ]
+            );
+        });
     });
 }
 
@@ -2458,6 +2675,10 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             // live stream, lent for the call, answers it. `RecipeCraftingHolder.awardUsedRecipes`'
             // `RECIPE_CRAFTED` trigger has no Sunrise call (vanilla triggers aren't lent), and
             // the take's `menu_slot_take` is the engine's to raise: both counted.
+            //
+            // With `getRandom()` answered, `onTake` runs to its end (no `NullPointerException` at
+            // +89, no `ReportedException`): the sound plays and `onPlayedRuneCraftingSound` runs.
+            assert_eq!(take_failures(&java), []);
             assert_eq!(
                 taken,
                 [
@@ -2468,8 +2689,6 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
                     ),
                 ]
             );
-            let failed = java.state.lock().unwrap().jars[0].row.block_use.uses_failed;
-            assert_eq!(failed, 0, "every Java call of the altar finished");
             // The sound went out on Sunrise once, seeded from the server's sound-seed stream,
             // at the player, with the volume drawn from the lent `Level.random` (its first draw:
             // nothing earlier in this session drew it).
@@ -2514,6 +2733,19 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             );
             assert_eq!(held_window(&java), None);
             assert_eq!(counted(&java), taken, "the close counted nothing more");
+
+            // The game stops the server: the jar's line and report say what the session leaned
+            // on (BUGS-3d34 #3: they read `ran-clean`, 0 unknown host calls).
+            stop_server(&mut host);
+            let row = report_row(&java);
+            assert_eq!(row["summary"], "ran-clean, 2 counted calls since start");
+            assert_eq!(
+                row["counted"]["since_start"],
+                serde_json::json!({
+                    SLOT_TAKE: 1,
+                    "game-hook re-entry: sunrise#live_menu:recipe_crafted_trigger": 1,
+                })
+            );
         });
     });
 }

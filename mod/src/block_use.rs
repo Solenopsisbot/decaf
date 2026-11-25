@@ -41,9 +41,52 @@ pub(crate) struct Tally {
     pub(crate) refusals: BTreeMap<String, usize>,
     /// Live-menu calls (clicks, ticks, validity checks, closes) run on a held Java menu.
     pub(crate) menu_calls: usize,
+    /// What the failed calls `uses_failed` counts said, distinct ones only (at most
+    /// [`MAX_FAILURE_ROWS`], as `refusals` keeps its reasons).
+    pub(crate) failures: Vec<FailedCall>,
+}
+
+/// The most distinct failures a [`Tally`] keeps; further ones are still in `uses_failed`.
+const MAX_FAILURE_ROWS: usize = 32;
+
+/// A block-use or live-menu call that failed: its failure line, and the unmodelled host calls
+/// the same call made before it failed (by name). A failure after a counted call may be that
+/// call's placeholder answer at work: Runes' `onTake` throws a `NullPointerException` on the
+/// `null` the counted `Level#getRandom()` answers, which vanilla's real `RandomSource` never
+/// does. So a failure is reported with them, never on its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FailedCall {
+    pub(crate) failure: String,
+    pub(crate) counted: BTreeMap<String, usize>,
+    /// How many calls failed this way.
+    pub(crate) times: usize,
 }
 
 impl Tally {
+    /// Count one failed call (`uses_failed`) and keep what it said with the counted calls it
+    /// made: the same failure after the same counted calls is one row.
+    pub(crate) fn note_failure(
+        &mut self,
+        failure: impl Into<String>,
+        counted: &BTreeMap<String, usize>,
+    ) {
+        self.uses_failed += 1;
+        let failure = failure.into();
+        if let Some(row) = self
+            .failures
+            .iter_mut()
+            .find(|row| row.failure == failure && row.counted == *counted)
+        {
+            row.times += 1;
+        } else if self.failures.len() < MAX_FAILURE_ROWS {
+            self.failures.push(FailedCall {
+                failure,
+                counted: counted.clone(),
+                times: 1,
+            });
+        }
+    }
+
     pub(crate) fn note_refusal(&mut self, reason: impl Into<String>) {
         self.menus_refused += 1;
         let reason = reason.into();
@@ -61,6 +104,11 @@ impl Tally {
             "menus_refused": self.menus_refused,
             "refusals": self.refusals,
             "menu_calls": self.menu_calls,
+            "failures": self.failures.iter().map(|row| json!({
+                "failure": row.failure,
+                "counted": row.counted,
+                "times": row.times,
+            })).collect::<Vec<_>>(),
         })
     }
 }
@@ -155,7 +203,10 @@ impl JavaBlockUsePart {
                 if let Some(failure) = &outcome.failure {
                     // The hook threw (vanilla's use would fail too); what it did to menus before
                     // that went out above.
-                    jar.row.block_use.uses_failed += 1;
+                    jar.row.block_use.note_failure(
+                        format!("{hook_name}: {failure}"),
+                        &outcome.unknown_host_calls,
+                    );
                     log::warn!(
                         "{LOG}: {}: {} {} failed: {failure}",
                         jar.row.id,
@@ -197,7 +248,9 @@ impl JavaBlockUsePart {
                             "{}: {} returned null or unmodelled InteractionResult",
                             self.block_id, hook_name
                         );
-                        jar.row.block_use.uses_failed += 1;
+                        jar.row
+                            .block_use
+                            .note_failure(reason.clone(), &outcome.unknown_host_calls);
                         jar.host
                             .note_unknown_game_hook("block-use:unmodelled-interaction-result");
                         log::warn!("{LOG}: {}: {reason}", jar.row.id);
@@ -206,7 +259,9 @@ impl JavaBlockUsePart {
                 }
             }
             Err(error) => {
-                jar.row.block_use.uses_failed += 1;
+                jar.row
+                    .block_use
+                    .note_failure(format!("{hook_name}: {error}"), &BTreeMap::new());
                 log::warn!(
                     "{LOG}: {}: {} {} {error}",
                     jar.row.id,
@@ -914,7 +969,10 @@ fn run_menu_closes(
                 if let Some(failure) = &outcome.failure {
                     // Vanilla's `handleContainerClose` would throw too; the menu stays
                     // installed, and the player's next `openMenu` closes it again.
-                    jar.row.block_use.uses_failed += 1;
+                    jar.row.block_use.note_failure(
+                        format!("menu close: {failure}"),
+                        &outcome.unknown_host_calls,
+                    );
                     log::warn!(
                         "{LOG}: {}: closing menu {window} threw: {failure}",
                         jar.row.id
@@ -929,14 +987,18 @@ fn run_menu_closes(
             }
             Ok(Ok(None)) => {}
             Ok(Err(error)) => {
-                jar.row.block_use.uses_failed += 1;
+                jar.row
+                    .block_use
+                    .note_failure(format!("menu close: {error}"), &BTreeMap::new());
                 log::warn!(
                     "{LOG}: {}: closing menu {window} failed: {error}",
                     jar.row.id
                 );
             }
             Err(panic) => {
-                jar.row.block_use.uses_failed += 1;
+                jar.row
+                    .block_use
+                    .note_failure(format!("menu close: panicked: {panic}"), &BTreeMap::new());
                 log::warn!(
                     "{LOG}: {}: closing menu {window} panicked: {panic}",
                     jar.row.id
