@@ -656,12 +656,16 @@ pub(crate) fn prepare(
         Ok(Ok(Some(outcome))) => outcome,
         Ok(Ok(None)) => return None,
         Ok(Err(error)) => {
-            jar.row.block_use.uses_failed += 1;
+            jar.row
+                .block_use
+                .note_failure(format!("menu call: {error}"), &BTreeMap::new());
             log::warn!("{LOG}: {}: menu {window} call failed: {error}", jar.row.id);
             return None;
         }
         Err(panic) => {
-            jar.row.block_use.uses_failed += 1;
+            jar.row
+                .block_use
+                .note_failure(format!("menu call: panicked: {panic}"), &BTreeMap::new());
             log::warn!(
                 "{LOG}: {}: menu {window} call panicked: {panic}",
                 jar.row.id
@@ -1287,8 +1291,12 @@ pub(crate) fn record(state: &mut State, prepared: Prepared, applied: Applied) {
     }
     if let Some(failure) = &prepared.failure {
         // Vanilla's handler would throw too (`ReportedException("Container click")`); what the
-        // Java menu did before it is mirrored all the same.
-        jar.row.block_use.uses_failed += 1;
+        // Java menu did before it is mirrored all the same. The counted calls it made are
+        // reported with it: one may have steered it.
+        jar.row.block_use.note_failure(
+            format!("menu call: {failure}"),
+            &prepared.unknown_host_calls,
+        );
         log::warn!(
             "{LOG}: {}: menu {} call threw: {failure}",
             jar.row.id,

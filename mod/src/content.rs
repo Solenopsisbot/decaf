@@ -786,6 +786,8 @@ impl LoadedJar {
         self.row.verdict = verdict;
         self.row.unknown_host_calls = unknown;
         self.row.reason = reason;
+        // The loading stages were the last of the jar's start.
+        self.row.start_counting(&self.host);
         if changed {
             log::info!("{LOG}: after the loading stages: {}", self.row);
         }

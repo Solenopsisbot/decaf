@@ -431,6 +431,9 @@ struct State {
     /// The world folder and registries the host gives (`server_facts.rs`), read at
     /// `server_about_to_start` and again as each level loads.
     server: Arc<ServerFacts>,
+    /// Servers this process has started ([`State::reset_server`]): the first keeps the counted
+    /// calls made since the jars' start, a later one counts from its own start.
+    servers_started: u32,
 }
 
 /// What one game event's listeners decided, for the hook that fired it.
@@ -763,15 +766,13 @@ impl Hooks for HorizonJava {
                 .count()
         };
         let total = state.jars.len() + state.refused.len();
-        match write_report(host, &state, &self.lock_client()) {
+        let [clean, hollow, partial, refused] =
+            ["ran-clean", "ran-hollow", "ran-partial", "refused"].map(count);
+        match write_report(host, &mut state, &self.lock_client()) {
             Ok(path) => log::info!(
-                "{LOG} {}: server about to start (dedicated={}); {total} jar(s) in config/{JARS}: {} ran-clean, {} ran-hollow, {} ran-partial, {} refused; report in {path}",
+                "{LOG} {}: server about to start (dedicated={}); {total} jar(s) in config/{JARS}: {clean} ran-clean, {hollow} ran-hollow, {partial} ran-partial, {refused} refused; report in {path}",
                 env!("CARGO_PKG_VERSION"),
                 event.dedicated,
-                count("ran-clean"),
-                count("ran-hollow"),
-                count("ran-partial"),
-                count("refused"),
             ),
             Err(error) => log::warn!(
                 "{LOG}: server about to start (dedicated={}), {total} jar(s) ran, but {REPORT} could not be written: {error}",
@@ -833,13 +834,15 @@ impl Hooks for HorizonJava {
         self.game_hooks(Some(&mut *host), "server_stopping", |state| {
             Some((Some(GameObject::server(state.dedicated)), Vec::new()))
         });
-        let state = self.lock();
+        let mut state = self.lock();
         // One line per jar with the counts the report now holds: the report is the authority, but
-        // the log must never make a jar with failing listeners look like a clean one.
+        // the log must never make a jar with failing listeners, or one that leaned on a counted
+        // call since its start, look like a clean one.
+        state.sync_counted();
         for row in state.rows() {
             log::info!("{LOG}: {row}");
         }
-        if let Err(error) = write_report(host, &state, &self.lock_client()) {
+        if let Err(error) = write_report(host, &mut state, &self.lock_client()) {
             log::warn!("{LOG}: {REPORT} could not be updated at server stopping: {error}");
         }
     }
@@ -1945,10 +1948,10 @@ impl HorizonJava {
     }
 
     fn on_client_stopping(&self, host: &mut dyn ClientHost) {
-        let state = self.lock();
+        let mut state = self.lock();
         let mut client = self.lock_client();
         let rows = client.report_rows().count();
-        if let Err(error) = write_report(host, &state, &client) {
+        if let Err(error) = write_report(host, &mut state, &client) {
             log::warn!("{LOG}: {REPORT} could not be flushed at client stopping: {error}");
         }
         let dropped = client.teardown();
@@ -3337,10 +3340,30 @@ impl State {
             .chain(self.refused.iter())
     }
 
+    /// Bring each run jar's [`JarRow::counted_since_start`] up to date from its host, the one
+    /// counter every counted call lands in: the runtime's unmodelled host calls (entrypoints,
+    /// listeners, commands, game hooks, block uses, live menus, placements) and each bridge's
+    /// `note_unknown_game_hook` tag (`sunrise#live_menu:menu_slot_take_not_dispatched`, ...).
+    /// The log line and the report read the row, so both call this first.
+    fn sync_counted(&mut self) {
+        for jar in &mut self.jars {
+            jar.row.counted_since_start = counted_since(&jar.host, &jar.row.counted_baseline);
+        }
+    }
+
     /// Counters are per server: the jars ran once at the content phase, and a second world this
     /// process hosts starts its own report with zero callbacks and commands.
     fn reset_server(&mut self) {
+        let later_server = self.servers_started > 0;
+        self.servers_started = self.servers_started.saturating_add(1);
         for jar in &mut self.jars {
+            // A later server's report counts only its own calls; the first one's counts every
+            // call since the jar's start (nothing runs Java between the two but the game's
+            // content and command registration, whose calls belong in this report).
+            if later_server {
+                jar.row.counted_baseline = counted_by_name(&jar.host);
+            }
+            jar.row.counted_since_start.clear();
             jar.row.callbacks_ran = 0;
             jar.row.callbacks_failed = 0;
             jar.row.callback_unknown_host_calls = 0;
@@ -3405,9 +3428,42 @@ struct JarRow {
     game_hooks: game_hooks::Tally,
     /// Block-use hooks (`use_item_on` / `use_without_item`) and `openMenu` bridge outcomes (`block_use.rs`).
     block_use: block_use::Tally,
+    /// The jar host's counted calls by name when its start finished (`unknown_host_calls` is
+    /// their total): what the verdict read.
+    counted_at_start: BTreeMap<String, usize>,
+    /// The host's counted calls by name the current server counts from: the start's, or a later
+    /// server's own start ([`State::reset_server`]).
+    counted_baseline: BTreeMap<String, usize>,
+    /// Every call counted since then, by name ([`State::sync_counted`]): the bridges' too,
+    /// whose own tallies (`block_use`, `callbacks`) count only some.
+    counted_since_start: BTreeMap<String, usize>,
+}
+
+/// A host's counted calls by name.
+fn counted_by_name(host: &StdHost) -> BTreeMap<String, usize> {
+    host.unknown_host_calls().into_iter().collect()
+}
+
+/// The calls `host` counted since `baseline` (a snapshot of [`counted_by_name`]), by name.
+fn counted_since(host: &StdHost, baseline: &BTreeMap<String, usize>) -> BTreeMap<String, usize> {
+    host.unknown_host_calls()
+        .into_iter()
+        .filter_map(|(name, count)| {
+            let since = count.saturating_sub(baseline.get(&name).copied().unwrap_or(0));
+            (since > 0).then_some((name, since))
+        })
+        .collect()
 }
 
 impl JarRow {
+    /// The jar's start is over (its entrypoints, then its loading stages): what its host counted
+    /// so far is the start's, and the first server counts from here.
+    pub(crate) fn start_counting(&mut self, host: &StdHost) {
+        self.counted_at_start = counted_by_name(host);
+        self.counted_baseline = self.counted_at_start.clone();
+        self.counted_since_start.clear();
+    }
+
     fn refused(file: &str, id: String, reason: String) -> Self {
         Self {
             file: file.to_owned(),
@@ -3431,6 +3487,9 @@ impl JarRow {
             content_skipped: BTreeMap::new(),
             game_hooks: game_hooks::Tally::default(),
             block_use: block_use::Tally::default(),
+            counted_at_start: BTreeMap::new(),
+            counted_baseline: BTreeMap::new(),
+            counted_since_start: BTreeMap::new(),
         }
     }
 
@@ -3438,17 +3497,41 @@ impl JarRow {
     /// the entrypoint's (Fabric's and NeoForge's own loaders do not fail a load for a listener
     /// that throws); the summary is what the log line and the report show, so a jar with failing
     /// listeners never reads as an unqualified clean run.
+    ///
+    /// A failed block use or live-menu call, and any call counted since the start (a bridge's
+    /// tag or an unmodelled host call: a live menu's `Level#getRandom()`), qualify it the same
+    /// way, so a jar that leaned on something it couldn't know never reads `ran-clean` alone.
     fn summary(&self) -> String {
-        if self.callbacks_failed == 0 {
-            return self.verdict.to_owned();
-        }
-        let failures = self.callbacks_failed;
-        let noun = if failures == 1 {
-            "listener failure"
-        } else {
-            "listener failures"
+        let plural = |count: usize, one: &str, many: &str| {
+            format!("{count} {}", if count == 1 { one } else { many })
         };
-        format!("{}, {failures} {noun}", self.verdict)
+        let mut summary = self.verdict.to_owned();
+        if self.callbacks_failed > 0 {
+            summary.push_str(", ");
+            summary.push_str(&plural(
+                self.callbacks_failed,
+                "listener failure",
+                "listener failures",
+            ));
+        }
+        if self.block_use.uses_failed > 0 {
+            summary.push_str(", ");
+            summary.push_str(&plural(
+                self.block_use.uses_failed,
+                "block-use/menu failure",
+                "block-use/menu failures",
+            ));
+        }
+        let counted: usize = self.counted_since_start.values().sum();
+        if counted > 0 {
+            summary.push_str(", ");
+            summary.push_str(&plural(
+                counted,
+                "counted call since start",
+                "counted calls since start",
+            ));
+        }
+        summary
     }
 
     fn json(&self) -> serde_json::Value {
@@ -3477,6 +3560,13 @@ impl JarRow {
             "entity_interact_try_empty_hand": self.entity_interact_try_empty_hand,
             "game_hooks": self.game_hooks.json(),
             "block_use": self.block_use.json(),
+            // By name: the start's (`unknown_host_call_count` above is their total) and every
+            // one since, whichever bridge or runtime path counted it.
+            "counted": {
+                "at_start": self.counted_at_start,
+                "since_start": self.counted_since_start,
+                "since_start_count": self.counted_since_start.values().sum::<usize>(),
+            },
             "content": {
                 "blocks": self.content_blocks,
                 "items": self.content_items,
@@ -3501,6 +3591,13 @@ impl std::fmt::Display for JarRow {
         )?;
         if let Some(reason) = &self.reason {
             write!(f, ", reason: {reason}")?;
+        }
+        if !self.counted_since_start.is_empty() {
+            f.write_str("; counted since start:")?;
+            for (index, (name, count)) in self.counted_since_start.iter().enumerate() {
+                let separator = if index == 0 { " " } else { ", " };
+                write!(f, "{separator}{name} x{count}")?;
+            }
         }
         f.write_str(")")
     }
@@ -3647,6 +3744,9 @@ fn load_jar(
             content_skipped: BTreeMap::new(),
             game_hooks: game_hooks::Tally::default(),
             block_use: block_use::Tally::default(),
+            counted_at_start: BTreeMap::new(),
+            counted_baseline: BTreeMap::new(),
+            counted_since_start: BTreeMap::new(),
         });
     }
     let unknown = host.unknown_host_call_count();
@@ -3678,6 +3778,9 @@ fn load_jar(
             content_skipped: BTreeMap::new(),
             game_hooks: game_hooks::Tally::default(),
             block_use: block_use::Tally::default(),
+            counted_at_start: BTreeMap::new(),
+            counted_baseline: BTreeMap::new(),
+            counted_since_start: BTreeMap::new(),
         },
         jar,
         host,
@@ -3693,6 +3796,7 @@ fn load_jar(
     })
     .map(|mut loaded| {
         loaded.row.game_hooks = tally;
+        loaded.row.start_counting(&loaded.host);
         loaded
     })
 }
@@ -3724,10 +3828,11 @@ fn report_json(state: &State, client: &client::State) -> serde_json::Value {
 
 fn write_report(
     host: &dyn Host,
-    state: &State,
+    state: &mut State,
     client: &client::State,
 ) -> Result<String, ConfigFileError> {
     let path = ConfigPath::new(REPORT)?;
+    state.sync_counted();
     let report = report_json(state, client);
     let mut bytes = serde_json::to_vec_pretty(&report).unwrap_or_default();
     bytes.push(b'\n');
