@@ -1198,6 +1198,7 @@ impl Hooks for HorizonJava {
             &mut *host,
             event.player,
             live_menu::Removal::Disconnected,
+            None,
         );
         // The leaver's last entry, taken before the refresh drops them (or kept by an earlier
         // refresh that already did): the same `ServerPlayer`.
@@ -1283,12 +1284,18 @@ impl Hooks for HorizonJava {
     fn player_clone(&self, host: &mut dyn ServerHost, event: &mut PlayerCloneEvent<'_>) {
         // The old `ServerPlayer` goes (`Player.remove`: `KILLED` after a death, the End's return
         // a dimension change): a Java menu still held for it closes first (`live_menu.rs`).
-        let removal = if event.was_death {
-            live_menu::Removal::Killed
+        // A death's close drops at the old player (`event.original`: Sunrise's handle names the
+        // new one); the End's return places back into the new player's inventory.
+        let (removal, original) = if event.was_death {
+            let original = event
+                .original
+                .level()
+                .map(|level| (level, event.original.position()));
+            (live_menu::Removal::Killed, original)
         } else {
-            live_menu::Removal::Live
+            (live_menu::Removal::Live, None)
         };
-        live_menu::close_for_removal(self, &mut *host, event.player, removal);
+        live_menu::close_for_removal(self, &mut *host, event.player, removal, original);
         // `PlayerList.respawn` built a new `ServerPlayer` with the old id: its life.
         self.next_life(event.player, false);
         // The old player is lent for this hook (`getOriginal()`); its reads need no host.

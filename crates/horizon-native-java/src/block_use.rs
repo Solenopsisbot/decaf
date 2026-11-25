@@ -420,6 +420,9 @@ pub(crate) struct BlockUseHostState {
     /// Each player's current `ServerPlayer` object's menu state, by UUID. At most one entry
     /// (and so at most one held menu) per player: a newer object's entry replaces an older's.
     pub(crate) players: BTreeMap<u128, PlayerMenus>,
+    /// The slots whose jar `Slot.onTake` override is running, so its `super.onTake` isn't told
+    /// as a second take (`live_menu::note_take`).
+    pub(crate) taking: Vec<Value>,
     pub(crate) next_id: u64,
     /// What the embedder told Decaf of each player for their next block use
     /// ([`StdHost::set_player_menu_facts`]).
@@ -505,6 +508,9 @@ impl BlockUseHostState {
         }
         // A held menu (`PlayerMenus::open`) is kept through `StdHost::retain`, so only the
         // running call's own values are roots here.
+        for slot in &self.taking {
+            push_val(slot, out);
+        }
         if let Some(active) = &self.active_use {
             push_val(&active.level, out);
             if let Some((state, _)) = &active.block {

@@ -94,15 +94,15 @@ pub(crate) struct Bridge {
     seen: BTreeMap<u128, Seen>,
     /// Each jar's menu types as it declares them, by jar id then menu type id.
     layouts: BTreeMap<String, BTreeMap<String, Result<MenuLayout, String>>>,
-    /// The block each player's `ServerPlayer.tick` check saw at `entity_tick_pre`.
-    tick_blocks: BTreeMap<u128, Option<String>>,
+    /// What each player's `ServerPlayer.tick` check read at `entity_tick_pre`.
+    tick_facts: BTreeMap<u128, TickFacts>,
 }
 
 impl Bridge {
     /// A new server: its players are new, and so are their positions.
     pub(crate) fn reset_server(&mut self) {
         self.seen.clear();
-        self.tick_blocks.clear();
+        self.tick_facts.clear();
     }
 }
 
@@ -190,6 +190,7 @@ impl MenuPart for JavaMenuPart {
                 event.uuid,
                 event.window,
                 Call::Click(click),
+                None,
             )
         };
         let Some(prepared) = prepared else {
@@ -309,6 +310,11 @@ pub(crate) struct Prepared {
     pub(crate) failure: Option<String>,
     /// Where the player was, for a drop Sunrise has no player to make.
     pub(crate) seen: Option<Seen>,
+    /// Whether the player can throw a drop themselves (`drop_stack`): alive and on the server.
+    /// A dead or departed player's drop is spawned where they were instead (counted).
+    pub(crate) throws_from_player: bool,
+    /// The menus this call opened, checked against their types (`opening_check`).
+    pub(crate) openings: Vec<block_use::Opening>,
 }
 
 /// What carrying out a [`Prepared`] on Sunrise did.
@@ -434,15 +440,21 @@ pub(crate) fn read_player(
     }
 }
 
-/// A player Sunrise no longer has (they left), as the bridge last read them: removed and
-/// disconnected, with no inventory to read (a disconnect drops what the close hands back).
-fn departed_read(seen: &Seen, uuid: u128, incarnation: Option<(u32, u32)>) -> PlayerRead {
+/// A player whose `ServerPlayer` is gone (they left, or a respawn replaced the dead one), as
+/// last seen: removed (and disconnected, for a disconnect), with no inventory to read (such a
+/// close drops what it hands back).
+fn departed_read(
+    seen: &Seen,
+    uuid: u128,
+    incarnation: Option<(u32, u32)>,
+    removal: Removal,
+) -> PlayerRead {
     PlayerRead {
         facts: MenuPlayerFacts {
             eye_position: seen.eye,
             position: seen.position,
-            removed: true,
-            disconnected: true,
+            removed: removal != Removal::Live,
+            disconnected: removal == Removal::Disconnected,
             carried: Some(StdHost::empty_item_stack()),
             ..MenuPlayerFacts::default()
         },
@@ -477,6 +489,7 @@ pub(crate) fn prepare(
     uuid: u128,
     window: i32,
     call: Call,
+    departed: Option<Seen>,
 ) -> Option<Prepared> {
     let jar_index = state.jars.iter().position(|jar| {
         jar.host
@@ -488,7 +501,12 @@ pub(crate) fn prepare(
         .host
         .player_open_menu(uuid)?
         .access_pos;
+    let gone = departed.is_some() || host.player(uuid).is_none();
     let read = match (host.player(uuid), &call) {
+        // The old `ServerPlayer` of a respawn, where it was (`event.original`).
+        (_, Call::Close(removal)) if departed.is_some() => {
+            departed_read(departed.as_ref()?, uuid, incarnation, *removal)
+        }
         (Some(player), _) => {
             let jar = &mut state.jars[jar_index];
             // `ServerPlayer.containerCounter` is Sunrise's, read fresh: whatever opened since
@@ -528,8 +546,8 @@ pub(crate) fn prepare(
             }
             read
         }
-        (None, Call::Close(_)) => match state.live_menus.seen.get(&uuid) {
-            Some(seen) => departed_read(seen, uuid, incarnation),
+        (None, Call::Close(removal)) => match state.live_menus.seen.get(&uuid) {
+            Some(seen) => departed_read(seen, uuid, incarnation, *removal),
             None => {
                 state.jars[jar_index]
                     .host
@@ -612,6 +630,13 @@ pub(crate) fn prepare(
             return None;
         }
     };
+    // A menu this call opened (a click's, or a `removed` that opens another) is checked before
+    // its window opens, as a block use's is, with the initial data its `initMenu` sent.
+    let opening_effects = outcome
+        .menu_effects
+        .iter()
+        .any(|effect| matches!(effect, MenuEffect::Opened(_)))
+        .then(|| outcome.effects.clone());
     let mut prepared = mirror(
         jar,
         host,
@@ -623,6 +648,14 @@ pub(crate) fn prepare(
         owned_slots,
     );
     prepared.seen = read.seen;
+    prepared.throws_from_player = !gone
+        && !read.facts.dead
+        && !matches!(call, Call::Close(Removal::Killed | Removal::Disconnected));
+    if let Some(effects) = opening_effects {
+        prepared.openings = opening_check(state, jar_index, uuid, &effects)
+            .into_iter()
+            .collect();
+    }
     Some(prepared)
 }
 
@@ -768,6 +801,8 @@ fn mirror(
         unknown_host_call_count: outcome.unknown_host_call_count,
         failure: outcome.failure,
         seen: None,
+        throws_from_player: true,
+        openings: Vec::new(),
     }
 }
 
@@ -856,17 +891,18 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
                 SideEffect::Drop {
                     stack,
                     retain_ownership,
-                } => {
-                    if !drop_in_world(
-                        host,
-                        player,
-                        prepared.seen.as_ref(),
-                        stack,
-                        *retain_ownership,
-                    ) {
-                        counted.push("sunrise#live_menu:drop_refused");
-                    }
-                }
+                } => match drop_in_world(
+                    host,
+                    player.filter(|_| prepared.throws_from_player),
+                    prepared.seen.as_ref(),
+                    stack,
+                    *retain_ownership,
+                ) {
+                    Dropped::Thrown => {}
+                    Dropped::Spawned => counted.push("sunrise#live_menu:drop_without_player_throw"),
+                    Dropped::Refused => counted.push("sunrise#live_menu:drop_refused"),
+                    Dropped::Nowhere => counted.push("sunrise#live_menu:drop_lost"),
+                },
                 SideEffect::AwardStat {
                     stat_type,
                     key,
@@ -898,57 +934,63 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
             .counted
             .push("sunrise#live_menu:transaction_refused"),
     }
-    applied.menu_applied =
-        block_use::apply_menu_effects(host, prepared.uuid, &prepared.menu_effects, &[]);
+    applied.menu_applied = block_use::apply_menu_effects(
+        host,
+        prepared.uuid,
+        &prepared.menu_effects,
+        &prepared.openings,
+    );
     applied
 }
 
-/// `Player.drop(stack, false, ...)`: thrown by the player through Sunrise's `drop_stack`, or,
-/// where Sunrise has no player to throw from (dead, gone, in another level), spawned where
-/// vanilla's `LivingEntity.createItemStackToDrop` puts it, at the player's last known
-/// `(x, eyeY - 0.3, z)` with the 40-tick pickup delay a player's throw has. `false` when neither
-/// could place it.
+/// How a Java drop went out.
+enum Dropped {
+    /// The player threw it (`drop_stack`).
+    Thrown,
+    /// Sunrise refused the throw (a mod cancelled the toss, `item_toss`): it stays refused.
+    Refused,
+    /// The player is dead or gone, so nothing can throw it: spawned where they were.
+    Spawned,
+    /// Nowhere to put it.
+    Nowhere,
+}
+
+/// `ServerPlayer.drop(stack, false, SERVER_ONLY)` for a Java drop. A live player throws it
+/// through Sunrise's `drop_stack` (`player` given), and a refusal (a cancelled toss) is left
+/// refused. A dead or departed player (`player` `None`) has no throw: vanilla's
+/// `createItemStackToDrop` would give the item a velocity from the player's rotation and three
+/// `nextFloat`s of the player's random, which no fact here carries, so it is spawned at the
+/// player's last known `(x, eyeY - 0.3, z)` with the 40-tick pickup delay a player's throw has,
+/// its own motion (counted by the caller), so nothing is lost.
 fn drop_in_world(
     host: &mut dyn ServerHost,
     player: Option<PlayerRef>,
     seen: Option<&Seen>,
     stack: &ItemStack,
     retain_ownership: bool,
-) -> bool {
-    if let Some(player) = player
-        && matches!(
-            player.drop_stack(host, stack.clone(), retain_ownership),
-            Ok(None)
-        )
-    {
-        return true;
+) -> Dropped {
+    if let Some(player) = player {
+        return match player.drop_stack(host, stack.clone(), retain_ownership) {
+            Ok(None) => Dropped::Thrown,
+            _ => Dropped::Refused,
+        };
     }
-    let here = player.and_then(|player| {
-        let entity = player.entity();
-        Some((
-            entity.level(&*host)?,
-            entity.position(&*host)?,
-            entity.eye_position(&*host)?,
-        ))
-    });
-    let at = here.or_else(|| {
-        let seen = seen?;
-        Some((seen.level, seen.position?, seen.eye?))
-    });
-    let Some((level, position, eye)) = at else {
-        return false;
+    let Some((level, position, eye)) =
+        seen.and_then(|seen| Some((seen.level, seen.position?, seen.eye?)))
+    else {
+        return Dropped::Nowhere;
     };
-    matches!(
-        level.spawn_item(
-            host,
-            position[0],
-            eye[1] - 0.3,
-            position[2],
-            stack.clone(),
-            40
-        ),
-        Ok(Some(_))
-    )
+    match level.spawn_item(
+        host,
+        position[0],
+        eye[1] - 0.3,
+        position[2],
+        stack.clone(),
+        40,
+    ) {
+        Ok(Some(_)) => Dropped::Spawned,
+        _ => Dropped::Nowhere,
+    }
 }
 
 /// Make `place` hold `desired`: take out what is there (unless it is already that stack), then
@@ -1055,7 +1097,7 @@ fn run_held(java: &crate::HorizonJava, host: &mut dyn ServerHost, uuid: u128, ca
         let Some(window) = held_window(&state, uuid) else {
             return false;
         };
-        prepare(&mut state, &*host, uuid, window, call)
+        prepare(&mut state, &*host, uuid, window, call, None)
     };
     if let Some(prepared) = prepared {
         let applied = apply(host, &prepared);
@@ -1064,8 +1106,46 @@ fn run_held(java: &crate::HorizonJava, host: &mut dyn ServerHost, uuid: u128, ca
     true
 }
 
+/// What a `stillValid` may read of the player and the menu's block, as Sunrise has it: compared
+/// before and after the player's tick (`entity_tick_pre` / `entity_tick_post`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TickFacts {
+    access_block: Option<String>,
+    inventory: Option<Vec<Option<ItemStack>>>,
+    selected: Option<usize>,
+    position: Option<[f64; 3]>,
+    eye: Option<[f64; 3]>,
+    reach: Option<f64>,
+    instabuild: Option<bool>,
+    health: Option<f32>,
+}
+
+fn tick_facts(host: &dyn ServerHost, player: PlayerRef, access_pos: Option<[i32; 3]>) -> TickFacts {
+    let entity = player.entity();
+    let living = host.living(entity);
+    TickFacts {
+        access_block: access_pos.and_then(|pos| access_block_now(host, player, pos)),
+        inventory: player
+            .with_inventory(host, |view| {
+                (0..INVENTORY_SLOTS)
+                    .map(|slot| match view.get(slot) {
+                        None => Some(None),
+                        Some(stack) => stack.project().map(Some),
+                    })
+                    .collect::<Option<Vec<Option<ItemStack>>>>()
+            })
+            .flatten(),
+        selected: player.selected_slot(host),
+        position: entity.position(host),
+        eye: entity.eye_position(host),
+        reach: living.and_then(|living| living.attribute_value(host, BLOCK_INTERACTION_RANGE)),
+        instabuild: player.has_infinite_materials(host),
+        health: living.and_then(|living| living.health(host)),
+    }
+}
+
 /// `entity_tick_pre` for players about to tick: `ServerPlayer.tick`'s `broadcastChanges` and
-/// first `stillValid` (offsets 38-65), with the block the check saw kept for
+/// first `stillValid` (offsets 38-65), with the facts the check read kept for
 /// [`entity_tick_post`].
 pub(crate) fn entity_tick_pre(
     java: &crate::HorizonJava,
@@ -1074,25 +1154,27 @@ pub(crate) fn entity_tick_pre(
     kinds: &[&str],
 ) {
     for uuid in ticking_players(host, entities, kinds) {
-        let seen = {
+        let access = {
             let state = java.lock();
-            let access = state
+            state
                 .jars
                 .iter()
-                .find_map(|jar| jar.host.player_open_menu(uuid).map(|open| open.access_pos));
-            match access {
-                None => continue,
-                Some(pos) => pos.and_then(|pos| access_block_now(&*host, host.player(uuid)?, pos)),
-            }
+                .find_map(|jar| jar.host.player_open_menu(uuid).map(|open| open.access_pos))
         };
-        java.lock().live_menus.tick_blocks.insert(uuid, seen);
+        let (Some(access), Some(player)) = (access, host.player(uuid)) else {
+            continue;
+        };
+        let before = tick_facts(&*host, player, access);
+        java.lock().live_menus.tick_facts.insert(uuid, before);
         run_held(java, host, uuid, Call::Tick);
     }
 }
 
 /// `entity_tick_post` for players that ticked: vanilla checks `stillValid` after `gameMode.tick`,
-/// which the check at `entity_tick_pre` ran before; if the block at the menu's position changed
-/// during the tick (a delayed break), the check may have answered differently: counted.
+/// which the check at `entity_tick_pre` ran before. If anything it may read changed during the
+/// tick (the block at the menu's position, a delayed break; the inventory or a held item, which
+/// a jar `stillValid` override may read; the player's position, reach, mode or health), the
+/// check may have answered differently: counted.
 pub(crate) fn entity_tick_post(
     java: &crate::HorizonJava,
     host: &mut dyn ServerHost,
@@ -1101,7 +1183,7 @@ pub(crate) fn entity_tick_post(
 ) {
     for uuid in ticking_players(host, entities, kinds) {
         let mut state = java.lock();
-        let Some(before) = state.live_menus.tick_blocks.remove(&uuid) else {
+        let Some(before) = state.live_menus.tick_facts.remove(&uuid) else {
             continue;
         };
         let Some(jar_index) = state
@@ -1111,12 +1193,14 @@ pub(crate) fn entity_tick_post(
         else {
             continue;
         };
-        let now = state.jars[jar_index]
+        let access = state.jars[jar_index]
             .host
             .player_open_menu(uuid)
-            .and_then(|open| open.access_pos)
-            .and_then(|pos| access_block_now(&*host, host.player(uuid)?, pos));
-        if now != before {
+            .and_then(|open| open.access_pos);
+        let Some(player) = host.player(uuid) else {
+            continue;
+        };
+        if tick_facts(&*host, player, access) != before {
             state.jars[jar_index]
                 .host
                 .note_unknown_game_hook("sunrise#live_menu:still_valid_before_game_mode_tick");
@@ -1175,7 +1259,7 @@ pub(crate) fn close_held(
         if held_window(&state, uuid) != Some(window) {
             return false;
         }
-        prepare(&mut state, &*host, uuid, window, Call::Close(removal))
+        prepare(&mut state, &*host, uuid, window, Call::Close(removal), None)
     };
     if let Some(prepared) = prepared {
         let applied = apply(host, &prepared);
@@ -1186,16 +1270,42 @@ pub(crate) fn close_held(
 
 /// The player's `ServerPlayer` is going (a logout, a respawn's new player): a Java menu a jar
 /// still holds for them is closed first, as vanilla's `Player.remove` does (`doCloseContainer`),
-/// so what it holds goes back or drops instead of vanishing with the old object.
+/// so what it holds goes back or drops instead of vanishing with the old object. `original` is
+/// where the old object was (a respawn's `event.original`: its level and position), when
+/// Sunrise's player handle already names the new one.
 pub(crate) fn close_for_removal(
     java: &crate::HorizonJava,
     host: &mut dyn ServerHost,
     uuid: u128,
     removal: Removal,
+    original: Option<(LevelRef, [f64; 3])>,
 ) {
     let window = held_window(&java.lock(), uuid);
     if let Some(window) = window {
-        let prepared = prepare(&mut java.lock(), &*host, uuid, window, Call::Close(removal));
+        let departed = original.map(|(level, position)| {
+            let state = java.lock();
+            let last = state.live_menus.seen.get(&uuid);
+            // The old player's eye height, as last seen (the original lends no eye position).
+            let eye = last
+                .and_then(|seen| Some((seen.eye?, seen.position?)))
+                .map(|(eye, at)| [position[0], position[1] + (eye[1] - at[1]), position[2]]);
+            Seen {
+                level,
+                dimension: level.dimension_id().to_owned(),
+                position: Some(position),
+                eye,
+                name: last.map_or_else(|| "Player".to_owned(), |seen| seen.name.clone()),
+                entity_id: last.map_or(0, |seen| seen.entity_id),
+            }
+        });
+        let prepared = prepare(
+            &mut java.lock(),
+            &*host,
+            uuid,
+            window,
+            Call::Close(removal),
+            departed,
+        );
         if let Some(prepared) = prepared {
             let applied = apply(host, &prepared);
             record(&mut java.lock(), prepared, applied);

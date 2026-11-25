@@ -251,8 +251,9 @@ pub enum LiveMenuEffect {
     /// `ServerPlayer.closeContainer()` (from a tick whose `stillValid` failed) sent the client
     /// `ClientboundContainerClosePacket(containerId)`.
     Closed { container_id: i32 },
-    /// A vanilla body called `Slot.onTake(player, stack)` on menu slot `slot` (`Slot.index`;
-    /// `None` for a jar `Slot` Decaf keeps no state for): the moment an embedder's own take
+    /// `Slot.onTake(player, stack)` ran on menu slot `slot` (`Slot.index`; `None` for a jar
+    /// `Slot` Decaf keeps no state for), once per call (a vanilla body's, a jar method's on a
+    /// vanilla slot, or a jar override `vcall` dispatched to): the moment an embedder's own take
     /// notice (Sunrise's `menu_slot_take`) is heard. Nothing is sent for it.
     SlotTaken { slot: Option<i32> },
 }
@@ -1019,7 +1020,17 @@ fn vcall<H: Host>(
     let op = if site == Site::Interface { 0xb9 } else { 0xb6 };
     let before = rt.host.counted_unknown_calls();
     if let Some(body_owner) = rt.jvm_selected_jar_body(&r, op, Some(receiver))? {
-        let value = rt.invoke(&body_owner, name, descriptor, Some(receiver.clone()), args)?;
+        // A jar `Slot.onTake` override is a take, told once (its `super.onTake` isn't again).
+        let take = owner == SLOT && name == "onTake" && descriptor == D_PLAYER_STACK_V;
+        if take {
+            note_take(rt, receiver)?;
+            std_host(rt)?.block_use.taking.push(receiver.clone());
+        }
+        let value = rt.invoke(&body_owner, name, descriptor, Some(receiver.clone()), args);
+        if take && let Some(host) = rt.host.as_std_host_mut() {
+            host.block_use.taking.pop();
+        }
+        let value = value?;
         if rt.host.counted_unknown_calls() != before {
             return Err(counted());
         }
@@ -1504,6 +1515,7 @@ fn run<H: Host>(rt: &mut Runtime<'_, H>, body: Body, this: &Value, args: &[Value
         SlotOnTake => {
             #[inline(never)]
             fn arm(rt: &mut Runtime<'_, impl Host>, this: &Value, _args: &[Value]) -> R<Value> {
+                note_take(rt, this)?;
                 // 26.3 `Slot.onTake` offsets 0-4: `setChanged()`.
                 vcall(rt, Site::Virtual, SLOT, "setChanged", "()V", this, &[])?;
                 Ok(Value::Void)
@@ -1645,6 +1657,7 @@ fn run<H: Host>(rt: &mut Runtime<'_, H>, body: Body, this: &Value, args: &[Value
         ResultSlotOnTake => {
             #[inline(never)]
             fn arm(rt: &mut Runtime<'_, impl Host>, this: &Value, args: &[Value]) -> R<Value> {
+                note_take(rt, this)?;
                 // 26.3 `ItemCombinerMenu$3.onTake` offsets 0-9: `this$0.onTake(player, stack)`.
                 let menu = slot_menu(rt, this)?;
                 vcall(
@@ -2535,16 +2548,32 @@ fn slot_set_changed(rt: &mut Runtime<'_, impl Host>, slot: &Value) -> R<()> {
     vcall(rt, Site::Virtual, SLOT, "setChanged", "()V", slot, &[]).map(drop)
 }
 
+/// `Slot.onTake` began on `slot`: report the take ([`LiveMenuEffect::SlotTaken`]) unless it is
+/// the `super.onTake` of a jar override already reported. Every vanilla body's take, and a jar
+/// method's `slot.onTake(...)` on a vanilla slot, reaches the vanilla arms; a jar override is
+/// reported where `vcall` dispatches to it. (A jar override a jar method calls directly runs in
+/// the interpreter and is not seen here; a menu with a jar `Slot` class gets no Sunrise
+/// declaration, so the bridge never shows one.)
+fn note_take(rt: &mut Runtime<'_, impl Host>, slot: &Value) -> R<()> {
+    if std_host(rt)?.block_use.taking.contains(slot) {
+        return Ok(());
+    }
+    // No active call (a jar calling `onTake` outside one): nothing to tell.
+    if std_host(rt)?.block_use.active_use.is_none() {
+        return Ok(());
+    }
+    let index = slot_index(rt, slot).ok();
+    record(rt, LiveMenuEffect::SlotTaken { slot: index })
+}
+
 fn slot_on_take(
     rt: &mut Runtime<'_, impl Host>,
     slot: &Value,
     player: &Value,
     stack: &Value,
 ) -> R<()> {
-    // Every vanilla take reaches `Slot.onTake` through here: report it before the slot's own
-    // `onTake` runs, as an embedder's take notice comes after the stack left the slot.
-    let index = slot_index(rt, slot).ok();
-    record(rt, LiveMenuEffect::SlotTaken { slot: index })?;
+    // The take is reported where `onTake` runs (`note_take`): in the vanilla bodies' arms, or
+    // at `vcall`'s dispatch to a jar override.
     vcall(
         rt,
         Site::Virtual,
