@@ -389,9 +389,10 @@ impl JavaBlockUsePart {
         };
         let budget = ExecutionBudget::within(JAR_BUDGET);
         let label = format!("{} block {} {}", jar.row.id, self.block_id, hook_name);
-        // The use runs with the clicked level's live random stream lent (`level_random.rs`); a
+        // The use runs with the clicked level's live random stream lent (`level_random.rs`): the
+        // player's level, which `run_with_level_random` lends only when it is the clicked one. A
         // client's use has none to lend, so its `getRandom()` stays counted.
-        let level = host.level(&context.dimension);
+        let level = player_ref.and_then(|player| player.entity().level(&*host));
         let native = &jar.jar;
         let outcome =
             run_with_level_random(host, level, &context.dimension, &mut jar.host, |jar_host| {
@@ -877,9 +878,8 @@ fn run_menu_closes(
         main_hand: None,
         off_hand: None,
     };
-    let level = dimension
-        .as_deref()
-        .and_then(|dimension| host.level(dimension));
+    // The player's level, lent only when it is the one `removed` is handed (`dimension`).
+    let level = player_ref.and_then(|player| player.entity().level(&*host));
     let mut effects = Vec::new();
     for index in holders {
         let jar = &mut state.jars[index];
