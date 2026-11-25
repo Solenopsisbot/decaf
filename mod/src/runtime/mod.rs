@@ -86,6 +86,7 @@ mod fabric_creative_tab;
 mod fabric_mods;
 mod fabric_registry;
 mod fabric_resource_conditions;
+mod fabric_version;
 mod facade_saved_data;
 mod facade_server;
 mod facade_text;
@@ -11842,6 +11843,12 @@ impl Host for StdHost {
             return value;
         }
         self.record(r, Some(receiver), args);
+        // Fabric's `SemanticVersion` handles (`fabric_version.rs`).
+        match fabric_version::instance_call(r, receiver, args) {
+            fabric_version::Call::Other => {}
+            fabric_version::Call::Counted => return self.unknown_host_call(r),
+            fabric_version::Call::Answer(answer) => return answer,
+        }
         if r.name == "equals"
             && r.descriptor == "(Ljava/lang/Object;)Z"
             && let Some(other) = args.first()
@@ -16197,12 +16204,17 @@ impl Host for StdHost {
                 "()Lnet/fabricmc/loader/api/Version;",
             ) if host_fabric_loader::metadata_id(receiver).is_some() => {
                 let id = host_fabric_loader::metadata_id(receiver).unwrap_or_default();
-                Ok(Value::Ref(Some(
-                    self.mods
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".into()),
-                )))
+                // A `Version` is a `SemanticVersion` handle for a text the oracle shows
+                // (`fabric_version.rs`); any other text (and a mod the run's list does not
+                // name) is counted, never a plain `String`.
+                match self
+                    .mods
+                    .get(&id)
+                    .and_then(|version| fabric_version::version_value(version))
+                {
+                    Some(value) => Ok(value),
+                    None => self.unknown_host_call(r),
+                }
             }
             ("net/fabricmc/loader/api/metadata/ModMetadata", "getType", "()Ljava/lang/String;") => {
                 Ok(Value::Ref(Some("release".into())))
@@ -52143,6 +52155,7 @@ mandatory = true
             name: "getVersion".into(),
             descriptor: "()Lnet/fabricmc/loader/api/Version;".into(),
         };
+        // `1.2.3` has an oracle row (`fabric_version.rs`): a `SemanticVersion` handle.
         let version_value = host
             .invoke_instance(&version, &host_fabric_loader::metadata("demo"), &[])
             .unwrap();
@@ -52156,6 +52169,14 @@ mandatory = true
                 .unwrap(),
             Value::Ref(Some("1.2.3".into()))
         );
+        // A text with no oracle row (the loader builds a `StringVersion` for `abc`) is counted,
+        // never a plain `String`.
+        let mut other = StdHost::new().with_mod("demo", "abc");
+        let other_value = other
+            .invoke_instance(&version, &host_fabric_loader::metadata("demo"), &[])
+            .unwrap();
+        assert_eq!(other.unknown_host_call_count(), 1);
+        assert_ne!(other_value, Value::Ref(Some("abc".into())));
         let game_dir = MethodRef {
             owner: "net/fabricmc/loader/api/FabricLoader".into(),
             name: "getGameDir".into(),

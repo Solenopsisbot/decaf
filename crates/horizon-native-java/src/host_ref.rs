@@ -544,6 +544,9 @@ pub enum HostKind {
     ArtifactVersion,
     /// `java.util.UUID`: key its canonical text (`host_jdk_value.rs`).
     Uuid,
+    /// Fabric Loader's `SemanticVersion`: key its version text, one of the texts
+    /// `fabric_version.rs` has an oracle row for.
+    FabricVersion,
     /// `java.time.Duration`: key its nanoseconds (`host_jdk_value.rs`).
     Duration,
     /// `java.net.URI`: key its text (`host_jdk_value.rs`).
@@ -2573,6 +2576,16 @@ const KINDS: &[KindInfo] = &[
         // Each `fromString`/`randomUUID` is a new object.
         canonical: never_canonical,
         methods: &crate::host_jdk_value::UUID_METHODS,
+    },
+    KindInfo {
+        kind: HostKind::FabricVersion,
+        tag: "fver",
+        class: ClassRule::Unknown {
+            declared: crate::fabric_version::declared_types,
+        },
+        // A mod's version object; another with the same text may be another object.
+        canonical: never_canonical,
+        methods: &crate::fabric_version::METHODS,
     },
     KindInfo {
         kind: HostKind::Duration,
