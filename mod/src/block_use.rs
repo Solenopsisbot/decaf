@@ -22,6 +22,7 @@ use mod_api::{
 };
 use serde_json::json;
 
+use crate::level_random::run_with_level_random;
 use crate::runtime::{
     BlockHitData, BlockUseContext, BlockUseOutcome, BlockUsePlayerData, BlockUseSide,
     ExecutionBudget, InteractionResultValue, MenuEffect, OpenMenuEffect, PlayerContainer,
@@ -388,15 +389,20 @@ impl JavaBlockUsePart {
         };
         let budget = ExecutionBudget::within(JAR_BUDGET);
         let label = format!("{} block {} {}", jar.row.id, self.block_id, hook_name);
-        let outcome = caught(&label, || {
-            if with_item {
-                jar.jar
-                    .block_use_item_on_with_budget(&mut jar.host, &context, &budget)
-            } else {
-                jar.jar
-                    .block_use_without_item_with_budget(&mut jar.host, &context, &budget)
-            }
-        });
+        // The use runs with the clicked level's live random stream lent (`level_random.rs`); a
+        // client's use has none to lend, so its `getRandom()` stays counted.
+        let level = host.level(&context.dimension);
+        let native = &jar.jar;
+        let outcome =
+            run_with_level_random(host, level, &context.dimension, &mut jar.host, |jar_host| {
+                caught(&label, || {
+                    if with_item {
+                        native.block_use_item_on_with_budget(jar_host, &context, &budget)
+                    } else {
+                        native.block_use_without_item_with_budget(jar_host, &context, &budget)
+                    }
+                })
+            });
 
         let stdout = jar.host.take_stdout();
         for line in stdout.lines() {
@@ -781,7 +787,7 @@ pub(crate) fn menu_closed(
     }
     let closes = {
         let mut state = java.lock();
-        run_menu_closes(&mut state, &*host, player_uuid, window)
+        run_menu_closes(&mut state, host, player_uuid, window)
     };
     let delivered: Vec<(usize, String, Vec<MenuApplied>, Vec<&'static str>)> = closes
         .into_iter()
@@ -826,7 +832,7 @@ pub(crate) fn menu_closed(
 /// id and the menu effects its `removed` made.
 fn run_menu_closes(
     state: &mut crate::State,
-    host: &dyn ServerHost,
+    host: &mut dyn ServerHost,
     player_uuid: u128,
     window: i32,
 ) -> Vec<(usize, String, Vec<MenuEffect>, Vec<Opening>)> {
@@ -846,14 +852,15 @@ fn run_menu_closes(
     }
     let player_ref = host.player(player_uuid);
     let facade = state.players.iter().find(|p| p.uuid == player_uuid);
+    let host_ref: &dyn ServerHost = &*host;
     let dimension = player_ref
-        .and_then(|player| player.entity().level(host))
+        .and_then(|player| player.entity().level(host_ref))
         .map(|level| level.dimension_id().to_owned())
         .or_else(|| facade.and_then(|p| p.level.clone()));
     let player = BlockUsePlayerData {
         uuid: player_uuid,
         name: player_ref
-            .and_then(|p| p.name(host).map(str::to_owned))
+            .and_then(|p| p.name(host_ref).map(str::to_owned))
             .or_else(|| facade.map(|p| p.name.clone()))
             .unwrap_or_else(|| "Player".to_owned()),
         entity_id: player_ref
@@ -862,14 +869,17 @@ fn run_menu_closes(
         incarnation: state.lives.get(&player_uuid).copied(),
         container: PlayerContainer::Inventory,
         sneaking: player_ref
-            .and_then(|p| p.entity().is_shift_key_down(host))
+            .and_then(|p| p.entity().is_shift_key_down(host_ref))
             .unwrap_or(false),
         spectator: player_ref
-            .and_then(|p| p.is_spectator(host))
+            .and_then(|p| p.is_spectator(host_ref))
             .unwrap_or(false),
         main_hand: None,
         off_hand: None,
     };
+    let level = dimension
+        .as_deref()
+        .and_then(|dimension| host.level(dimension));
     let mut effects = Vec::new();
     for index in holders {
         let jar = &mut state.jars[index];
@@ -883,9 +893,12 @@ fn run_menu_closes(
         };
         let budget = ExecutionBudget::within(JAR_BUDGET);
         let label = format!("{} menu {window} close", jar.row.id);
-        let closed = caught(&label, || {
-            jar.jar
-                .close_player_menu(&mut jar.host, &player, dimension, window, &budget)
+        // `removed` runs with the player's level's live random stream lent (`level_random.rs`).
+        let native = &jar.jar;
+        let closed = run_with_level_random(host, level, dimension, &mut jar.host, |jar_host| {
+            caught(&label, || {
+                native.close_player_menu(jar_host, &player, dimension, window, &budget)
+            })
         });
         match closed {
             Ok(Ok(Some(outcome))) => {

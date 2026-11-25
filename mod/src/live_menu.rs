@@ -84,7 +84,7 @@
 //!
 //! Nothing here names a mod.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
@@ -93,10 +93,11 @@ use mod_api::{
 };
 
 use crate::block_use::{self, MenuApplied};
+use crate::level_random::run_with_level_random;
 use crate::runtime::{
     self, BlockUsePlayerData, ContainerInput, ExecutionBudget, LiveMenuEffect, LiveMenuOutcome,
-    MenuClick, MenuEffect, MenuLayout, MenuPlayerFacts, MenuSlotRole, PlayerContainer, StdHost,
-    Value,
+    MenuClick, MenuEffect, MenuLayout, MenuPlayerFacts, MenuSlotRole, PlayerContainer, SoundRecord,
+    StdHost, Value,
 };
 use crate::{JAR_BUDGET, LOG, LoadedJar, State, caught};
 
@@ -204,7 +205,7 @@ impl MenuPart for JavaMenuPart {
             let mut state = self.lock();
             prepare(
                 &mut state,
-                &*host,
+                host,
                 event.uuid,
                 event.window,
                 Call::Click(click),
@@ -333,6 +334,10 @@ pub(crate) struct Prepared {
     pub(crate) throws_from_player: bool,
     /// The menus this call opened, checked against their types (`opening_check`).
     pub(crate) openings: Vec<block_use::Opening>,
+    /// The server sounds the call played (and seeds it drew), in call order.
+    pub(crate) sounds: Vec<SoundRecord>,
+    /// The sound streams unknown before the call ran.
+    pub(crate) sound_streams: BTreeSet<String>,
 }
 
 /// What carrying out a [`Prepared`] on Sunrise did.
@@ -341,6 +346,10 @@ pub(crate) struct Applied {
     /// Hook tags to count: writes Sunrise refused, effects it couldn't carry.
     pub(crate) counted: Vec<&'static str>,
     pub(crate) menu_applied: Vec<MenuApplied>,
+    /// Why a sound of the call didn't go out, one entry per sound.
+    pub(crate) sounds_counted: Vec<String>,
+    /// The sound streams unknown after the call's sounds went out.
+    pub(crate) sound_streams: BTreeSet<String>,
 }
 
 /// The player's facts as Sunrise gives them, with the Sunrise stacks they were read from (for
@@ -502,9 +511,12 @@ fn access_block_now(host: &dyn ServerHost, player: PlayerRef, pos: [i32; 3]) -> 
 
 /// Run `call` on the Java menu window `window` that a jar holds for the player, under the state
 /// lock: what Sunrise should mirror. `None` when no jar holds that window.
+///
+/// Everything the call reads of Sunrise is read first; the Java call then runs with the player's
+/// level's live random stream lent (`level_random.rs`), so `level.getRandom()` draws from it.
 pub(crate) fn prepare(
     state: &mut State,
-    host: &dyn ServerHost,
+    host: &mut dyn ServerHost,
     uuid: u128,
     window: i32,
     call: Call,
@@ -536,19 +548,19 @@ pub(crate) fn prepare(
             // `ServerPlayer.containerCounter` is Sunrise's, read fresh: whatever opened since
             // (a crafting table, a merchant, another mod) moved it, and a Java `openMenu` this
             // call makes takes the id Sunrise's next open takes.
-            if let Some(counter) = player.container_counter(host) {
+            if let Some(counter) = player.container_counter(&*host) {
                 jar.host.server_player_container_opened(uuid, Some(counter));
             }
             let menu = player
-                .container_menu(host)
-                .filter(|menu| menu.container_id(host) == Some(window));
+                .container_menu(&*host)
+                .filter(|menu| menu.container_id(&*host) == Some(window));
             let (container, cursor) = match call {
                 // Sunrise already put the cursor back into the inventory (or dropped it).
                 Call::Close(_) => (PlayerContainer::Inventory, Some(None)),
                 _ => (PlayerContainer::Open(window), menu.map(Some)),
             };
             let mut read = read_player(
-                host,
+                &*host,
                 &mut jar.host,
                 incarnation,
                 player,
@@ -615,50 +627,62 @@ pub(crate) fn prepare(
     };
     let budget = ExecutionBudget::within(JAR_BUDGET);
     let label = format!("{} menu {window}", jar.row.id);
-    let ran = caught(&label, || match &call {
-        Call::Click(click) => jar.jar.click_player_menu(
-            &mut jar.host,
-            &read.data,
-            &dimension,
-            &read.facts,
-            click,
-            &budget,
-        ),
-        Call::Tick => jar.jar.tick_player_menu(
-            &mut jar.host,
-            &read.data,
-            &dimension,
-            &read.facts,
-            window,
-            &budget,
-        ),
-        Call::Validity => jar.jar.check_player_menu_valid(
-            &mut jar.host,
-            &read.data,
-            &dimension,
-            &read.facts,
-            window,
-            &budget,
-        ),
-        Call::Close(_) => jar.jar.close_player_menu_live(
-            &mut jar.host,
-            &read.data,
-            &dimension,
-            &read.facts,
-            window,
-            &budget,
-        ),
+    // The level Java is handed (`dimension`) is the one the player was read in.
+    let level = read.seen.as_ref().map(|seen| seen.level);
+    // The server sounds the call plays go out on Sunrise after it, in call order, each seed
+    // drawn from Sunrise's own sound-seed stream (`sound.rs`), as a command's do. These are the
+    // streams as they stood before the call.
+    let mut sound_streams = jar.host.unknown_sound_streams().clone();
+    jar.host.set_host_deferred_server_sound_seeds(true);
+    let native = &jar.jar;
+    let ran = run_with_level_random(host, level, &dimension, &mut jar.host, |jar_host| {
+        caught(&label, || match &call {
+            Call::Click(click) => native.click_player_menu(
+                jar_host,
+                &read.data,
+                &dimension,
+                &read.facts,
+                click,
+                &budget,
+            ),
+            Call::Tick => native.tick_player_menu(
+                jar_host,
+                &read.data,
+                &dimension,
+                &read.facts,
+                window,
+                &budget,
+            ),
+            Call::Validity => native.check_player_menu_valid(
+                jar_host,
+                &read.data,
+                &dimension,
+                &read.facts,
+                window,
+                &budget,
+            ),
+            Call::Close(_) => native.close_player_menu_live(
+                jar_host,
+                &read.data,
+                &dimension,
+                &read.facts,
+                window,
+                &budget,
+            ),
+        })
     });
+    jar.host.set_host_deferred_server_sound_seeds(false);
+    let sounds = jar.host.take_sound_records();
     for line in jar.host.take_stdout().lines() {
         log::info!("{LOG}: {}: {line}", jar.row.id);
     }
     let outcome = match ran {
-        Ok(Ok(Some(outcome))) => outcome,
-        Ok(Ok(None)) => return None,
+        Ok(Ok(Some(outcome))) => Some(outcome),
+        Ok(Ok(None)) => None,
         Ok(Err(error)) => {
             jar.row.block_use.uses_failed += 1;
             log::warn!("{LOG}: {}: menu {window} call failed: {error}", jar.row.id);
-            return None;
+            None
         }
         Err(panic) => {
             jar.row.block_use.uses_failed += 1;
@@ -666,8 +690,20 @@ pub(crate) fn prepare(
                 "{LOG}: {}: menu {window} call panicked: {panic}",
                 jar.row.id
             );
-            return None;
+            None
         }
+    };
+    let Some(outcome) = outcome else {
+        // Nothing of the call is carried out, its sounds included: counted, and the seeds they
+        // drew leave Sunrise's stream unknown.
+        crate::sound::count_undelivered_sounds(
+            &sounds,
+            &mut sound_streams,
+            |reason| jar.host.note_unknown_game_hook(reason),
+            "live menu sound of a call that did not finish",
+        );
+        crate::sound::share_unknown_sound_streams([&mut jar.host], &sound_streams);
+        return None;
     };
     // A menu this call opened (a click's, or a `removed` that opens another) is checked before
     // its window opens, as a block use's is, with the initial data its `initMenu` sent.
@@ -678,7 +714,7 @@ pub(crate) fn prepare(
         .then(|| outcome.effects.clone());
     let mut prepared = mirror(
         jar,
-        host,
+        &*host,
         jar_index,
         uuid,
         window,
@@ -687,6 +723,8 @@ pub(crate) fn prepare(
         owned_slots,
     );
     prepared.seen = read.seen;
+    prepared.sounds = sounds;
+    prepared.sound_streams = sound_streams;
     prepared.throws_from_player = !gone
         && !read.facts.dead
         && !matches!(call, Call::Close(Removal::Killed | Removal::Disconnected));
@@ -842,6 +880,8 @@ fn mirror(
         seen: None,
         throws_from_player: true,
         openings: Vec::new(),
+        sounds: Vec::new(),
+        sound_streams: BTreeSet::new(),
     }
 }
 
@@ -986,6 +1026,13 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
             .counted
             .push("sunrise#live_menu:transaction_refused"),
     }
+    // Vanilla sends a sound at the call; Sunrise's seeds come from their own stream, which
+    // nothing above draws, so playing them after the writes keeps every seed where Java's was.
+    let mut sound_streams = prepared.sound_streams.clone();
+    crate::sound::apply_server_sounds(host, &prepared.sounds, &mut sound_streams, |reason| {
+        applied.sounds_counted.push(reason.to_owned())
+    });
+    applied.sound_streams = sound_streams;
     applied.menu_applied = block_use::apply_menu_effects(
         host,
         prepared.uuid,
@@ -1298,6 +1345,11 @@ pub(crate) fn record(state: &mut State, prepared: Prepared, applied: Applied) {
     for tag in prepared.counted.into_iter().chain(applied.counted) {
         jar.host.note_unknown_game_hook(tag);
     }
+    for reason in &applied.sounds_counted {
+        jar.host.note_unknown_game_hook(reason);
+    }
+    // A sound Sunrise refused leaves its stream unknown for this jar's next draw.
+    crate::sound::share_unknown_sound_streams([&mut jar.host], &applied.sound_streams);
     for applied in applied.menu_applied {
         block_use::record_menu_outcome(jar, prepared.uuid, applied);
     }
@@ -1331,7 +1383,7 @@ fn run_held(java: &crate::HorizonJava, host: &mut dyn ServerHost, uuid: u128, ca
         let Some(window) = held_window(&state, uuid) else {
             return false;
         };
-        prepare(&mut state, &*host, uuid, window, call, None)
+        prepare(&mut state, host, uuid, window, call, None)
     };
     if let Some(prepared) = prepared {
         let applied = apply_and_show(host, &prepared, || java.lock());
@@ -1493,7 +1545,7 @@ pub(crate) fn close_held(
         if held_window(&state, uuid) != Some(window) {
             return false;
         }
-        prepare(&mut state, &*host, uuid, window, Call::Close(removal), None)
+        prepare(&mut state, host, uuid, window, Call::Close(removal), None)
     };
     if let Some(prepared) = prepared {
         let applied = apply_and_show(host, &prepared, || java.lock());
@@ -1534,7 +1586,7 @@ pub(crate) fn close_for_removal(
         });
         let prepared = prepare(
             &mut java.lock(),
-            &*host,
+            host,
             uuid,
             window,
             Call::Close(removal),

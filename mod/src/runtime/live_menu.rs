@@ -2429,10 +2429,37 @@ fn has_infinite_materials(rt: &mut Runtime<'_, impl Host>, player: &Value) -> R<
 }
 
 fn record(rt: &mut Runtime<'_, impl Host>, effect: LiveMenuEffect) -> R<()> {
+    // Carried out after the call returns: one that may draw a lent level
+    // stream puts every later lent draw out of order (`level_random.rs`).
+    let quiet = draws_no_level_random(&effect);
     with_active(rt, |active| {
         active.live_effects.push(effect);
         Ok(())
-    })
+    })?;
+    std_host(rt)?.note_deferred_effect(quiet);
+    Ok(())
+}
+
+/// The allow-list of recorded effects whose carrying out draws no level's
+/// `Level.random`: packets, criteria, stats and notices. A `Player.drop`
+/// builds an `ItemEntity` (`new ItemEntity(level, x, y, z, stack)` draws
+/// `level.random.nextDouble()` twice) and is not on it. A new effect must
+/// take a side here.
+fn draws_no_level_random(effect: &LiveMenuEffect) -> bool {
+    match effect {
+        LiveMenuEffect::InitialData { .. }
+        | LiveMenuEffect::SlotChanged { .. }
+        | LiveMenuEffect::CarriedChanged { .. }
+        | LiveMenuEffect::DataChanged { .. }
+        | LiveMenuEffect::InventoryChangedCriterion { .. }
+        | LiveMenuEffect::AwardStat { .. }
+        | LiveMenuEffect::RecipeCrafted { .. }
+        | LiveMenuEffect::AwardRecipes { .. }
+        | LiveMenuEffect::InventorySlotSent { .. }
+        | LiveMenuEffect::Closed { .. }
+        | LiveMenuEffect::SlotTaken { .. } => true,
+        LiveMenuEffect::Drop { .. } => false,
+    }
 }
 
 /// `player.drop(stack, retainOwnership, prediction)` (`ServerPlayer.drop` over

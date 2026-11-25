@@ -1309,7 +1309,12 @@ fn execute_server_level_call<H: Host + ?Sized>(
     emit: &mut dyn FnMut(SoundRecord),
 ) -> SoundCallOutcome {
     if r.name == "getRandom" && r.descriptor == "()Lnet/minecraft/util/RandomSource;" {
-        return match host.level_random_handle(level_marker) {
+        // The live stream, while the embedder lends this level's; otherwise a
+        // seeded copy (standalone runs), else counted.
+        return match host
+            .lent_level_random_handle(dimension)
+            .or_else(|| host.level_random_handle(level_marker))
+        {
             Some(handle) => SoundCallOutcome::Handled(handle),
             None => SoundCallOutcome::Unmodelled,
         };

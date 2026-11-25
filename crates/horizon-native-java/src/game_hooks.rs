@@ -1916,6 +1916,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.level_random_handle(level_marker)
     }
 
+    fn lent_level_random_handle(&mut self, dimension: &str) -> Option<Value> {
+        self.inner.lent_level_random_handle(dimension)
+    }
+
     fn draw_level_sound_seed(
         &mut self,
         level_marker: &str,

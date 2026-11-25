@@ -102,12 +102,32 @@ const BIT_RANDOM: &str = "net/minecraft/world/level/levelgen/BitRandomSource";
 
 #[derive(Debug, Clone)]
 pub(crate) enum State {
-    Legacy { seed: u64 },
-    Java { seed: u64 },
-    Single { seed: u64 },
-    Xoroshiro { lo: u64, hi: u64 },
-    LegacyPositional { seed: i64 },
-    XoroshiroPositional { lo: u64, hi: u64 },
+    Legacy {
+        seed: u64,
+    },
+    Java {
+        seed: u64,
+    },
+    Single {
+        seed: u64,
+    },
+    Xoroshiro {
+        lo: u64,
+        hi: u64,
+    },
+    LegacyPositional {
+        seed: i64,
+    },
+    XoroshiroPositional {
+        lo: u64,
+        hi: u64,
+    },
+    /// `Level.random` of the server level of `dimension`, answered by the
+    /// embedder's live stream while it is lent (`level_random.rs`). Decaf
+    /// holds no state for it: outside a lend its draws are counted.
+    LevelLent {
+        dimension: String,
+    },
 }
 
 impl State {
@@ -119,6 +139,8 @@ impl State {
             Self::Xoroshiro { .. } => XORO,
             Self::LegacyPositional { .. } => LEGACY_POS,
             Self::XoroshiroPositional { .. } => XORO_POS,
+            // `Level.random = RandomSource.create()`: a `LegacyRandomSource`.
+            Self::LevelLent { .. } => LEGACY,
         }
     }
 }
@@ -159,6 +181,10 @@ impl StdHost {
 
     pub(crate) fn draw_random_handle_long(&mut self, handle: &Value) -> Option<i64> {
         let (key, mut state) = self.random_state_mut(handle)?;
+        // Decaf holds no copy of a lent level stream to draw from.
+        if matches!(state, State::LevelLent { .. }) {
+            return None;
+        }
         let value = next_long(&mut state);
         self.save_random(key, state);
         Some(value)
@@ -171,6 +197,13 @@ impl StdHost {
         if let Some(key) = Self::random_key(handle) {
             self.random_sources.remove(&key);
         }
+    }
+
+    /// The handle under `key`, made with `state` the first time: one object
+    /// however often Java asks (`Level.getRandom()` of a lent level).
+    pub(crate) fn keyed_random_handle(&mut self, key: String, state: State) -> Value {
+        self.random_sources.entry(key.clone()).or_insert(state);
+        Value::Host(HostRef::new(HostKind::RandomSource, key))
     }
 
     fn random_handle(&mut self, state: State) -> Value {
@@ -262,6 +295,10 @@ impl StdHost {
         // A direct constructor is reached on a JarObject before any state row
         // exists; random_new allocated the row at the new opcode.
         let (key, mut state) = self.random_state_mut(receiver)?;
+        if let State::LevelLent { dimension } = &state {
+            // The live level stream, while it is lent; counted otherwise.
+            return self.lent_random_call(dimension, r, args);
+        }
         if r.name == "<init>" && r.descriptor == "(JJ)V" {
             let (lo, hi) = match args {
                 [lo, hi] => match (as_long(lo), as_long(hi)) {
@@ -540,7 +577,7 @@ fn as_float(value: &Value) -> Option<f64> {
         _ => None,
     }
 }
-fn iae(message: &str) -> NativeError {
+pub(crate) fn iae(message: &str) -> NativeError {
     NativeError::UncaughtException {
         class: "java/lang/IllegalArgumentException".into(),
         message: Some(message.into()),
