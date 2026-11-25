@@ -290,6 +290,11 @@ pub enum MenuEffect {
     /// assignment: vanilla's server forgets it with no `removed` and no close packet, while the
     /// client still shows its window.
     Orphaned { container_id: i32 },
+    /// `ServerPlayer.openMenu` advanced `containerCounter` to `container_id`
+    /// (`nextContainerCounter`, offsets 23-24) and the provider's `createMenu` answered `null`
+    /// (offsets 43-73): no window opens, but the next menu takes the id after this one. The
+    /// embedder advances its own counter the same way.
+    CounterAdvanced { container_id: i32 },
 }
 
 /// Result of running a block's `useItemOn` or `useWithoutItem` hook.
@@ -322,7 +327,9 @@ impl BlockUseOutcome {
     pub fn open_menus(&self) -> impl Iterator<Item = &OpenMenuEffect> {
         self.menu_effects.iter().filter_map(|effect| match effect {
             MenuEffect::Opened(open) => Some(open),
-            MenuEffect::Closed { .. } | MenuEffect::Orphaned { .. } => None,
+            MenuEffect::Closed { .. }
+            | MenuEffect::Orphaned { .. }
+            | MenuEffect::CounterAdvanced { .. } => None,
         })
     }
 }
@@ -1596,6 +1603,19 @@ fn active_player_call(
             Ok(Value::Int(i32::from(p.sneaking)))
         }
         ("isSpectator", "()Z") => Ok(Value::Int(i32::from(p.spectator))),
+        // `Entity.getX/getY/getZ()` (final: `position.x` / `.y` / `.z`), from the embedder's
+        // facts for a live player; unknown without them.
+        ("getX" | "getY" | "getZ", "()D") => {
+            let axis = match r.name.as_str() {
+                "getX" => 0,
+                "getY" => 1,
+                _ => 2,
+            };
+            match active.facts.as_ref().and_then(|facts| facts.position) {
+                Some(position) => Ok(Value::Float(position[axis])),
+                None => host.unknown_host_call(r),
+            }
+        }
         ("getMainHandItem", "()Lnet/minecraft/world/item/ItemStack;") => match &p.main_hand {
             Some(stack) => Ok(stack.clone()),
             None => host.unknown_host_call(r),
@@ -1902,6 +1922,17 @@ fn invoke_player_open_menu<H: Host>(
         &[Value::Int(container_id), inventory, receiver.clone()],
     )?;
     if menu == Value::Ref(None) {
+        // The counter moved all the same: the embedder's must too, or the next window's id
+        // drifts from the one Java hands the next `createMenu`.
+        if let Some(active) = runtime
+            .host
+            .as_std_host_mut()
+            .and_then(|host| host.block_use.active_use.as_mut())
+        {
+            active
+                .menu_effects
+                .push(MenuEffect::CounterAdvanced { container_id });
+        }
         if spectator {
             // Offsets 54-67: `sendOverlayMessage(Component.translatable(
             // "container.spectatorCantOpen").withStyle(RED))`, a message Decaf can't send.

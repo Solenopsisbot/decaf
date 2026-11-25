@@ -921,16 +921,29 @@ def probe_declarations(
         if malformed is not None and not isinstance(content, dict):
             raise ProbeError("the probe's content is not a JSON object")
         declarations = []
-        for name, key in (("block", "blocks"), ("item", "items")):
+        # `menus` are the jar's own menu types as Sunrise content menu declarations
+        # (`data/<ns>/sunrise/menu/<path>.json`, the layout of the menu each `MenuType` builds);
+        # `menu_refusals` the ones whose layout can't be one exactly, kept as `menu-refused`
+        # rows (`{"reason": ...}`) so the bake names them.
+        for name, key in (
+            ("block", "blocks"),
+            ("item", "items"),
+            ("menu", "menus"),
+            ("menu-refused", "menu_refusals"),
+        ):
             rows = content.get(key, [])
             if malformed is not None and not isinstance(rows, list):
                 malformed.append(f"{key}: {str(rows)[:80]}")
                 continue
+            field = "reason" if name == "menu-refused" else "file"
             for entry in rows:
                 if malformed is not None and not (
-                    isinstance(entry, dict) and isinstance(entry.get("id"), str) and "file" in entry
+                    isinstance(entry, dict) and isinstance(entry.get("id"), str) and field in entry
                 ):
                     malformed.append(str(entry)[:80])
+                    continue
+                if name == "menu-refused":
+                    declarations.append((name, entry["id"], {"reason": entry["reason"]}))
                     continue
                 declarations.append((name, entry["id"], entry["file"]))
         return declarations
@@ -1957,6 +1970,11 @@ def bake_jar(
     }
     declared = set()
     for kind, declaration_id, file in declarations:
+        if kind == "menu-refused":
+            # The live-menu bridge opens a jar's menu only as a declared Sunrise menu type; a
+            # layout the runtime can't declare exactly is left out, and its opens are refused.
+            bake.skip(f"menu type whose layout is not a declaration: {file['reason']}", declaration_id)
+            continue
         namespace, path = declaration_id.split(":", 1) if ":" in declaration_id else ("", "")
         if not namespace or not path:
             bake.skip("declaration id is not namespace:path", declaration_id)
@@ -1979,10 +1997,12 @@ def bake_jar(
         if kind == "item" and declaration_id in block_items:
             bake.skip("the block's own item (its block declares it)", declaration_id)
             continue
-        if declaration_id in declared:
+        # A menu type is its own registry: it may share an id with a block or an item.
+        declared_key = (kind == "menu", declaration_id)
+        if declared_key in declared:
             bake.skip("declared more than once in the jar", declaration_id)
             continue
-        declared.add(declaration_id)
+        declared.add(declared_key)
         declaration_path = f"data/{namespace}/sunrise/{kind}/{path}.json"
         by_namespace.setdefault(namespace, []).append(
             (declaration_path, _declaration_bytes(file))
@@ -2540,6 +2560,10 @@ def _bake_jar_horizon_into(
     candidates: dict[str, list[tuple[str, str, str, str, object]]] = {}
     declared_namespaces: set[str] = set()
     for kind, declaration_id, file in declarations:
+        if kind in ("menu", "menu-refused"):
+            # The official game has no content menu declarations (sections 1-3).
+            bake.skip("menu type: the official game declares no content menus", declaration_id)
+            continue
         namespace, path = declaration_id.split(":", 1) if ":" in declaration_id else ("", "")
         if not namespace or not path:
             bake.skip("declaration id is not namespace:path", declaration_id)

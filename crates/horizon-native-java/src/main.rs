@@ -709,6 +709,26 @@ fn mixin_plans_json(jar: &NativeJar) -> serde_json::Value {
     })
 }
 
+/// The jar's own menu types ([`NativeJar::menu_type_declarations`]) as the bake reads them:
+/// `[{"id", "file"}]` for each one with an exact declaration, and `[{"id", "reason"}]` for each
+/// one without.
+fn menu_declarations_json(
+    jar: &NativeJar,
+    host: &mut StdHost,
+) -> (serde_json::Value, serde_json::Value) {
+    let mut menus = Vec::new();
+    let mut refusals = Vec::new();
+    for declaration in jar.menu_type_declarations(host) {
+        match declaration.file {
+            Ok(file) => menus.push(serde_json::json!({ "id": declaration.id, "file": file })),
+            Err(reason) => {
+                refusals.push(serde_json::json!({ "id": declaration.id, "reason": reason }))
+            }
+        }
+    }
+    (menus.into(), refusals.into())
+}
+
 fn execution_json(
     kind: &str,
     entrypoints: &[Entrypoint],
@@ -1062,6 +1082,11 @@ fn main() -> ExitCode {
                     if !(kind != "client" && !force_client) {
                         report["frame"] = frame_census(&jar, &mut host.clone(), &layers);
                     }
+                    // The jar's menu types as content menu declarations, for the bake: each
+                    // built on a copy of the host, so building them changes nothing above.
+                    let (menus, menu_refusals) = menu_declarations_json(&jar, &mut host.clone());
+                    report["content"]["menus"] = menus;
+                    report["content"]["menu_refusals"] = menu_refusals;
                     report
                 });
             } else {

@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 
 use horizon_native_java::{
     BlockHitData, BlockUseContext, BlockUsePlayerData, BlockUseSide, ContainerInput,
-    ExecutionBudget, LiveMenuEffect, MenuClick, MenuPlayerFacts, PlayerContainer, StackComponents,
-    StdHost, Value,
+    ExecutionBudget, LiveMenuEffect, MenuClick, MenuEffect, MenuPlayerFacts, PlayerContainer,
+    StackComponents, StdHost, Value,
 };
 
 const UUID: u128 = 0x5eed_0000_0000_0000_0000_0000_0000_0001;
@@ -137,6 +137,10 @@ const STUBS: &[(&str, &str)] = &[
          import java.util.OptionalInt;\n\
          import net.minecraft.world.MenuProvider;\n\
          public abstract class Player {\n\
+           public int tickCount;\n\
+           public final double getX() { return 0; }\n\
+           public final double getY() { return 0; }\n\
+           public final double getZ() { return 0; }\n\
            public OptionalInt openMenu(MenuProvider provider) { return OptionalInt.empty(); }\n\
          }",
     ),
@@ -168,9 +172,12 @@ const STUBS: &[(&str, &str)] = &[
     (
         "net/minecraft/world/inventory/AbstractContainerMenu.java",
         "package net.minecraft.world.inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
          import net.minecraft.world.item.ItemStack;\n\
          public abstract class AbstractContainerMenu {\n\
            protected AbstractContainerMenu(MenuType<?> type, int id) {}\n\
+           public void removed(Player player) {}\n\
+           public ItemStack getCarried() { return null; }\n\
            public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) { return true; }\n\
          }",
     ),
@@ -707,4 +714,490 @@ fn drag_over_both_inputs_counts_the_unknowable_order() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// The Sunrise bridge's runtime seams (`mod/src/live_menu.rs`)
+// ---------------------------------------------------------------------------
+
+/// Blocks and menus beside the bench for the bridge's seams: a bench whose menu prints the
+/// player's `tickCount` and position as it is taken from, one whose provider builds no menu,
+/// one whose menu overrides `removed` to read the cursor first, and a `MenuType` whose supplier
+/// builds nothing.
+const BRIDGE_SOURCES: &[(&str, &str)] = &[
+    (
+        "demo/BridgeProbe.java",
+        "package demo;\n\
+         import net.fabricmc.api.ModInitializer;\n\
+         import net.minecraft.core.Registry;\n\
+         import net.minecraft.core.registries.BuiltInRegistries;\n\
+         import net.minecraft.resources.Identifier;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.level.block.state.BlockBehaviour;\n\
+         public final class BridgeProbe implements ModInitializer {\n\
+           @Override public void onInitialize() {\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"nothing\"), new MenuType<BenchMenu>((id, inventory) -> null, FeatureFlags.VANILLA_SET));\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"tick_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 0));\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"null_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 1));\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"removed_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 2));\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/MenuBench.java",
+        "package demo;\n\
+         import net.minecraft.core.BlockPos;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.InteractionResult;\n\
+         import net.minecraft.world.SimpleMenuProvider;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.level.Level;\n\
+         import net.minecraft.world.level.block.Block;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         import net.minecraft.world.phys.BlockHitResult;\n\
+         public class MenuBench extends Block {\n\
+           private final int kind;\n\
+           public MenuBench(Properties properties, int kind) { super(properties); this.kind = kind; }\n\
+           @Override protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n\
+             if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
+             int kind = this.kind;\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> kind == 0 ? new TickMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 1 ? null : new RemovedMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
+             return InteractionResult.CONSUME;\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/TickMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         public class TickMenu extends BenchMenu {\n\
+           public TickMenu(int id, Inventory inventory, ContainerLevelAccess access) { super(id, inventory, access); }\n\
+           @Override protected void onTake(Player player, ItemStack stack) {\n\
+             System.out.println(\"mod: tick \" + player.tickCount + \" at \" + player.getX() + \",\" + player.getY() + \",\" + player.getZ());\n\
+             super.onTake(player, stack);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/RemovedMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         public class RemovedMenu extends BenchMenu {\n\
+           public RemovedMenu(int id, Inventory inventory, ContainerLevelAccess access) { super(id, inventory, access); }\n\
+           @Override public void removed(Player player) {\n\
+             System.out.println(\"mod: removed with \" + getCarried());\n\
+             super.removed(player);\n\
+           }\n\
+         }",
+    ),
+];
+
+/// The bench jar with the bridge's blocks, both entrypoints run, the player logged in.
+fn bridge_host(name: &str) -> (javac_fixture::Fixture, StdHost) {
+    let mut sources = sources();
+    sources.extend_from_slice(BRIDGE_SOURCES);
+    let fixture = javac_fixture::Fixture::build(name, &sources);
+    let mut host = StdHost::new();
+    for entry in ["demo.Probe", "demo.BridgeProbe"] {
+        fixture.jar.execute(entry, None, "main", &mut host).unwrap();
+    }
+    assert_eq!(
+        host.unknown_host_call_count(),
+        0,
+        "{:?}",
+        host.unknown_host_calls()
+    );
+    host.server_player_created(UUID, 1, 0);
+    (fixture, host)
+}
+
+fn use_block(
+    fixture: &javac_fixture::Fixture,
+    host: &mut StdHost,
+    block: &str,
+    facts: MenuPlayerFacts,
+) -> horizon_native_java::BlockUseOutcome {
+    host.set_player_menu_facts(UUID, Some(facts));
+    let outcome = fixture
+        .jar
+        .block_use_without_item(
+            host,
+            &BlockUseContext {
+                side: BlockUseSide::Server,
+                dimension: "minecraft:overworld".to_owned(),
+                block_id: block.to_owned(),
+                state_properties: BTreeMap::new(),
+                pos: POS,
+                hit: BlockHitData::block(POS, "UP", [3.5, 65.0, 5.5], false),
+                player: player(),
+                hand: "MAIN_HAND".to_owned(),
+                stack: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.failure, None);
+    outcome
+}
+
+fn click_menu(
+    fixture: &javac_fixture::Fixture,
+    host: &mut StdHost,
+    window: i32,
+    facts: &MenuPlayerFacts,
+    slot: i32,
+    button: i32,
+    input: ContainerInput,
+) -> horizon_native_java::LiveMenuOutcome {
+    let mut player = player();
+    player.container = PlayerContainer::Open(window);
+    let outcome = fixture
+        .jar
+        .click_player_menu(
+            host,
+            &player,
+            "minecraft:overworld",
+            facts,
+            &MenuClick {
+                container_id: window,
+                slot,
+                button,
+                input,
+                state_id_matches: true,
+            },
+            &ExecutionBudget::UNBOUNDED,
+        )
+        .unwrap()
+        .expect("the menu is held");
+    assert_eq!(outcome.failure, None);
+    outcome
+}
+
+fn close_menu(
+    fixture: &javac_fixture::Fixture,
+    host: &mut StdHost,
+    window: i32,
+    facts: &MenuPlayerFacts,
+) -> horizon_native_java::LiveMenuOutcome {
+    let mut player = player();
+    player.container = PlayerContainer::Inventory;
+    fixture
+        .jar
+        .close_player_menu_live(
+            host,
+            &player,
+            "minecraft:overworld",
+            facts,
+            window,
+            &ExecutionBudget::UNBOUNDED,
+        )
+        .unwrap()
+        .expect("the menu is held")
+}
+
+fn on_big_stack(name: &str, run: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn held(host: &StdHost, inventory: &[Value]) -> Vec<String> {
+    let mut held: Vec<String> = inventory
+        .iter()
+        .filter(|stack| host.item_stack_is_empty(stack) == Some(false))
+        .map(|stack| stack_text(host, stack))
+        .collect();
+    held.sort();
+    held
+}
+
+/// `NativeJar::menu_type_declarations` declares the bench's `MenuType` as the layout Java 25
+/// builds (`fixtures/live_menu/layout_java25.txt`, `oracle/MenuLayoutOracle.java` against the
+/// real 26.3 server jar): every container slot an owned slot holding `Slot.getMaxStackSize()`,
+/// the combiner's input slots (`ItemCombinerMenu$2`) its inputs, and the player's slots, in
+/// `addStandardInventorySlots` order, the standard player group. A supplier that builds nothing
+/// gets a reason instead, and building the declarations counts nothing.
+#[test]
+fn menu_type_declaration_is_the_java25_layout() {
+    on_big_stack("live-menu-declaration", || {
+        let (fixture, mut host) = bridge_host("live_menu_declaration");
+        let before = host.unknown_host_call_count();
+        let declarations = fixture.jar.menu_type_declarations(&mut host);
+        assert_eq!(host.unknown_host_call_count(), before);
+
+        // The declaration the Java layout gives.
+        let mut owned = Vec::new();
+        let mut inputs = Vec::new();
+        let mut player_slots = Vec::new();
+        let mut data_slots = 0;
+        for line in include_str!("fixtures/live_menu/layout_java25.txt").lines() {
+            let parts: Vec<&str> = line.split(' ').collect();
+            match parts[0] {
+                "slot" => {
+                    let index: usize = parts[1].parse().unwrap();
+                    let container_slot: i32 = parts[4].parse().unwrap();
+                    let max: i64 = parts[5].parse().unwrap();
+                    if parts[3] == "player" {
+                        player_slots.push(container_slot);
+                        continue;
+                    }
+                    assert!(player_slots.is_empty(), "container slots come first");
+                    if parts[2] == "net.minecraft.world.inventory.ItemCombinerMenu$2" {
+                        inputs.push(index);
+                    }
+                    owned.push(max);
+                }
+                "data_slots" => data_slots = parts[1].parse::<usize>().unwrap(),
+                other => panic!("unknown oracle line {other}"),
+            }
+        }
+        assert_eq!(player_slots, (9..36).chain(0..9).collect::<Vec<i32>>());
+        assert_eq!(data_slots, 0);
+        let expected = serde_json::json!({
+            "slots": owned.len(),
+            "owned_slots": owned,
+            "inputs": inputs,
+            "player_inventory": true,
+        });
+
+        let found = |id: &str| {
+            declarations
+                .iter()
+                .find(|declaration| declaration.id == id)
+                .unwrap_or_else(|| panic!("no declaration for {id}: {declarations:?}"))
+                .file
+                .clone()
+        };
+        assert_eq!(found("demo:bench"), Ok(expected));
+        assert_eq!(
+            found("demo:nothing"),
+            Err("its MenuSupplier returned null".to_owned())
+        );
+    });
+}
+
+/// The player's `tickCount` and position come from the embedder's facts: a menu's `onTake`
+/// reading them (as Runes' `RuneCrafter` cooldown does) gets them, and nothing counts; without
+/// the facts each read counts.
+#[test]
+fn facts_answer_the_live_players_tick_count_and_position() {
+    on_big_stack("live-menu-tick", || {
+        for known in [true, false] {
+            let (fixture, mut host) = bridge_host("live_menu_tick");
+            let mut inventory = vec![StdHost::empty_item_stack(); 43];
+            inventory[0] = host.make_item_stack_for_id("minecraft:cobblestone", 10, false);
+            inventory[1] = host.make_item_stack_for_id("minecraft:amethyst_shard", 3, false);
+            let facts = |inventory: &[Value]| MenuPlayerFacts {
+                tick_count: known.then_some(1234),
+                position: known.then_some([3.5, 65.0, 7.5]),
+                ..facts(inventory.to_vec(), 7.5, false)
+            };
+            let opened = use_block(&fixture, &mut host, "demo:tick_bench", facts(&inventory));
+            let window = opened.open_menus().next().unwrap().container_id;
+            inventory = opened.inventory.unwrap();
+            for (slot, button, input) in [
+                (30, 0, ContainerInput::Pickup),
+                (0, 1, ContainerInput::Pickup),
+                (30, 0, ContainerInput::Pickup),
+                (31, 0, ContainerInput::QuickMove),
+            ] {
+                let outcome = click_menu(
+                    &fixture,
+                    &mut host,
+                    window,
+                    &facts(&inventory),
+                    slot,
+                    button,
+                    input,
+                );
+                assert_eq!(outcome.unknown_host_call_count, 0);
+                inventory = outcome.inventory.unwrap();
+            }
+            host.take_stdout();
+            let taken = click_menu(
+                &fixture,
+                &mut host,
+                window,
+                &facts(&inventory),
+                2,
+                0,
+                ContainerInput::Pickup,
+            );
+            let stdout = host.take_stdout();
+            if known {
+                assert!(
+                    stdout.contains("mod: tick 1234 at 3.5,65.0,7.5"),
+                    "{stdout}"
+                );
+                assert_eq!(
+                    taken.unknown_host_call_count, 0,
+                    "{:?}",
+                    taken.unknown_host_calls
+                );
+            } else {
+                assert_eq!(
+                    taken.unknown_host_calls.keys().cloned().collect::<Vec<_>>(),
+                    [
+                        "net/minecraft/server/network/ServerGamePacketListenerImpl#handleContainerClick(Lnet/minecraft/network/protocol/game/ServerboundContainerClickPacket;)V",
+                        "net/minecraft/world/entity/player/Player#getX()D",
+                        "net/minecraft/world/entity/player/Player#getY()D",
+                        "net/minecraft/world/entity/player/Player#getZ()D",
+                        "net/minecraft/world/entity/player/Player#tickCountI",
+                    ]
+                );
+            }
+        }
+    });
+}
+
+/// `ServerPlayer.openMenu` advances `containerCounter` before it asks the provider
+/// (`nextContainerCounter`, offsets 23-24), so a `createMenu` that answers `null` still moves it
+/// (offsets 43-73): the use reports `CounterAdvanced`, and the next menu takes the id after it.
+#[test]
+fn a_null_create_menu_still_advances_the_container_counter() {
+    on_big_stack("live-menu-counter", || {
+        let (fixture, mut host) = bridge_host("live_menu_counter");
+        let inventory = vec![StdHost::empty_item_stack(); 43];
+        // The embedder's counter: 41 windows opened before.
+        host.server_player_container_opened(UUID, Some(41));
+        let none = use_block(
+            &fixture,
+            &mut host,
+            "demo:null_bench",
+            facts(inventory.clone(), 7.5, false),
+        );
+        assert!(matches!(
+            none.menu_effects.as_slice(),
+            [MenuEffect::CounterAdvanced { container_id: 42 }]
+        ));
+        assert_eq!(none.unknown_host_call_count, 0);
+        assert!(host.player_open_menu(UUID).is_none());
+        let bench = use_block(
+            &fixture,
+            &mut host,
+            "demo:bench",
+            facts(inventory, 7.5, false),
+        );
+        assert_eq!(bench.open_menus().next().unwrap().container_id, 43);
+    });
+}
+
+/// A close the embedder already put the cursor back for (Sunrise's window close does, before
+/// `menu_closed`): the call starts from its empty cursor (`MenuPlayerFacts::carried`), so the
+/// menu's `removed` hands back only the inputs, and the cursor's stack isn't handed back twice.
+/// A jar `removed` override could read the cursor before `super.removed`, where Java's would
+/// still see the stack: that close counts. Without knowing whether the player is leaving
+/// (`departure_unknown`), returning the inputs counts too.
+#[test]
+fn a_close_starts_from_the_embedders_cursor() {
+    on_big_stack("live-menu-close", || {
+        for (block, departure_unknown, counted) in [
+            ("demo:bench", false, None),
+            (
+                "demo:removed_bench",
+                false,
+                Some("net/minecraft/server/level/ServerPlayer#doCloseContainer()V"),
+            ),
+            ("demo:bench", true, Some("")),
+        ] {
+            let (fixture, mut host) = bridge_host("live_menu_close");
+            let mut inventory = vec![StdHost::empty_item_stack(); 43];
+            inventory[0] = host.make_item_stack_for_id("minecraft:cobblestone", 10, false);
+            let opened = use_block(
+                &fixture,
+                &mut host,
+                block,
+                facts(inventory.clone(), 7.5, false),
+            );
+            let window = opened.open_menus().next().unwrap().container_id;
+            inventory = opened.inventory.unwrap();
+            // Pick up the ten, put one in the base: nine on the cursor.
+            for (slot, button) in [(30, 0), (0, 1)] {
+                let outcome = click_menu(
+                    &fixture,
+                    &mut host,
+                    window,
+                    &facts(inventory.clone(), 7.5, false),
+                    slot,
+                    button,
+                    ContainerInput::Pickup,
+                );
+                inventory = outcome.inventory.unwrap();
+            }
+            // The embedder closed the window and put the nine back into slot 0.
+            inventory[0] = host.make_item_stack_for_id("minecraft:cobblestone", 9, false);
+            host.take_stdout();
+            let closed = close_menu(
+                &fixture,
+                &mut host,
+                window,
+                &MenuPlayerFacts {
+                    carried: Some(StdHost::empty_item_stack()),
+                    departure_unknown,
+                    ..facts(inventory.clone(), 7.5, false)
+                },
+            );
+            assert_eq!(closed.failure, None);
+            assert!(host.player_open_menu(UUID).is_none());
+            match counted {
+                None => {
+                    assert_eq!(
+                        closed.unknown_host_call_count, 0,
+                        "{:?}",
+                        closed.unknown_host_calls
+                    );
+                    assert_eq!(
+                        held(&host, &closed.inventory.unwrap()),
+                        ["10 minecraft:cobblestone"]
+                    );
+                }
+                Some("") => {
+                    // Drop or place back is unknown: the step counts (the outermost modelled
+                    // method, the combiner's `removed`) and moves nothing.
+                    assert_eq!(
+                        closed
+                            .unknown_host_calls
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        [
+                            "net/minecraft/world/inventory/ItemCombinerMenu#removed(Lnet/minecraft/world/entity/player/Player;)V"
+                        ]
+                    );
+                    assert_eq!(
+                        held(&host, &closed.inventory.unwrap()),
+                        ["9 minecraft:cobblestone"]
+                    );
+                }
+                Some(key) => {
+                    assert!(
+                        host.take_stdout()
+                            .contains("mod: removed with 0 minecraft:air")
+                    );
+                    assert_eq!(
+                        closed
+                            .unknown_host_calls
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        [key]
+                    );
+                    assert_eq!(
+                        held(&host, &closed.inventory.unwrap()),
+                        ["10 minecraft:cobblestone"]
+                    );
+                }
+            }
+        }
+    });
 }

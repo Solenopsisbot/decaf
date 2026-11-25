@@ -345,6 +345,9 @@ mod client;
 mod content;
 pub mod game_dispatch;
 mod game_hooks;
+mod live_menu;
+#[cfg(test)]
+mod live_menu_tests;
 mod runtime;
 mod server_facts;
 mod sound;
@@ -1824,7 +1827,7 @@ impl HorizonJava {
                 .ok()
                 .flatten()
                 .unwrap_or(true);
-        self.game_hooks(Some(host), "java_base_player_tick_tail", |state| {
+        self.game_hooks(Some(&mut *host), "java_base_player_tick_tail", |state| {
             Some((
                 Some(game_hooks::player(state, player.uuid(), 0)?),
                 Vec::new(),
@@ -1833,6 +1836,9 @@ impl HorizonJava {
         if spectator {
             game_hooks::note_spectator(&mut self.lock(), "java_base_player_tick_tail");
         }
+        // The player's held Java menu: `ServerPlayer.tick`'s `broadcastChanges` and
+        // `stillValid`, then `doTick`'s second `stillValid` (`live_menu.rs`).
+        live_menu::player_tick(self, host, player);
     }
 
     #[cfg(test)]
