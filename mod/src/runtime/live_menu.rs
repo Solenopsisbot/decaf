@@ -168,10 +168,6 @@ pub struct MenuPlayerFacts {
     pub removed_for_dimension_change: bool,
     /// `ServerPlayer.hasDisconnected()`.
     pub disconnected: bool,
-    /// The embedder can't tell whether the player is leaving (`removed` and `disconnected`
-    /// above are then not facts): `dropOrPlaceInInventory`, the one step that asks, counts
-    /// instead of choosing between dropping and placing back.
-    pub departure_unknown: bool,
     /// `LivingEntity.isDeadOrDying()`.
     pub dead: bool,
     /// The player's `Entity.tickCount`. A jar's `getfield tickCount` on the live player (the
@@ -255,6 +251,10 @@ pub enum LiveMenuEffect {
     /// `ServerPlayer.closeContainer()` (from a tick whose `stillValid` failed) sent the client
     /// `ClientboundContainerClosePacket(containerId)`.
     Closed { container_id: i32 },
+    /// A vanilla body called `Slot.onTake(player, stack)` on menu slot `slot` (`Slot.index`;
+    /// `None` for a jar `Slot` Decaf keeps no state for): the moment an embedder's own take
+    /// notice (Sunrise's `menu_slot_take`) is heard. Nothing is sent for it.
+    SlotTaken { slot: Option<i32> },
 }
 
 /// A click the client sent for the menu it shows: `ServerboundContainerClickPacket`.
@@ -2541,6 +2541,10 @@ fn slot_on_take(
     player: &Value,
     stack: &Value,
 ) -> R<()> {
+    // Every vanilla take reaches `Slot.onTake` through here: report it before the slot's own
+    // `onTake` runs, as an embedder's take notice comes after the stack left the slot.
+    let index = slot_index(rt, slot).ok();
+    record(rt, LiveMenuEffect::SlotTaken { slot: index })?;
     vcall(
         rt,
         Site::Virtual,
@@ -3713,10 +3717,6 @@ fn drop_or_place_in_inventory(
         return Ok(());
     }
     let facts = facts(rt)?;
-    if facts.departure_unknown {
-        // `isRemoved()` / `hasDisconnected()` are not known: drop or place back is a guess.
-        return Err(counted());
-    }
     let removed = facts.removed && !facts.removed_for_dimension_change;
     if removed || facts.disconnected {
         player_drop(rt, player, stack, false, Prediction::ServerOnly)
@@ -5897,127 +5897,46 @@ impl NativeJar {
 /// which `Slot.getMaxStackSize()` returns for each of their slots.
 const CONTAINER_MAX_STACK_SIZE: i64 = 99;
 
-/// One `MenuType` a jar registered, as an embedder needs to declare it before any menu opens:
-/// the layout of the menu its `MenuSupplier` builds.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MenuTypeDeclaration {
-    /// The registry id (`minecraft:menu`).
-    pub id: String,
-    /// The layout as a Sunrise content menu declaration (`data/<ns>/sunrise/menu/<path>.json`),
-    /// or why the menu's layout can't be one exactly.
-    pub file: Result<serde_json::Value, String>,
+/// What one menu slot shows, as an embedder lays a menu type out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuSlotRole {
+    /// A slot of the menu's own vanilla container (`SimpleContainer`, `ResultContainer`, the
+    /// combiner's), holding `Slot.getMaxStackSize()` (99); `input` for a combiner input slot
+    /// (`ItemCombinerMenu$2`).
+    Owned { input: bool },
+    /// The player's `Inventory` slot `.0`.
+    Player(i32),
 }
 
-impl NativeJar {
-    /// Each `MenuType` the jar registered under its own namespace, with the layout of the menu
-    /// its `MenuSupplier` builds (`MenuType.create(0, inventory)`, the constructor a client runs
-    /// for `ClientboundOpenScreenPacket`, so the layout both sides agree on).
-    ///
-    /// The declaration is Sunrise's blockless owned menu: every container slot becomes an owned
-    /// transient slot (whose contents the live-menu bridge mirrors from the Java menu, the one
-    /// authority), followed by the player's 36 inventory slots when the menu adds them in
-    /// vanilla's `addStandardInventorySlots` order (27 main, then the hotbar), which is the order
-    /// Sunrise appends them in. So a Java slot index is the Sunrise slot index.
-    ///
-    /// Exact only for vanilla slot and container classes (`Slot` and the combiner's own,
-    /// `SimpleContainer`, `ResultContainer`): a jar `Slot` or `Container` can answer its own
-    /// stack size and rules, and a layout whose player slots are not that standard block can't
-    /// be expressed, so those menus get a reason instead of a guessed declaration. The
-    /// declaration lists no `results`: a declared result makes Sunrise return the inputs itself
-    /// on close, where the Java menu's own `removed` decides that.
-    pub fn menu_type_declarations(&self, host: &mut StdHost) -> Vec<MenuTypeDeclaration> {
-        let types: Vec<(String, Value)> = host
-            .registrations()
+/// A menu's slot layout and data slot count, for a menu type's declaration or a live menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MenuLayout {
+    pub slots: Vec<MenuSlotRole>,
+    pub data_slots: usize,
+}
+
+impl MenuLayout {
+    /// The menu's own slots (the owned ones come first).
+    pub fn owned_slots(&self) -> usize {
+        self.slots
             .iter()
-            .filter(|entry| entry.registry == "minecraft:menu")
-            .filter(|entry| !entry.id.starts_with("minecraft:"))
-            .map(|entry| (entry.id.clone(), entry.value.clone()))
-            .collect();
-        types
-            .into_iter()
-            .map(|(id, menu_type)| MenuTypeDeclaration {
-                file: self.menu_type_layout(host, menu_type),
-                id,
-            })
-            .collect()
+            .filter(|role| matches!(role, MenuSlotRole::Owned { .. }))
+            .count()
     }
 
-    fn menu_type_layout(
-        &self,
-        host: &mut StdHost,
-        menu_type: Value,
-    ) -> Result<serde_json::Value, String> {
-        let before = host.unknown_host_call_count();
-        let (menu, inventory) = self
-            .build_menu_for_declaration(host, menu_type)
-            .map_err(|error| format!("its MenuSupplier did not build a menu: {error}"))?;
-        if host.unknown_host_call_count() != before {
-            return Err("building its menu leaned on an unmodelled call".to_owned());
-        }
-        if menu == Value::Ref(None) {
-            return Err("its MenuSupplier returned null".to_owned());
-        }
-        let Some(menu_models::Object::Menu(state)) =
-            expect_ref(&menu).and_then(|key| host.menu_states.get(key))
-        else {
-            return Err("its menu is not one Decaf models".to_owned());
-        };
-        let data_slots = state.live.data_slots.len();
-        let slots = menu_models::menu_broadcast_slots(&host.menu_states, &menu)
-            .ok_or_else(|| "its slots are not ones Decaf models".to_owned())?;
-        let mut owned = 0usize;
-        let mut inputs = Vec::new();
-        let mut player = Vec::new();
-        let mut storages = std::collections::BTreeSet::new();
-        for slot in &slots {
-            let slot_class = jar_object::object_class(&slot.slot).unwrap_or("?");
-            if !matches!(slot_class, SLOT | ICM_INPUT_SLOT | ICM_RESULT_SLOT) {
-                return Err(format!(
-                    "slot {} is a {slot_class}, whose own rules a declaration can't carry",
-                    slot.index
-                ));
-            }
-            if slot.container == inventory {
-                player.push(slot.container_slot);
-                continue;
-            }
-            if !player.is_empty() {
-                return Err(format!(
-                    "container slot {} comes after player inventory slots",
-                    slot.index
-                ));
-            }
-            let container_class = jar_object::object_class(&slot.container).unwrap_or("?");
-            if !matches!(
-                container_class,
-                SIMPLE_CONTAINER | RESULT_CONTAINER | ICM_INPUT_CONTAINER | ICM_RESULT_CONTAINER
-            ) {
-                return Err(format!(
-                    "slot {} shows a {container_class}, whose stack size a declaration can't carry",
-                    slot.index
-                ));
-            }
-            if !storages.insert((format!("{:?}", slot.container), slot.container_slot)) {
-                return Err(format!(
-                    "slot {} shows storage another slot already shows",
-                    slot.index
-                ));
-            }
-            if slot_class == ICM_INPUT_SLOT {
-                inputs.push(slot.index);
-            }
-            owned += 1;
-        }
-        let standard: Vec<i32> = (9..36).chain(0..9).collect();
-        let player_inventory = match player.len() {
-            0 => false,
-            _ if player == standard => true,
-            _ => {
-                return Err(
-                    "its player slots are not vanilla's 27 main slots then the hotbar".to_owned(),
-                );
-            }
-        };
+    /// As a Sunrise content menu declaration (`data/<ns>/sunrise/menu/<path>.json`): one owned
+    /// slot per container slot, the standard player group when the menu has it, the combiner's
+    /// input slots as `inputs`, and the data slots. No `results`: a declared result makes Sunrise
+    /// return the inputs itself on close, where the Java menu's own `removed` decides that.
+    pub fn declaration(&self) -> serde_json::Value {
+        let owned = self.owned_slots();
+        let inputs: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, role)| matches!(role, MenuSlotRole::Owned { input: true }))
+            .map(|(index, _)| index)
+            .collect();
         let mut file = serde_json::Map::new();
         file.insert("slots".into(), owned.into());
         if owned > 0 {
@@ -6029,23 +5948,160 @@ impl NativeJar {
         if !inputs.is_empty() {
             file.insert("inputs".into(), inputs.into());
         }
-        file.insert("player_inventory".into(), player_inventory.into());
-        if data_slots > 0 {
-            file.insert("data_slots".into(), data_slots.into());
+        file.insert("player_inventory".into(), (self.slots.len() > owned).into());
+        if self.data_slots > 0 {
+            file.insert("data_slots".into(), self.data_slots.into());
         }
-        Ok(serde_json::Value::Object(file))
+        serde_json::Value::Object(file)
+    }
+}
+
+/// One `MenuType` a jar registered, as an embedder needs to declare it before any menu opens:
+/// the layout every menu its `MenuSupplier` builds has.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MenuTypeDeclaration {
+    /// The registry id (`minecraft:menu`).
+    pub id: String,
+    /// The layout ([`MenuLayout::declaration`] is its Sunrise file), or why it can't be declared.
+    pub layout: Result<MenuLayout, String>,
+}
+
+/// Classify a built `menu`'s slots, whose player slots show `inventory`. Exact only for vanilla
+/// slot and container classes (`Slot` and the combiner's own, `SimpleContainer`,
+/// `ResultContainer`): a jar `Slot` or `Container` can answer its own stack size and rules. The
+/// container slots come first, then the player's 36 in `addStandardInventorySlots` order (27
+/// main, then the hotbar), the order Sunrise appends them in, so a Java slot index is the
+/// embedder's slot index.
+fn classify_layout(host: &StdHost, menu: &Value, inventory: &Value) -> Result<MenuLayout, String> {
+    let Some(menu_models::Object::Menu(state)) =
+        expect_ref(menu).and_then(|key| host.menu_states.get(key))
+    else {
+        return Err("its menu is not one Decaf models".to_owned());
+    };
+    let data_slots = state.live.data_slots.len();
+    let slots = menu_models::menu_broadcast_slots(&host.menu_states, menu)
+        .ok_or_else(|| "its slots are not ones Decaf models".to_owned())?;
+    let mut roles = Vec::with_capacity(slots.len());
+    let mut player = Vec::new();
+    let mut storages = std::collections::BTreeSet::new();
+    for slot in &slots {
+        let slot_class = jar_object::object_class(&slot.slot).unwrap_or("?");
+        if !matches!(slot_class, SLOT | ICM_INPUT_SLOT | ICM_RESULT_SLOT) {
+            return Err(format!(
+                "slot {} is a {slot_class}, whose own rules a declaration can't carry",
+                slot.index
+            ));
+        }
+        if slot.container == *inventory {
+            player.push(slot.container_slot);
+            roles.push(MenuSlotRole::Player(slot.container_slot));
+            continue;
+        }
+        if !player.is_empty() {
+            return Err(format!(
+                "container slot {} comes after player inventory slots",
+                slot.index
+            ));
+        }
+        let container_class = jar_object::object_class(&slot.container).unwrap_or("?");
+        if !matches!(
+            container_class,
+            SIMPLE_CONTAINER | RESULT_CONTAINER | ICM_INPUT_CONTAINER | ICM_RESULT_CONTAINER
+        ) {
+            return Err(format!(
+                "slot {} shows a {container_class}, whose stack size a declaration can't carry",
+                slot.index
+            ));
+        }
+        if !storages.insert((format!("{:?}", slot.container), slot.container_slot)) {
+            return Err(format!(
+                "slot {} shows storage another slot already shows",
+                slot.index
+            ));
+        }
+        roles.push(MenuSlotRole::Owned {
+            input: slot_class == ICM_INPUT_SLOT,
+        });
+    }
+    let standard: Vec<i32> = (9..36).chain(0..9).collect();
+    if !player.is_empty() && player != standard {
+        return Err("its player slots are not vanilla's 27 main slots then the hotbar".to_owned());
+    }
+    Ok(MenuLayout {
+        slots: roles,
+        data_slots,
+    })
+}
+
+impl StdHost {
+    /// The layout of the Java menu Decaf holds for `uuid` (what [`MenuLayout::declaration`]
+    /// declares for a menu type), read from Decaf's own state: an embedder compares it with the
+    /// menu type it declared before showing the menu. `Err` when no menu is held or its layout
+    /// isn't one a declaration carries.
+    pub fn held_menu_layout(&self, uuid: u128) -> Result<MenuLayout, String> {
+        let entry = self
+            .block_use
+            .players
+            .get(&uuid)
+            .ok_or_else(|| "no menu is held".to_owned())?;
+        let open = entry
+            .open
+            .as_ref()
+            .ok_or_else(|| "no menu is held".to_owned())?;
+        let inventory = entry
+            .inventory
+            .as_ref()
+            .ok_or_else(|| "the menu's inventory is unknown".to_owned())?;
+        classify_layout(self, &open.menu, inventory)
+    }
+}
+
+impl NativeJar {
+    /// Each `MenuType` the jar registered under its own namespace, with the layout every menu its
+    /// `MenuSupplier` builds has: declared only when `menu_structure` proves from the bytecode that
+    /// the layout can't depend on the player, inventory, level or static state, and then read
+    /// off one construction (`MenuType.create(0, inventory)`, as a server player's). Every other
+    /// type gets the reason it can't be declared, never a guessed layout.
+    pub fn menu_type_declarations(&self, host: &mut StdHost) -> Vec<MenuTypeDeclaration> {
+        let types: Vec<(String, Value)> = host
+            .registrations()
+            .iter()
+            .filter(|entry| entry.registry == "minecraft:menu")
+            .filter(|entry| !entry.id.starts_with("minecraft:"))
+            .map(|entry| (entry.id.clone(), entry.value.clone()))
+            .collect();
+        types
+            .into_iter()
+            .map(|(id, menu_type)| MenuTypeDeclaration {
+                layout: self.menu_type_layout(host, menu_type),
+                id,
+            })
+            .collect()
+    }
+
+    fn menu_type_layout(&self, host: &mut StdHost, menu_type: Value) -> Result<MenuLayout, String> {
+        let before = host.unknown_host_call_count();
+        let (menu, inventory) = self.build_menu_for_declaration(host, menu_type)?;
+        if host.unknown_host_call_count() != before {
+            return Err("building its menu leaned on an unmodelled call".to_owned());
+        }
+        if menu == Value::Ref(None) {
+            return Err("its MenuSupplier returned null".to_owned());
+        }
+        classify_layout(host, &menu, &inventory)
     }
 
     /// `MenuType.create(0, inventory)` (26.3 offsets 0-11: the type's `MenuSupplier`) for a
-    /// server player of no one in particular, in the overworld: the menu and the `Inventory` its
-    /// player slots show. A server player's, since that is the menu the live-menu bridge runs and
-    /// a constructor may read `inventory.player.level()` (Runes' does), which only the server
-    /// side of a block use answers here.
+    /// server player of no one in particular, in the overworld, once `menu_structure` found its
+    /// layout fixed: the menu and the `Inventory` its player slots show. A server player's, since
+    /// that is the menu the live-menu bridge runs and a constructor may read
+    /// `inventory.player.level()` (Runes' does), which only the server side of a block use
+    /// answers here.
     fn build_menu_for_declaration(
         &self,
         host: &mut StdHost,
         menu_type: Value,
-    ) -> Result<(Value, Value), NativeError> {
+    ) -> Result<(Value, Value), String> {
         let player_data = BlockUsePlayerData {
             uuid: 0,
             name: "Player".to_owned(),
@@ -6079,7 +6135,12 @@ impl NativeJar {
             live_effects: Vec::new(),
         });
         let roots = [menu_type.clone(), level, player, inventory.clone()];
+        let mut refusal = None;
         let built = self.with_persistent_runtime(host, &roots, |runtime| {
+            if let Err(reason) = crate::runtime::menu_structure::check(runtime, &menu_type) {
+                refusal = Some(reason);
+                return Ok(Value::Ref(None));
+            }
             let create = mref(
                 menu_models::MENU_TYPE,
                 "create",
@@ -6092,7 +6153,12 @@ impl NativeJar {
                 })
         });
         host.block_use.active_use = previous_active;
-        Ok((built?, inventory))
+        if let Some(reason) = refusal {
+            return Err(reason);
+        }
+        let menu =
+            built.map_err(|error| format!("its MenuSupplier did not build a menu: {error}"))?;
+        Ok((menu, inventory))
     }
 }
 

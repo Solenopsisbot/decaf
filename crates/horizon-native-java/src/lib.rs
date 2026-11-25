@@ -209,9 +209,10 @@ mod list_equality;
 mod live_menu;
 mod map_compute;
 mod menu_models;
+mod menu_structure;
 pub use live_menu::{
-    ContainerInput, LiveMenuEffect, LiveMenuOutcome, MenuClick, MenuPlayerFacts,
-    MenuTypeDeclaration, Prediction,
+    ContainerInput, LiveMenuEffect, LiveMenuOutcome, MenuClick, MenuLayout, MenuPlayerFacts,
+    MenuSlotRole, MenuTypeDeclaration, Prediction,
 };
 mod method_handles;
 mod mixin_class_loading;

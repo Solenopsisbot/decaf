@@ -421,6 +421,8 @@ struct State {
     leavers: Vec<FacadePlayer>,
     /// `MinecraftServer.getTickCount()` as the last server tick reported it.
     tick_count: i32,
+    /// What the live Java menu bridge keeps between calls (`live_menu.rs`).
+    live_menus: live_menu::Bridge,
     /// Whether the open server is a dedicated one, from `server_about_to_start`.
     dedicated: bool,
     /// The world folder and registries the host gives (`server_facts.rs`), read at
@@ -676,6 +678,9 @@ fn hyphenated_uuid(uuid: u128) -> String {
 impl Hooks for HorizonJava {
     /// Register scoped Sunrise block parts (placement and block-use hooks) for Java mod blocks.
     fn register(&self, registrar: &mut dyn Registrar, context: &RegistrationContext) {
+        // A player's `entity_tick_pre` / `entity_tick_post` come right around its own
+        // `ServerPlayer.tick`, where a held Java menu's first `stillValid` runs (`live_menu.rs`).
+        registrar.entity_tick_each("minecraft:player");
         let mut state = self.lock();
         content::register_placement_parts(&mut state, context, registrar, Arc::clone(&self.state));
         drop(state);
@@ -992,6 +997,34 @@ impl Hooks for HorizonJava {
         self.on_player_tick_post(host, event.player);
     }
 
+    /// Whether the game should tell entity ticks: while a jar holds a Java menu for a player,
+    /// whose `ServerPlayer.tick` runs the menu's first check (`live_menu.rs`).
+    fn entity_tick_listened(
+        &self,
+        host: HostSide<'_>,
+        event: &mut mod_api::EntityTickListenedEvent,
+    ) {
+        if matches!(host, HostSide::Server(_)) && live_menu::any_held(self) {
+            event.listened = true;
+        }
+    }
+
+    /// A player is about to tick (`tickNonPassenger`): its held Java menu's `broadcastChanges`
+    /// and first `stillValid` (`ServerPlayer.tick` offsets 38-65).
+    fn entity_tick_pre(&self, host: HostSide<'_>, event: &mut mod_api::EntityTickPreEvent<'_>) {
+        if let HostSide::Server(host) = host {
+            live_menu::entity_tick_pre(self, host, event.entities, event.kinds);
+        }
+    }
+
+    /// A player ticked: whether its menu's first check ran before a block change it would have
+    /// seen (`live_menu.rs`).
+    fn entity_tick_post(&self, host: HostSide<'_>, event: &mut mod_api::EntityTickPostEvent<'_>) {
+        if let HostSide::Server(host) = host {
+            live_menu::entity_tick_post(self, host, event.entities, event.kinds);
+        }
+    }
+
     /// A server level's tick starts (Fabric's `START_LEVEL_TICK`, NeoForge's
     /// `LevelTickEvent.Pre`).
     fn level_tick_pre(&self, mut host: HostSide<'_>, event: &mut LevelTickPreEvent) {
@@ -1158,6 +1191,14 @@ impl Hooks for HorizonJava {
     /// `ServerPlayerEvents.LEAVE`, NeoForge's `PlayerLoggedOutEvent`). The player is already off
     /// the list when a listener hears it, as the hook says.
     fn player_logged_out(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedOutEvent<'_>) {
+        // A Java menu still held for the leaver (Sunrise told no `menu_closed` before this):
+        // `Player.remove` closes it, and a disconnected player's inputs drop (`live_menu.rs`).
+        live_menu::close_for_removal(
+            self,
+            &mut *host,
+            event.player,
+            live_menu::Removal::Disconnected,
+        );
         // The leaver's last entry, taken before the refresh drops them (or kept by an earlier
         // refresh that already did): the same `ServerPlayer`.
         let leaving = {
@@ -1220,14 +1261,19 @@ impl Hooks for HorizonJava {
         block_use::menu_closed(self, host, event.uuid, event.window);
     }
 
-    /// A menu opened for a player, by anything. Its container id is the `ServerPlayer`'s
-    /// `containerCounter` now, which every jar's block-use model follows (`block_use.rs`).
+    /// A menu opened for a player, by anything: the `ServerPlayer`'s `containerCounter` moved,
+    /// which every jar's block-use model follows (`block_use.rs`). It is read from the player
+    /// (`PlayerRef::container_counter`), not from the menu: Sunrise has no handle for some menus
+    /// (crafting tables, merchants, workstations, lecterns, mounts), whose opens move it all the
+    /// same. Each Java call reads it again before it may open a menu (`live_menu.rs`).
     fn player_container_open(
         &self,
         host: &mut dyn ServerHost,
         event: &mut mod_api::PlayerContainerOpenEvent<'_>,
     ) {
-        let container_id = event.menu.and_then(|menu| menu.container_id(&*host));
+        let container_id = host
+            .player(event.player)
+            .and_then(|player| player.container_counter(&*host));
         let mut state = self.lock();
         block_use::container_opened(&mut state, event.player, container_id);
     }
@@ -1235,6 +1281,14 @@ impl Hooks for HorizonJava {
     /// A player's data was copied to their new player (Fabric's `COPY_FROM`, NeoForge's
     /// `PlayerEvent.Clone`); `was_death` says a death caused it.
     fn player_clone(&self, host: &mut dyn ServerHost, event: &mut PlayerCloneEvent<'_>) {
+        // The old `ServerPlayer` goes (`Player.remove`: `KILLED` after a death, the End's return
+        // a dimension change): a Java menu still held for it closes first (`live_menu.rs`).
+        let removal = if event.was_death {
+            live_menu::Removal::Killed
+        } else {
+            live_menu::Removal::Live
+        };
+        live_menu::close_for_removal(self, &mut *host, event.player, removal);
         // `PlayerList.respawn` built a new `ServerPlayer` with the old id: its life.
         self.next_life(event.player, false);
         // The old player is lent for this hook (`getOriginal()`); its reads need no host.
@@ -3287,6 +3341,7 @@ impl State {
             // start fresh.
             jar.host.forget_unknown_server_sound_streams();
         }
+        self.live_menus.reset_server();
         self.leavers.clear();
     }
 }

@@ -14,29 +14,60 @@
 //! semantics, as #652 transcribed them, stay the one source of truth, including the mod's own
 //! `createResult`, `onTake`, `quickMoveStack` and `mayPlace` overrides.
 //!
-//! The menu type is declared by the bake from the menu its `MenuType` builds
-//! ([`runtime::NativeJar::menu_type_declarations`]): one owned slot per container slot, in Java's
-//! order, then the player's 36 slots in vanilla's standard order, so a Java slot index is the
-//! Sunrise slot index. It declares no `results`: a processing menu's close would make Sunrise
-//! return the inputs itself, where the Java menu's `removed` decides that.
+//! Cancelling Sunrise's click also means Sunrise never tells other mods' `menu_slot_take` parts of
+//! a take: that hook is the engine's to dispatch (its `BlockEntityScope` subject is built by the
+//! game; a mod can't raise it). Each Java `Slot.onTake` is counted instead
+//! (`sunrise#live_menu:menu_slot_take_not_dispatched`), so the gap shows.
+//!
+//! # The menu type
+//!
+//! The bake declares a jar's menu type from the menu its `MenuType` builds
+//! ([`runtime::NativeJar::menu_type_declarations`]) only when the bytecode proves the layout can't
+//! vary (`runtime/menu_structure.rs`): one owned slot per container slot, in Java's order, then
+//! the player's 36 slots in vanilla's standard order, so a Java slot index is the Sunrise slot
+//! index. It declares no `results`: a processing menu's close would make Sunrise return the
+//! inputs itself, where the Java menu's `removed` decides that. Before a window opens, the live
+//! Java menu's layout is compared with that declaration (built here the same way, once per jar
+//! and type), and its initial data slot values (`sendInitialData`) are what the window opens
+//! with: a mismatch, or data Decaf doesn't know, refuses the open (counted), never a mismatched
+//! window.
 //!
 //! # The player
 //!
 //! Each call reads the player from Sunrise into [`runtime::MenuPlayerFacts`]: their 43 inventory
-//! slots, selected hotbar slot, creative `instabuild`, eye position and block interaction range,
-//! the block at the menu's `ContainerLevelAccess` position, whether they are dying, their
-//! `tickCount`, and the menu's cursor. A fact Sunrise can't give stays unknown, and the Java step
-//! that needs it counts.
+//! slots, selected hotbar slot, creative `instabuild`, position, eye position and block
+//! interaction range, the block at the menu's `ContainerLevelAccess` position, their `tickCount`,
+//! the menu's cursor, and their `containerCounter`, read fresh before every call that may open a
+//! menu, so Java's window ids can't drift from Sunrise's. A fact Sunrise can't give stays
+//! unknown, and the Java step that needs it counts.
 //!
-//! # Ticks and closes
+//! # Ticks
 //!
-//! `ServerPlayer.tick` runs `broadcastChanges` and `stillValid` each tick, and `doTick` checks
-//! `stillValid` again: [`player_tick`] runs both ([`runtime::NativeJar::tick_player_menu`],
-//! [`runtime::NativeJar::check_player_menu_valid`]) from `player_tick_post`, and a failed check
-//! closes the Sunrise window after the Java close returned the cursor and inputs. A window the
-//! player closes runs the Java close (`removed`, `clearContainer`) from `menu_closed`
-//! ([`close_held`]): Sunrise already put the cursor back, so the call starts from an empty one
-//! ([`runtime::MenuPlayerFacts::carried`]).
+//! 26.3 runs a player's menu twice a tick: `ServerPlayer.tick` (the level's entity tick)
+//! `broadcastChanges` and checks `stillValid` (offsets 38-65, after `gameMode.tick`), and
+//! `ServerPlayer.doTick` (the connection tick, after every level) checks `stillValid` again right
+//! after `Player.tick` (offsets 18-38). The first runs at Sunrise's `entity_tick_pre` for the
+//! player ([`entity_tick_pre`]; the player type is told alone, `entity_tick_each`), before
+//! `gameMode.tick`: if that tick changes the block at the menu's position (a delayed break), the
+//! check saw the block before the change, and `entity_tick_post` counts it. The second runs at
+//! `player_tick_post` ([`player_tick`]), which Sunrise fires after the rest of `doTick` (its
+//! food, statistics and score updates), none of which moves the player, changes a block or an
+//! inventory slot: the facts the check reads are the ones vanilla's sees. A failed check closes
+//! the Sunrise window after the Java close returned the cursor and inputs.
+//!
+//! # Closes
+//!
+//! A window that closes runs the Java close (`removed`, `clearContainer`) from `menu_closed`
+//! ([`close_held`]) with the flags vanilla's `dropOrPlaceInInventory` reads, matching Sunrise's own
+//! rule for its processing menus (`MenuRemoval::drops_items`, which the mod API doesn't carry):
+//! a live player, or a dimension change, gets the inputs back; a dead player's close (Sunrise
+//! closes a dead player's menu with `Killed`) is a removal for a reason other than a dimension
+//! change, and one Sunrise tells after the player left (`menu_closed` follows the disconnect)
+//! is a disconnect: both drop them, at the player's last known position when Sunrise has no
+//! player to drop from. Sunrise already put the cursor back (or dropped it), so the call starts
+//! from an empty one ([`runtime::MenuPlayerFacts::carried`]). A logout or respawn that reaches
+//! this mod while a Java menu is still held closes it the same way first, so the player's new
+//! `ServerPlayer` never loses what the old one's menu held.
 //!
 //! Nothing here names a mod.
 
@@ -44,16 +75,60 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-    Flow, HostTransaction, ItemPlace, ItemResource, ItemStack, MenuClickedEvent, MenuPart, MenuRef,
-    MenuSlotBacking, PlayerRef, ServerHost, StatType, TransactionContext,
+    Flow, HostTransaction, ItemPlace, ItemResource, ItemStack, LevelRef, MenuClickedEvent,
+    MenuPart, MenuRef, MenuSlotBacking, PlayerRef, ServerHost, StatType, TransactionContext,
 };
 
 use crate::block_use::{self, MenuApplied};
 use crate::runtime::{
     self, BlockUsePlayerData, ContainerInput, ExecutionBudget, LiveMenuEffect, LiveMenuOutcome,
-    MenuClick, MenuEffect, MenuPlayerFacts, PlayerContainer, StdHost, Value,
+    MenuClick, MenuEffect, MenuLayout, MenuPlayerFacts, MenuSlotRole, PlayerContainer, StdHost,
+    Value,
 };
 use crate::{JAR_BUDGET, LOG, LoadedJar, State, caught};
+
+/// What the bridge keeps between calls.
+#[derive(Default)]
+pub(crate) struct Bridge {
+    /// Each player's last read: where a close finds them once Sunrise no longer can.
+    seen: BTreeMap<u128, Seen>,
+    /// Each jar's menu types as it declares them, by jar id then menu type id.
+    layouts: BTreeMap<String, BTreeMap<String, Result<MenuLayout, String>>>,
+    /// The block each player's `ServerPlayer.tick` check saw at `entity_tick_pre`.
+    tick_blocks: BTreeMap<u128, Option<String>>,
+}
+
+impl Bridge {
+    /// A new server: its players are new, and so are their positions.
+    pub(crate) fn reset_server(&mut self) {
+        self.seen.clear();
+        self.tick_blocks.clear();
+    }
+}
+
+/// A player as the bridge last read them.
+#[derive(Clone, Debug)]
+pub(crate) struct Seen {
+    level: LevelRef,
+    dimension: String,
+    position: Option<[f64; 3]>,
+    eye: Option<[f64; 3]>,
+    name: String,
+    entity_id: i32,
+}
+
+/// Why a window closed, as vanilla's `dropOrPlaceInInventory` reads it (`isRemoved`, its
+/// `RemovalReason`, `hasDisconnected`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Removal {
+    /// The player closed it, walked away, opened another, or changed dimension
+    /// (`CHANGED_DIMENSION` places back too): the inputs go back to the inventory.
+    Live,
+    /// The player died (`Player.remove(KILLED)`): the inputs drop.
+    Killed,
+    /// The player left (`hasDisconnected()`): the inputs drop.
+    Disconnected,
+}
 
 /// `Inventory`'s slots as `MenuPlayerFacts` and `PlayerRef::with_inventory` number them: 0-35
 /// the items, 36-39 feet to head, 40 the off hand, 41 body, 42 saddle.
@@ -175,8 +250,9 @@ pub(crate) enum Call {
     Tick,
     /// `ServerPlayer.doTick`'s second `stillValid`.
     Validity,
-    /// `handleContainerClose` → `doCloseContainer`, after Sunrise closed the window.
-    Close,
+    /// `doCloseContainer` after Sunrise closed the window (`handleContainerClose`, or the
+    /// player's removal).
+    Close(Removal),
 }
 
 /// A stack the Java menu left somewhere, as Sunrise should show it.
@@ -231,6 +307,8 @@ pub(crate) struct Prepared {
     pub(crate) unknown_host_calls: BTreeMap<String, usize>,
     pub(crate) unknown_host_call_count: usize,
     pub(crate) failure: Option<String>,
+    /// Where the player was, for a drop Sunrise has no player to make.
+    pub(crate) seen: Option<Seen>,
 }
 
 /// What carrying out a [`Prepared`] on Sunrise did.
@@ -247,6 +325,7 @@ pub(crate) struct PlayerRead {
     pub(crate) facts: MenuPlayerFacts,
     pub(crate) data: BlockUsePlayerData,
     pub(crate) dimension: Option<String>,
+    pub(crate) seen: Option<Seen>,
 }
 
 /// Read what a live-menu call needs of `player` from Sunrise, converting stacks with `jar_host`.
@@ -316,12 +395,10 @@ pub(crate) fn read_player(
             .and_then(|living| living.attribute_value(host, BLOCK_INTERACTION_RANGE)),
         access_block,
         // Sunrise resolved the player, so they are on the server's list: not removed, not
-        // disconnected. A dying player may be closing at death or at respawn's removal, which
-        // decide `dropOrPlaceInInventory` differently: unknown then.
+        // disconnected. A close decides those from why it closed (`Removal`).
         removed: false,
         removed_for_dimension_change: false,
         disconnected: false,
-        departure_unknown: health.is_none_or(|health| health <= 0.0),
         dead: health.is_some_and(|health| health <= 0.0),
         tick_count: entity.tick_count(host),
         carried,
@@ -340,13 +417,56 @@ pub(crate) fn read_player(
         main_hand: None,
         off_hand: None,
     };
+    let level = entity.level(host);
+    let seen = level.map(|level| Seen {
+        level,
+        dimension: level.dimension_id().to_owned(),
+        position: facts.position,
+        eye: facts.eye_position,
+        name: data.name.clone(),
+        entity_id: entity.id() as i32,
+    });
     PlayerRead {
         facts,
         data,
-        dimension: entity
-            .level(host)
-            .map(|level| level.dimension_id().to_owned()),
+        dimension: level.map(|level| level.dimension_id().to_owned()),
+        seen,
     }
+}
+
+/// A player Sunrise no longer has (they left), as the bridge last read them: removed and
+/// disconnected, with no inventory to read (a disconnect drops what the close hands back).
+fn departed_read(seen: &Seen, uuid: u128, incarnation: Option<(u32, u32)>) -> PlayerRead {
+    PlayerRead {
+        facts: MenuPlayerFacts {
+            eye_position: seen.eye,
+            position: seen.position,
+            removed: true,
+            disconnected: true,
+            carried: Some(StdHost::empty_item_stack()),
+            ..MenuPlayerFacts::default()
+        },
+        data: BlockUsePlayerData {
+            uuid,
+            name: seen.name.clone(),
+            entity_id: Some(seen.entity_id),
+            incarnation,
+            container: PlayerContainer::Inventory,
+            sneaking: false,
+            spectator: false,
+            main_hand: None,
+            off_hand: None,
+        },
+        dimension: Some(seen.dimension.clone()),
+        seen: Some(seen.clone()),
+    }
+}
+
+/// The raw block state at the held menu's access position, as Sunrise spells it.
+fn access_block_now(host: &dyn ServerHost, player: PlayerRef, pos: [i32; 3]) -> Option<String> {
+    let level = player.entity().level(host)?;
+    let state = level.block_state(host, pos)?;
+    host.block_state_string(state)
 }
 
 /// Run `call` on the Java menu window `window` that a jar holds for the player, under the state
@@ -364,31 +484,73 @@ pub(crate) fn prepare(
             .is_some_and(|open| open.container_id == window)
     })?;
     let incarnation = state.lives.get(&uuid).copied();
+    let access_pos = state.jars[jar_index]
+        .host
+        .player_open_menu(uuid)?
+        .access_pos;
+    let read = match (host.player(uuid), &call) {
+        (Some(player), _) => {
+            let jar = &mut state.jars[jar_index];
+            // `ServerPlayer.containerCounter` is Sunrise's, read fresh: whatever opened since
+            // (a crafting table, a merchant, another mod) moved it, and a Java `openMenu` this
+            // call makes takes the id Sunrise's next open takes.
+            if let Some(counter) = player.container_counter(host) {
+                jar.host.server_player_container_opened(uuid, Some(counter));
+            }
+            let menu = player
+                .container_menu(host)
+                .filter(|menu| menu.container_id(host) == Some(window));
+            let (container, cursor) = match call {
+                // Sunrise already put the cursor back into the inventory (or dropped it).
+                Call::Close(_) => (PlayerContainer::Inventory, Some(None)),
+                _ => (PlayerContainer::Open(window), menu.map(Some)),
+            };
+            let mut read = read_player(
+                host,
+                &mut jar.host,
+                incarnation,
+                player,
+                access_pos,
+                container,
+                cursor,
+            );
+            match call {
+                // `Player.remove(KILLED)`: removed, for a reason other than a dimension change.
+                Call::Close(Removal::Killed) => read.facts.removed = true,
+                Call::Close(Removal::Disconnected) => {
+                    read.facts.removed = true;
+                    read.facts.disconnected = true;
+                }
+                _ => {}
+            }
+            if let Some(seen) = read.seen.clone() {
+                state.live_menus.seen.insert(uuid, seen);
+            }
+            read
+        }
+        (None, Call::Close(_)) => match state.live_menus.seen.get(&uuid) {
+            Some(seen) => departed_read(seen, uuid, incarnation),
+            None => {
+                state.jars[jar_index]
+                    .host
+                    .note_unknown_game_hook("sunrise#live_menu:departed_unseen");
+                return None;
+            }
+        },
+        (None, _) => {
+            state.jars[jar_index]
+                .host
+                .note_unknown_game_hook("sunrise#live_menu:player_unavailable");
+            return None;
+        }
+    };
     let jar = &mut state.jars[jar_index];
-    let access_pos = jar.host.player_open_menu(uuid)?.access_pos;
-    let player = host.player(uuid);
-    let menu = player
-        .and_then(|player| player.container_menu(host))
-        .filter(|menu| menu.container_id(host) == Some(window));
-    let Some(player) = player else {
-        jar.host
-            .note_unknown_game_hook("sunrise#live_menu:player_unavailable");
-        return None;
-    };
-    let (container, cursor) = match call {
-        // Sunrise already put the cursor back into the inventory.
-        Call::Close => (PlayerContainer::Inventory, Some(None)),
-        _ => (PlayerContainer::Open(window), menu.map(Some)),
-    };
-    let read = read_player(
-        host,
-        &mut jar.host,
-        incarnation,
-        player,
-        access_pos,
-        container,
-        cursor,
-    );
+    // The menu's own slots, the only ones Sunrise's `menu_slot_take` hears a take from.
+    let owned_slots = jar
+        .host
+        .held_menu_layout(uuid)
+        .map(|layout| layout.owned_slots())
+        .ok();
     let Some(dimension) = read.dimension.clone() else {
         jar.host
             .note_unknown_game_hook("sunrise#live_menu:unknown_level");
@@ -421,7 +583,7 @@ pub(crate) fn prepare(
             window,
             &budget,
         ),
-        Call::Close => jar.jar.close_player_menu_live(
+        Call::Close(_) => jar.jar.close_player_menu_live(
             &mut jar.host,
             &read.data,
             &dimension,
@@ -450,7 +612,7 @@ pub(crate) fn prepare(
             return None;
         }
     };
-    Some(mirror(
+    let mut prepared = mirror(
         jar,
         host,
         jar_index,
@@ -458,11 +620,15 @@ pub(crate) fn prepare(
         window,
         &read.facts,
         outcome,
-    ))
+        owned_slots,
+    );
+    prepared.seen = read.seen;
+    Some(prepared)
 }
 
 /// Turn a call's outcome into what Sunrise shows and does: the state Java left, converted to
 /// mod API stacks, and its effects.
+#[allow(clippy::too_many_arguments)]
 fn mirror(
     jar: &mut LoadedJar,
     host: &dyn ServerHost,
@@ -471,6 +637,7 @@ fn mirror(
     window: i32,
     facts: &MenuPlayerFacts,
     outcome: LiveMenuOutcome,
+    owned_slots: Option<usize>,
 ) -> Prepared {
     let mut counted = Vec::new();
     let desired = |value: &Value, before: Option<&Value>, counted: &mut Vec<&'static str>| {
@@ -570,6 +737,20 @@ fn mirror(
             LiveMenuEffect::AwardRecipes { recipes } => {
                 effects.push(SideEffect::AwardRecipes(recipes.clone()))
             }
+            // `Slot.onTake` on one of the menu's own slots: where Sunrise would tell
+            // `menu_slot_take` parts of the take (it never tells takes from the player's
+            // inventory). The engine dispatches that hook (a mod can't), and this click is the
+            // Java menu's, so no part hears it: counted per take, so the gap shows. A take from
+            // a slot Decaf can't place is counted too.
+            LiveMenuEffect::SlotTaken { slot } => {
+                let own = match (slot, owned_slots) {
+                    (Some(slot), Some(owned)) => usize::try_from(*slot).is_ok_and(|s| s < owned),
+                    _ => true,
+                };
+                if own {
+                    counted.push("sunrise#live_menu:menu_slot_take_not_dispatched");
+                }
+            }
         }
     }
     Prepared {
@@ -586,6 +767,7 @@ fn mirror(
         unknown_host_calls: outcome.unknown_host_calls,
         unknown_host_call_count: outcome.unknown_host_call_count,
         failure: outcome.failure,
+        seen: None,
     }
 }
 
@@ -630,12 +812,9 @@ fn stat_type_of(id: &str) -> Option<StatType> {
 /// one transaction, then the opens and closes the Java call made.
 pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
     let mut applied = Applied::default();
-    let Some(player) = host.player(prepared.uuid) else {
-        applied.counted.push("sunrise#live_menu:player_unavailable");
-        return applied;
-    };
+    let player = host.player(prepared.uuid);
     let menu = player
-        .container_menu(&*host)
+        .and_then(|player| player.container_menu(&*host))
         .filter(|menu| menu.container_id(&*host) == Some(prepared.window));
     let written = host.transaction(|host, tx| {
         let mut counted = Vec::new();
@@ -663,10 +842,12 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
             let Desired::Stack(stack) = desired else {
                 continue;
             };
-            if player
-                .set_inventory_slot(host, *slot, stack.clone())
-                .is_err()
-            {
+            let written = player.is_some_and(|player| {
+                player
+                    .set_inventory_slot(host, *slot, stack.clone())
+                    .is_ok()
+            });
+            if !written {
                 counted.push("sunrise#live_menu:inventory_write_refused");
             }
         }
@@ -675,24 +856,31 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
                 SideEffect::Drop {
                     stack,
                     retain_ownership,
-                } => match player.drop_stack(host, stack.clone(), *retain_ownership) {
-                    Ok(None) => {}
-                    // Refused (a cancelled toss, a player in another level): vanilla's drop
-                    // had no refusal, so the stack goes back to the inventory and is counted.
-                    _ => counted.push("sunrise#live_menu:drop_refused"),
-                },
+                } => {
+                    if !drop_in_world(
+                        host,
+                        player,
+                        prepared.seen.as_ref(),
+                        stack,
+                        *retain_ownership,
+                    ) {
+                        counted.push("sunrise#live_menu:drop_refused");
+                    }
+                }
                 SideEffect::AwardStat {
                     stat_type,
                     key,
                     amount,
                 } => {
-                    if !player.award_stat(host, *stat_type, key, *amount) {
+                    if !player
+                        .is_some_and(|player| player.award_stat(host, *stat_type, key, *amount))
+                    {
                         counted.push("sunrise#live_menu:award_stat_refused");
                     }
                 }
                 SideEffect::AwardRecipes(recipes) => {
                     let ids: Vec<&str> = recipes.iter().map(String::as_str).collect();
-                    if player.award_recipes(host, &ids).is_none() {
+                    if !player.is_some_and(|player| player.award_recipes(host, &ids).is_some()) {
                         counted.push("sunrise#live_menu:award_recipes_refused");
                     }
                 }
@@ -711,8 +899,56 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
             .push("sunrise#live_menu:transaction_refused"),
     }
     applied.menu_applied =
-        block_use::apply_menu_effects(host, prepared.uuid, &prepared.menu_effects);
+        block_use::apply_menu_effects(host, prepared.uuid, &prepared.menu_effects, &[]);
     applied
+}
+
+/// `Player.drop(stack, false, ...)`: thrown by the player through Sunrise's `drop_stack`, or,
+/// where Sunrise has no player to throw from (dead, gone, in another level), spawned where
+/// vanilla's `LivingEntity.createItemStackToDrop` puts it, at the player's last known
+/// `(x, eyeY - 0.3, z)` with the 40-tick pickup delay a player's throw has. `false` when neither
+/// could place it.
+fn drop_in_world(
+    host: &mut dyn ServerHost,
+    player: Option<PlayerRef>,
+    seen: Option<&Seen>,
+    stack: &ItemStack,
+    retain_ownership: bool,
+) -> bool {
+    if let Some(player) = player
+        && matches!(
+            player.drop_stack(host, stack.clone(), retain_ownership),
+            Ok(None)
+        )
+    {
+        return true;
+    }
+    let here = player.and_then(|player| {
+        let entity = player.entity();
+        Some((
+            entity.level(&*host)?,
+            entity.position(&*host)?,
+            entity.eye_position(&*host)?,
+        ))
+    });
+    let at = here.or_else(|| {
+        let seen = seen?;
+        Some((seen.level, seen.position?, seen.eye?))
+    });
+    let Some((level, position, eye)) = at else {
+        return false;
+    };
+    matches!(
+        level.spawn_item(
+            host,
+            position[0],
+            eye[1] - 0.3,
+            position[2],
+            stack.clone(),
+            40
+        ),
+        Ok(Some(_))
+    )
 }
 
 /// Make `place` hold `desired`: take out what is there (unless it is already that stack), then
@@ -791,79 +1027,279 @@ pub(crate) fn record(state: &mut State, prepared: Prepared, applied: Applied) {
     }
 }
 
-/// `ServerPlayer.tick` (`broadcastChanges`, then `stillValid` → `closeContainer`) and
-/// `doTick`'s second `stillValid`, for the Java menu a jar holds for the player, once per player
-/// tick (`player_tick_post`).
-pub(crate) fn player_tick(java: &crate::HorizonJava, host: &mut dyn ServerHost, player: PlayerRef) {
-    let uuid = player.uuid();
-    for call in [Call::Tick, Call::Validity] {
-        let prepared = {
-            let mut state = java.lock();
-            let Some(window) = state.jars.iter().find_map(|jar| {
-                jar.host
-                    .player_open_menu(uuid)
-                    .map(|open| open.container_id)
-            }) else {
-                return;
-            };
-            prepare(&mut state, &*host, uuid, window, call)
+/// The window a jar holds a Java menu in for the player, if any.
+fn held_window(state: &State, uuid: u128) -> Option<i32> {
+    state.jars.iter().find_map(|jar| {
+        jar.host
+            .player_open_menu(uuid)
+            .map(|open| open.container_id)
+    })
+}
+
+/// Whether any jar holds a Java menu for any player: what `entity_tick_listened` answers, so the
+/// game keeps no entity tick list while no menu needs one.
+pub(crate) fn any_held(java: &crate::HorizonJava) -> bool {
+    let state = java.lock();
+    state.jars.iter().any(|jar| {
+        state
+            .lives
+            .keys()
+            .any(|uuid| jar.host.player_open_menu(*uuid).is_some())
+    })
+}
+
+/// Run `call` on the player's held Java menu and carry it out: `false` when none is held.
+fn run_held(java: &crate::HorizonJava, host: &mut dyn ServerHost, uuid: u128, call: Call) -> bool {
+    let prepared = {
+        let mut state = java.lock();
+        let Some(window) = held_window(&state, uuid) else {
+            return false;
         };
-        let Some(prepared) = prepared else {
-            return;
-        };
+        prepare(&mut state, &*host, uuid, window, call)
+    };
+    if let Some(prepared) = prepared {
         let applied = apply(host, &prepared);
         record(&mut java.lock(), prepared, applied);
     }
+    true
 }
 
-/// The player closed Sunrise window `window` (or something closed it for them): the jar that
-/// holds its Java menu runs `doCloseContainer` with the player's facts, and Sunrise gets the
-/// inventory and the side effects its `removed` made. `false` when no jar holds the window with
-/// a player Sunrise can still read (the caller then runs the close without facts).
+/// `entity_tick_pre` for players about to tick: `ServerPlayer.tick`'s `broadcastChanges` and
+/// first `stillValid` (offsets 38-65), with the block the check saw kept for
+/// [`entity_tick_post`].
+pub(crate) fn entity_tick_pre(
+    java: &crate::HorizonJava,
+    host: &mut dyn ServerHost,
+    entities: &[u32],
+    kinds: &[&str],
+) {
+    for uuid in ticking_players(host, entities, kinds) {
+        let seen = {
+            let state = java.lock();
+            let access = state
+                .jars
+                .iter()
+                .find_map(|jar| jar.host.player_open_menu(uuid).map(|open| open.access_pos));
+            match access {
+                None => continue,
+                Some(pos) => pos.and_then(|pos| access_block_now(&*host, host.player(uuid)?, pos)),
+            }
+        };
+        java.lock().live_menus.tick_blocks.insert(uuid, seen);
+        run_held(java, host, uuid, Call::Tick);
+    }
+}
+
+/// `entity_tick_post` for players that ticked: vanilla checks `stillValid` after `gameMode.tick`,
+/// which the check at `entity_tick_pre` ran before; if the block at the menu's position changed
+/// during the tick (a delayed break), the check may have answered differently: counted.
+pub(crate) fn entity_tick_post(
+    java: &crate::HorizonJava,
+    host: &mut dyn ServerHost,
+    entities: &[u32],
+    kinds: &[&str],
+) {
+    for uuid in ticking_players(host, entities, kinds) {
+        let mut state = java.lock();
+        let Some(before) = state.live_menus.tick_blocks.remove(&uuid) else {
+            continue;
+        };
+        let Some(jar_index) = state
+            .jars
+            .iter()
+            .position(|jar| jar.host.player_open_menu(uuid).is_some())
+        else {
+            continue;
+        };
+        let now = state.jars[jar_index]
+            .host
+            .player_open_menu(uuid)
+            .and_then(|open| open.access_pos)
+            .and_then(|pos| access_block_now(&*host, host.player(uuid)?, pos));
+        if now != before {
+            state.jars[jar_index]
+                .host
+                .note_unknown_game_hook("sunrise#live_menu:still_valid_before_game_mode_tick");
+        }
+    }
+}
+
+/// The players among an entity tick's entities, by UUID.
+fn ticking_players(host: &dyn ServerHost, entities: &[u32], kinds: &[&str]) -> Vec<u128> {
+    let players = host.players().server_players();
+    entities
+        .iter()
+        .zip(kinds)
+        .filter(|(_, kind)| **kind == "minecraft:player")
+        .filter_map(|(id, _)| {
+            players
+                .iter()
+                .find(|player| player.entity().id() == *id)
+                .map(|player| player.uuid())
+        })
+        .collect()
+}
+
+/// `ServerPlayer.doTick`'s second `stillValid` (offsets 18-38), from `player_tick_post`.
+pub(crate) fn player_tick(java: &crate::HorizonJava, host: &mut dyn ServerHost, player: PlayerRef) {
+    run_held(java, host, player.uuid(), Call::Validity);
+}
+
+/// Sunrise closed window `window` (the player closed it, walked away, died, or left): the jar
+/// that holds its Java menu runs `doCloseContainer` with the flags vanilla would see. A player
+/// Sunrise still has is a live close, or a killed one when they are dying (Sunrise closes a dead
+/// player's menu with `MenuRemoval::Killed`); one it no longer has left (Sunrise tells the close
+/// after the disconnect). `false` when no jar holds that window.
 pub(crate) fn close_held(
     java: &crate::HorizonJava,
     host: &mut dyn ServerHost,
     uuid: u128,
     window: i32,
 ) -> bool {
-    if host.player(uuid).is_none() {
-        return false;
-    }
+    let removal = match host.player(uuid) {
+        None => Removal::Disconnected,
+        Some(player) => {
+            let dying = host
+                .living(player.entity())
+                .and_then(|living| living.health(&*host))
+                .is_some_and(|health| health <= 0.0);
+            if dying {
+                Removal::Killed
+            } else {
+                Removal::Live
+            }
+        }
+    };
     let prepared = {
         let mut state = java.lock();
-        if !state.jars.iter().any(|jar| {
-            jar.host
-                .player_open_menu(uuid)
-                .is_some_and(|open| open.container_id == window)
-        }) {
+        if held_window(&state, uuid) != Some(window) {
             return false;
         }
-        prepare(&mut state, &*host, uuid, window, Call::Close)
+        prepare(&mut state, &*host, uuid, window, Call::Close(removal))
     };
-    let Some(prepared) = prepared else {
-        return true;
-    };
-    let applied = apply(host, &prepared);
-    record(&mut java.lock(), prepared, applied);
+    if let Some(prepared) = prepared {
+        let applied = apply(host, &prepared);
+        record(&mut java.lock(), prepared, applied);
+    }
     true
 }
 
+/// The player's `ServerPlayer` is going (a logout, a respawn's new player): a Java menu a jar
+/// still holds for them is closed first, as vanilla's `Player.remove` does (`doCloseContainer`),
+/// so what it holds goes back or drops instead of vanishing with the old object.
+pub(crate) fn close_for_removal(
+    java: &crate::HorizonJava,
+    host: &mut dyn ServerHost,
+    uuid: u128,
+    removal: Removal,
+) {
+    let window = held_window(&java.lock(), uuid);
+    if let Some(window) = window {
+        let prepared = prepare(&mut java.lock(), &*host, uuid, window, Call::Close(removal));
+        if let Some(prepared) = prepared {
+            let applied = apply(host, &prepared);
+            record(&mut java.lock(), prepared, applied);
+        }
+    }
+}
+
+/// Whether the Java menu a block use left held can open as its Sunrise menu type, under the
+/// state lock: its live layout must be its type's declared one (built here as the bake builds
+/// it, once per jar and type), and the window opens with its initial data slot values (what
+/// `ServerPlayer$1.sendInitialData` sent after the contents). `None` when no menu is held.
+pub(crate) fn opening_check(
+    state: &mut State,
+    jar_index: usize,
+    uuid: u128,
+    live_effects: &[LiveMenuEffect],
+) -> Option<block_use::Opening> {
+    let jar = &mut state.jars[jar_index];
+    let open = jar.host.player_open_menu(uuid)?;
+    let container_id = open.container_id;
+    let checked = match open.menu_type_id.clone() {
+        None => Err("its MenuType is not registered".to_owned()),
+        Some(menu_type) => {
+            let layouts = state
+                .live_menus
+                .layouts
+                .entry(jar.row.id.clone())
+                .or_insert_with(|| {
+                    jar.jar
+                        .menu_type_declarations(&mut jar.host.clone())
+                        .into_iter()
+                        .map(|declaration| (declaration.id, declaration.layout))
+                        .collect()
+                });
+            match layouts.get(&menu_type) {
+                None => Err(format!("`{menu_type}` is not a menu type of this jar")),
+                Some(Err(reason)) => Err(format!("`{menu_type}` has no declaration: {reason}")),
+                Some(Ok(declared)) => match jar.host.held_menu_layout(uuid) {
+                    Err(reason) => Err(format!("the open `{menu_type}` menu's layout: {reason}")),
+                    Ok(live) if live != *declared => Err(format!(
+                        "the open `{menu_type}` menu's layout is not its type's declared one"
+                    )),
+                    Ok(live) => initial_data(live_effects, container_id, live.data_slots),
+                },
+            }
+        }
+    };
+    Some(block_use::Opening {
+        container_id,
+        data: checked,
+    })
+}
+
+/// The data slot values `sendInitialData` sent for window `container_id`: one `DataChanged` per
+/// data slot, in order, right after the contents.
+fn initial_data(
+    effects: &[LiveMenuEffect],
+    container_id: i32,
+    count: usize,
+) -> Result<Vec<i32>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let start = effects
+        .iter()
+        .position(|effect| {
+            matches!(effect, LiveMenuEffect::InitialData { container_id: id, .. } if *id == container_id)
+        })
+        .ok_or_else(|| "its initial data slot values were not sent (no player facts)".to_owned())?;
+    let values: Vec<i32> = effects[start + 1..]
+        .iter()
+        .map_while(|effect| match effect {
+            LiveMenuEffect::DataChanged {
+                container_id: id,
+                value,
+                ..
+            } if *id == container_id => Some(*value),
+            _ => None,
+        })
+        .collect();
+    if values.len() == count {
+        Ok(values)
+    } else {
+        Err("its initial data slot values are not all known".to_owned())
+    }
+}
+
 /// What a window just opened for a held Java menu should show: the Java menu's slots and cursor
-/// (`ServerPlayer$1.sendInitialData`), under the state lock. `None` when the jar holds no menu
-/// for that window, or its contents aren't Decaf's to read.
+/// (`ServerPlayer$1.sendInitialData`), and its layout for the check of Sunrise's window, under
+/// the state lock. `None` when the jar holds no menu for that window, or its contents aren't
+/// Decaf's to read.
 pub(crate) fn opening_contents(
     jar: &mut LoadedJar,
     host: &dyn ServerHost,
     jar_index: usize,
     uuid: u128,
     window: i32,
-) -> Option<(Prepared, usize)> {
+) -> Option<(Prepared, Vec<MenuSlotRole>)> {
     let open = jar.host.player_open_menu(uuid)?;
     if open.container_id != window {
         return None;
     }
+    let layout = jar.host.held_menu_layout(uuid).ok()?;
     let (carried, slots) = jar.host.held_menu_contents(uuid)?;
-    let count = slots.len();
     let outcome = LiveMenuOutcome {
         container_id: window,
         effects: Vec::new(),
@@ -877,8 +1313,33 @@ pub(crate) fn opening_contents(
         failure: None,
     };
     let facts = MenuPlayerFacts::default();
+    let owned = layout.owned_slots();
     Some((
-        mirror(jar, host, jar_index, uuid, window, &facts, outcome),
-        count,
+        mirror(
+            jar,
+            host,
+            jar_index,
+            uuid,
+            window,
+            &facts,
+            outcome,
+            Some(owned),
+        ),
+        layout.slots,
     ))
+}
+
+/// Whether Sunrise's window shows each of the Java menu's slots where Java has it: owned slot
+/// `i` at index `i`, then the player's slots by `Inventory` number.
+pub(crate) fn window_matches(host: &dyn ServerHost, menu: MenuRef, roles: &[MenuSlotRole]) -> bool {
+    menu.slot_count(host) == Some(roles.len())
+        && roles.iter().enumerate().all(|(index, role)| {
+            match (role, menu.slot_backing(host, index)) {
+                (MenuSlotRole::Owned { .. }, Some(MenuSlotBacking::Owned(owned))) => owned == index,
+                (MenuSlotRole::Player(slot), Some(MenuSlotBacking::Player(held))) => {
+                    usize::try_from(*slot).is_ok_and(|slot| slot == held)
+                }
+                _ => false,
+            }
+        })
 }

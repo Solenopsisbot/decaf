@@ -783,7 +783,7 @@ fn flow(
 }
 
 /// The byte length of the instruction at `pc`.
-fn instruction_length(code: &[u8], pc: usize) -> Option<usize> {
+pub(crate) fn instruction_length(code: &[u8], pc: usize) -> Option<usize> {
     let op = *code.get(pc)?;
     match op {
         0xaa | 0xab => {
