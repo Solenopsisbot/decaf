@@ -1020,11 +1020,16 @@ fn vcall<H: Host>(
     let op = if site == Site::Interface { 0xb9 } else { 0xb6 };
     let before = rt.host.counted_unknown_calls();
     if let Some(body_owner) = rt.jvm_selected_jar_body(&r, op, Some(receiver))? {
-        // A jar `Slot.onTake` override is a take, told once (its `super.onTake` isn't again).
+        // A jar `Slot.onTake` override is a take, told once: its own direct `super.onTake`,
+        // which runs in the override's frame (one deeper than this call), isn't told again.
         let take = owner == SLOT && name == "onTake" && descriptor == D_PLAYER_STACK_V;
         if take {
             note_take(rt, receiver)?;
-            std_host(rt)?.block_use.taking.push(receiver.clone());
+            let frame = rt.depth + 1;
+            std_host(rt)?
+                .block_use
+                .taking
+                .push((receiver.clone(), frame));
         }
         let value = rt.invoke(&body_owner, name, descriptor, Some(receiver.clone()), args);
         if take && let Some(host) = rt.host.as_std_host_mut() {
@@ -2549,13 +2554,23 @@ fn slot_set_changed(rt: &mut Runtime<'_, impl Host>, slot: &Value) -> R<()> {
 }
 
 /// `Slot.onTake` began on `slot`: report the take ([`LiveMenuEffect::SlotTaken`]) unless it is
-/// the `super.onTake` of a jar override already reported. Every vanilla body's take, and a jar
+/// the direct `super.onTake` of a jar override already reported: the vanilla body running on
+/// that slot in the override's own frame (`BlockUseHostState::taking`). Any other `onTake`
+/// inside the override is a take of its own and is told: one on another slot, or the override
+/// taking from its own slot again (a nested `onTake` runs in a deeper frame, so its
+/// `super.onTake` is told). Every vanilla body's take, and a jar
 /// method's `slot.onTake(...)` on a vanilla slot, reaches the vanilla arms; a jar override is
 /// reported where `vcall` dispatches to it. (A jar override a jar method calls directly runs in
 /// the interpreter and is not seen here; a menu with a jar `Slot` class gets no Sunrise
 /// declaration, so the bridge never shows one.)
 fn note_take(rt: &mut Runtime<'_, impl Host>, slot: &Value) -> R<()> {
-    if std_host(rt)?.block_use.taking.contains(slot) {
+    let depth = rt.depth;
+    let super_call = std_host(rt)?
+        .block_use
+        .taking
+        .iter()
+        .any(|(taking, frame)| taking == slot && *frame == depth);
+    if super_call {
         return Ok(());
     }
     // No active call (a jar calling `onTake` outside one): nothing to tell.

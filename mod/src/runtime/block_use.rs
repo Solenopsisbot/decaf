@@ -341,6 +341,10 @@ pub struct MenuCloseOutcome {
     pub container_id: i32,
     /// What its `removed` did to the player's menus, in order: a `removed` may open another.
     pub menu_effects: Vec<MenuEffect>,
+    /// What its `removed` did in the order it did it, as a block use's
+    /// [`BlockUseOutcome::live_effects`]: a menu it opened sent its initial data
+    /// (`LiveMenuEffect::InitialData`) here.
+    pub live_effects: Vec<crate::runtime::live_menu::LiveMenuEffect>,
     /// Unmodelled host calls its close made.
     pub unknown_host_calls: BTreeMap<String, usize>,
     pub unknown_host_call_count: usize,
@@ -420,9 +424,10 @@ pub(crate) struct BlockUseHostState {
     /// Each player's current `ServerPlayer` object's menu state, by UUID. At most one entry
     /// (and so at most one held menu) per player: a newer object's entry replaces an older's.
     pub(crate) players: BTreeMap<u128, PlayerMenus>,
-    /// The slots whose jar `Slot.onTake` override is running, so its `super.onTake` isn't told
-    /// as a second take (`live_menu::note_take`).
-    pub(crate) taking: Vec<Value>,
+    /// The slots whose jar `Slot.onTake` override `vcall` dispatched and is running, with the
+    /// interpreter depth of the override's frame, so its direct `super.onTake` (run in that
+    /// frame) isn't told as a second take, while a nested take is (`live_menu::note_take`).
+    pub(crate) taking: Vec<(Value, usize)>,
     pub(crate) next_id: u64,
     /// What the embedder told Decaf of each player for their next block use
     /// ([`StdHost::set_player_menu_facts`]).
@@ -508,7 +513,7 @@ impl BlockUseHostState {
         }
         // A held menu (`PlayerMenus::open`) is kept through `StdHost::retain`, so only the
         // running call's own values are roots here.
-        for slot in &self.taking {
+        for (slot, _) in &self.taking {
             push_val(slot, out);
         }
         if let Some(active) = &self.active_use {
@@ -2645,11 +2650,13 @@ impl NativeJar {
         host.rewind_call_log(mark);
         let (unknown_host_calls, unknown_host_call_count) =
             unknown_calls_since(host, &unknowns_before);
+        let (menu_effects, live_effects) = finished_active
+            .map(|active| (active.menu_effects, active.live_effects))
+            .unwrap_or_default();
         Ok(Some(MenuCloseOutcome {
             container_id,
-            menu_effects: finished_active
-                .map(|active| active.menu_effects)
-                .unwrap_or_default(),
+            menu_effects,
+            live_effects,
             unknown_host_calls,
             unknown_host_call_count,
             failure: call_result.err().map(|error| error.to_string()),
