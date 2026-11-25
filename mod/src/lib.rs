@@ -5233,6 +5233,89 @@ mod tests {
         }
     }
 
+    /// #659's placement part never reached a baked package's block (BUGS-3d34 #1: Runes' altar
+    /// always placed `facing=north`): `register_placement_parts` accepted only this mod's own
+    /// namespaces, where `register_block_parts` also accepts an installed content package's.
+    ///
+    /// This runs the mod's real `Hooks::register` through the mod API's parts fixture (Sunrise's
+    /// own registrar and installation) with the package inventory a baked jar has in game:
+    /// `horizon_java` (code, its own namespace only) and the jar's `demo` content package. The
+    /// installation then has a `state_for_placement` part (the only part of this mod that
+    /// answers that hook), and every jar block was requested from the game's block keys; without
+    /// the content package (a jar nothing declares) it has none. The answer the part gives for a
+    /// placement is `answer_state_for_placement_places_vanilla_stone_and_rejects_unregistered_or_unknown`'s.
+    #[test]
+    fn register_attaches_the_placement_part_to_a_baked_packages_blocks() {
+        use crate::content::MOD_ID;
+        use mod_api::{HookId, ModEntry, PackageInfo, PackageKind, Side};
+        let package = |id: &str, kind: PackageKind| {
+            PackageInfo::new(
+                id.to_owned(),
+                "1".to_owned(),
+                kind,
+                Side::Both,
+                vec![id.to_owned()],
+                vec![],
+            )
+        };
+        let register = |packages: Vec<PackageInfo>| {
+            let state = build_placement_test_state();
+            let blocks: Vec<String> = state.jars[0]
+                .host
+                .registrations()
+                .iter()
+                .filter(|entry| entry.registry == "minecraft:block")
+                .map(|entry| entry.id.clone())
+                .collect();
+            assert!(
+                blocks.iter().all(|id| id.starts_with("demo:")),
+                "{blocks:?}"
+            );
+            let java = HorizonJava::default();
+            {
+                let mut guard = java.state.lock().unwrap();
+                *guard = state;
+                // The jars ran at the content phase already; `register` reads no folder.
+                guard.loaded = true;
+            }
+            let mods: mod_api::Mods = vec![ModEntry::new(MOD_ID, Box::new(java))].into();
+            mod_api::__private::with_test_package_inventory(packages, || {
+                mod_api::testing::with_mods(mods.clone(), || {
+                    mod_api::__private::part_tests::install_parts_fixture(&mods)
+                        .expect("install the parts");
+                    let requested = blocks
+                        .iter()
+                        .filter(|id| {
+                            mod_api::__private::parts_installation::requested_block_key(id)
+                                .is_some()
+                        })
+                        .count();
+                    (
+                        mod_api::__private::has_part_hook(HookId::StateForPlacement),
+                        mod_api::__private::has_part_hook(HookId::UseWithoutItem),
+                        requested,
+                        blocks.len(),
+                    )
+                })
+            })
+        };
+        // Baked: the `demo` package declares the jar's content, and this mod runs it.
+        let (placement, block_use, requested, blocks) = register(vec![
+            package(MOD_ID, PackageKind::Code),
+            package("demo", PackageKind::Content),
+        ]);
+        assert!(placement, "the placement part is installed");
+        assert!(block_use, "the block-use part is installed");
+        assert_eq!(requested, blocks);
+        // Nothing declares `demo`: Sunrise would refuse its keys, so neither part attaches.
+        let (placement, block_use, requested, _) = register(vec![
+            package(MOD_ID, PackageKind::Code),
+            package("other", PackageKind::Content),
+        ]);
+        assert!(!placement && !block_use);
+        assert_eq!(requested, 0);
+    }
+
     #[test]
     fn answer_state_for_placement_places_vanilla_stone_and_rejects_unregistered_or_unknown() {
         let mut state = build_placement_test_state();
