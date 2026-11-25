@@ -226,7 +226,11 @@ fn constructor<H: Host>(
                             .map(|at| ops[at])
                             .map(|(at, op)| (op, cp_method(file, &code, at)));
                         let from_builder = match definition {
-                            Some((0xb6, Ok(call))) => call.owner == BUILDER && call.name == "build",
+                            Some((0xb6, Ok(call)))
+                                if call.owner == BUILDER && call.name == "build" =>
+                            {
+                                builder_chain(file, &code, &ops, index - 1)?.is_some()
+                            }
                             Some((0xb8, Ok(call))) => {
                                 rt.class(&call.owner).is_some()
                                     && call.descriptor.ends_with(&format!("L{DEFINITION};"))
@@ -306,29 +310,86 @@ fn constructor<H: Host>(
     Ok(reached)
 }
 
-/// A jar static method returning a slot definition: straight-line builder calls only.
+/// A jar static method returning a slot definition: its whole body is one builder chain,
+/// `create()...build()` then `areturn` (no field, local or other call can supply the definition).
 fn definition_helper<H: Host>(rt: &Runtime<'_, H>, r: &MethodRef) -> Result<(), String> {
     let (file, code) = method_code(rt, &r.owner, &r.name, &r.descriptor)?;
     let ops = instructions(&code)?;
-    for (index, &(pc, op)) in ops.iter().enumerate() {
-        match op {
-            0xb6..=0xb9 => {
-                let call = cp_method(file, &code, pc)?;
-                if !is_builder_call(&call) {
-                    return Err(format!(
-                        "{}.{} calls {}.{} while building its slot definition",
-                        r.owner, r.name, call.owner, call.name
-                    ));
-                }
-                check_builder_call(&call, &ops, index, &code)?;
-            }
-            0x99..=0xab | 0xc6..=0xc9 | 0xbf => {
-                return Err(format!("{}.{} branches or throws", r.owner, r.name));
-            }
-            _ => {}
-        }
+    let shaped = ops.len() >= 3 && ops[ops.len() - 1].1 == 0xb0;
+    let start = if shaped {
+        builder_chain(file, &code, &ops, ops.len() - 2)?
+    } else {
+        None
+    };
+    if start != Some(0) {
+        return Err(format!(
+            "{}.{} is not one slot-definition builder chain",
+            r.owner, r.name
+        ));
     }
     Ok(())
+}
+
+/// Check the builder chain ending with the `build()` at `ops[build]`: back to its
+/// `ItemCombinerMenuSlotDefinition.create()`, nothing but builder calls (each slot's index a
+/// constant), constants, and each `withSlot`'s predicate (a lambda, a static, `null` or a local
+/// right before the call), so the builder's receiver is only ever `create()`'s. The index of
+/// that `create()`, or `None` when `ops[build]` is no `build()`.
+fn builder_chain(
+    file: &ClassFile,
+    code: &[u8],
+    ops: &[(usize, u8)],
+    build: usize,
+) -> Result<Option<usize>, String> {
+    let call = |index: usize| -> Option<MethodRef> {
+        let (pc, op) = ops[index];
+        matches!(op, 0xb6..=0xb9)
+            .then(|| cp_method(file, code, pc).ok())
+            .flatten()
+    };
+    if call(build).is_none_or(|r| r.owner != BUILDER || r.name != "build") {
+        return Ok(None);
+    }
+    let mut index = build;
+    loop {
+        if index == 0 {
+            return Err("a slot-definition builder chain has no create()".to_owned());
+        }
+        index -= 1;
+        let (_, op) = ops[index];
+        match op {
+            0xb8 => {
+                return match call(index) {
+                    Some(r) if r.owner == DEFINITION && r.name == "create" => Ok(Some(index)),
+                    _ => Err("a slot-definition builder chain calls a static method".to_owned()),
+                };
+            }
+            0xb6 => match call(index) {
+                Some(r) if r.owner == BUILDER && r.name != "build" => {
+                    check_builder_call(&r, ops, index, code)?;
+                }
+                _ => {
+                    return Err("a slot-definition builder chain calls another method".to_owned());
+                }
+            },
+            0x02..=0x13 => {}
+            0xba | 0xb2 | 0x01 | 0x19 | 0x2a..=0x2d => {
+                let predicate =
+                    call(index + 1).is_some_and(|r| r.owner == BUILDER && r.name == "withSlot");
+                if !predicate {
+                    return Err(
+                        "a slot-definition builder chain reads a value that isn't a slot predicate"
+                            .to_owned(),
+                    );
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "a slot-definition builder chain does more than build (opcode {op:#04x})"
+                ));
+            }
+        }
+    }
 }
 
 fn is_builder_call(r: &MethodRef) -> bool {

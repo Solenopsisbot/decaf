@@ -811,8 +811,8 @@ pub(crate) fn menu_closed(
     };
     let delivered: Vec<(usize, String, Vec<MenuApplied>)> = closes
         .into_iter()
-        .map(|(index, id, effects)| {
-            let applied = apply_menu_effects(host, player_uuid, &effects, &[]);
+        .map(|(index, id, effects, openings)| {
+            let applied = apply_menu_effects(host, player_uuid, &effects, &openings);
             (index, id, applied)
         })
         .collect();
@@ -837,7 +837,7 @@ fn run_menu_closes(
     host: &dyn ServerHost,
     player_uuid: u128,
     window: i32,
-) -> Vec<(usize, String, Vec<MenuEffect>)> {
+) -> Vec<(usize, String, Vec<MenuEffect>, Vec<Opening>)> {
     let holders: Vec<usize> = state
         .jars
         .iter()
@@ -934,7 +934,24 @@ fn run_menu_closes(
             }
         }
     }
+    // A `removed` that opened another menu: checked against its type before its window opens
+    // (no facts ran its `initMenu` here, so a type with data slots stays refused).
     effects
+        .into_iter()
+        .map(|(index, id, effects)| {
+            let opens = effects
+                .iter()
+                .any(|effect| matches!(effect, MenuEffect::Opened(_)));
+            let openings = if opens {
+                crate::live_menu::opening_check(state, index, player_uuid, &[])
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (index, id, effects, openings)
+        })
+        .collect()
 }
 
 /// `player_container_open`: a menu opened for the player (any opener). Its container id is the

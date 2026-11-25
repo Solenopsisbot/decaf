@@ -91,6 +91,8 @@ struct MenuTestHost {
     /// Whether the player is on the server's list (`false` once they left).
     present: bool,
     health: f32,
+    /// Whether a mod cancels the player's tosses (`item_toss`): `drop_stack` hands them back.
+    cancel_tosses: bool,
     /// The block at every position, as `/setblock` spells it.
     block: String,
     tick_count: i32,
@@ -127,6 +129,7 @@ impl MenuTestHost {
                 .collect(),
             present: true,
             health: 20.0,
+            cancel_tosses: false,
             block: String::new(),
             tick_count: 1200,
             eye: [12.5, 66.62, -5.5],
@@ -684,8 +687,8 @@ impl mod_api::prelude::PlayerInventoryBackendMut for MenuTestHost {
         stack: ItemStack,
         _thrown_by_player: bool,
     ) -> Result<Option<ItemStack>, StackWriteError> {
-        // A dead player throws nothing: the stack comes back.
-        if self.health <= 0.0 {
+        // A dead player throws nothing, and a cancelled toss isn't thrown: the stack comes back.
+        if self.health <= 0.0 || self.cancel_tosses {
             return Ok(Some(stack));
         }
         self.world.drops.push(stack);
@@ -1809,6 +1812,7 @@ fn a_disconnect_or_a_death_drops_what_the_menu_held() {
                             &mut host,
                             UUID,
                             crate::live_menu::Removal::Disconnected,
+                            None,
                         );
                         assert_eq!(held_window(&java), None);
                         host.close_window();
@@ -1835,6 +1839,66 @@ fn a_disconnect_or_a_death_drops_what_the_menu_held() {
                 );
                 assert_eq!(host.held(), ["3 minecraft:amethyst_shard"], "{how}");
                 assert!(host.world.drops.is_empty(), "{how}");
+                // The input's drop had no player to throw it: spawned with its own motion, where
+                // vanilla's throw velocity comes from the player's rotation and random. Counted.
+                assert_eq!(
+                    counted(&java),
+                    [
+                        ("game-hook re-entry: sunrise#live_menu:drop".to_owned(), 1),
+                        (
+                            "game-hook re-entry: sunrise#live_menu:drop_without_player_throw"
+                                .to_owned(),
+                            1
+                        ),
+                    ],
+                    "{how}"
+                );
+            });
+        }
+    });
+}
+
+/// A live player's drop is thrown through `drop_stack`; one a mod cancels (`item_toss`) stays
+/// cancelled: nothing is spawned in its place, and the refusal is counted.
+#[test]
+fn a_cancelled_toss_stays_cancelled() {
+    on_a_big_stack("live-menu-toss", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        for cancel in [false, true] {
+            let java = java_with(Arc::clone(&jar));
+            with_bridge(&java, BENCH_MENUS, || {
+                let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+                host.cancel_tosses = cancel;
+                open_bench(&java, &mut host);
+                // One cobblestone into the base, the rest back; then throw it (`THROW`, Q).
+                assert!(host.click(hotbar(3, 0), 0, 0));
+                assert!(host.click(0, 1, 0));
+                assert!(host.click(hotbar(3, 0), 0, 0));
+                assert!(host.click(0, 0, 4));
+                assert_eq!(host.owned()[0], "empty");
+                assert!(host.world.spawned.is_empty(), "nothing spawned");
+                let tags: Vec<String> = counted(&java).into_iter().map(|(tag, _)| tag).collect();
+                if cancel {
+                    assert!(host.world.drops.is_empty());
+                    assert_eq!(
+                        tags,
+                        [
+                            "game-hook re-entry: sunrise#live_menu:drop",
+                            "game-hook re-entry: sunrise#live_menu:drop_refused",
+                            SLOT_TAKE,
+                        ]
+                    );
+                } else {
+                    assert_eq!(host.world.drops.len(), 1);
+                    assert_eq!(
+                        host.text(&Some(host.world.drops[0].clone())),
+                        "1 minecraft:cobblestone"
+                    );
+                    assert_eq!(
+                        tags,
+                        ["game-hook re-entry: sunrise#live_menu:drop", SLOT_TAKE]
+                    );
+                }
             });
         }
     });

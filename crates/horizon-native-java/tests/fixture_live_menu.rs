@@ -157,7 +157,13 @@ const STUBS: &[(&str, &str)] = &[
         "net/minecraft/world/inventory/Slot.java",
         "package net.minecraft.world.inventory;\n\
          import net.minecraft.world.Container;\n\
-         public class Slot { public final Container container = null; }",
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         public class Slot {\n\
+           public final Container container = null;\n\
+           public ItemStack getItem() { return null; }\n\
+           public void onTake(Player player, ItemStack stack) {}\n\
+         }",
     ),
     (
         "net/minecraft/world/inventory/ResultContainer.java",
@@ -177,6 +183,7 @@ const STUBS: &[(&str, &str)] = &[
          public abstract class AbstractContainerMenu {\n\
            protected AbstractContainerMenu(MenuType<?> type, int id) {}\n\
            public void removed(Player player) {}\n\
+           public Slot getSlot(int index) { return null; }\n\
            public ItemStack getCarried() { return null; }\n\
            protected DataSlot addDataSlot(DataSlot slot) { return slot; }\n\
            public boolean canTakeItemForPickAll(ItemStack stack, Slot slot) { return true; }\n\
@@ -230,6 +237,7 @@ const STUBS: &[(&str, &str)] = &[
              super(type, id);\n\
            }\n\
            protected abstract void onTake(Player player, ItemStack stack);\n\
+           public ItemStack quickMoveStack(Player player, int index) { return null; }\n\
            protected abstract boolean isValidBlock(BlockState state);\n\
            public abstract void createResult();\n\
          }",
@@ -753,6 +761,8 @@ const BRIDGE_SOURCES: &[(&str, &str)] = &[
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"data\"), new MenuType<DataMenu>(DataMenu::new, FeatureFlags.VANILLA_SET));\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"branchy\"), new MenuType<BranchMenu>(BranchMenu::new, FeatureFlags.VANILLA_SET));\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"late_slot\"), new MenuType<LateSlotMenu>(LateSlotMenu::new, FeatureFlags.VANILLA_SET));\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"static_def\"), StaticDefMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"take_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 4));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"tick_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 0));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"null_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 1));\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"removed_bench\"), new MenuBench(BlockBehaviour.Properties.of(), 2));\n\
@@ -779,7 +789,7 @@ const BRIDGE_SOURCES: &[(&str, &str)] = &[
            @Override protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n\
              if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
              int kind = this.kind;\n\
-             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> kind == 0 ? new TickMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 1 ? null : kind == 2 ? new RemovedMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : new DataMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> kind == 0 ? new TickMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 1 ? null : kind == 2 ? new RemovedMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : kind == 3 ? new DataMenu(id, inventory, ContainerLevelAccess.create(level, pos)) : new TakeMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
              return InteractionResult.CONSUME;\n\
            }\n\
          }",
@@ -822,6 +832,48 @@ const BRIDGE_SOURCES: &[(&str, &str)] = &[
              extra();\n\
            }\n\
            private void extra() {}\n\
+         }",
+    ),
+    (
+        "demo/TakeMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         /** Its own shift-click: takes the slot's stack through `slot.onTake` and moves nothing. */\n\
+         public class TakeMenu extends BenchMenu {\n\
+           public TakeMenu(int id, Inventory inventory, ContainerLevelAccess access) { super(id, inventory, access); }\n\
+           @Override public ItemStack quickMoveStack(Player player, int index) {\n\
+             Slot slot = getSlot(index);\n\
+             ItemStack stack = slot.getItem();\n\
+             slot.onTake(player, stack);\n\
+             return ItemStack.EMPTY;\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/StaticDefMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.inventory.ItemCombinerMenu;\n\
+         import net.minecraft.world.inventory.ItemCombinerMenuSlotDefinition;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         /** Its slot definition is a static field a helper returns: static state could set it. */\n\
+         public class StaticDefMenu extends ItemCombinerMenu {\n\
+           public static final MenuType<StaticDefMenu> TYPE = new MenuType<>(StaticDefMenu::new, FeatureFlags.VANILLA_SET);\n\
+           static final ItemCombinerMenuSlotDefinition DEF = ItemCombinerMenuSlotDefinition.create().withSlot(0, 27, 47, stack -> true).withResultSlot(1, 134, 47).build();\n\
+           public StaticDefMenu(int id, Inventory inventory) { super(TYPE, id, inventory, ContainerLevelAccess.NULL, def()); }\n\
+           static ItemCombinerMenuSlotDefinition def() { return DEF; }\n\
+           @Override protected boolean isValidBlock(BlockState state) { return true; }\n\
+           @Override public void createResult() {}\n\
+           @Override protected void onTake(Player player, ItemStack stack) {}\n\
          }",
     ),
     (
@@ -1046,6 +1098,11 @@ fn menu_type_declaration_is_the_java25_layout() {
         assert_eq!(
             found("demo:nothing"),
             Err("its MenuSupplier lambda does not construct exactly one menu".to_owned())
+        );
+        // The reviewer's probe: a helper returning a static field passes no builder chain.
+        assert_eq!(
+            found("demo:static_def"),
+            Err("demo/StaticDefMenu.def is not one slot-definition builder chain".to_owned())
         );
         assert_eq!(
             found("demo:branchy"),
@@ -1329,5 +1386,72 @@ fn a_data_slot_menu_opens_with_its_initial_value_and_its_declared_layout() {
             .layout
             .unwrap();
         assert_eq!(host.held_menu_layout(UUID), Ok(declared));
+    });
+}
+
+/// `Slot.onTake` is told once per call, wherever it is called from: a vanilla body's take (a
+/// pickup from the result) and a jar method's `slot.onTake(...)` on a vanilla slot (a menu's own
+/// `quickMoveStack`, as many combiners write it) each give one `SlotTaken`.
+#[test]
+fn every_slot_on_take_is_told_once() {
+    on_big_stack("live-menu-takes", || {
+        for (block, slot, button, input) in [
+            ("demo:bench", 2, 0, ContainerInput::Pickup),
+            ("demo:take_bench", 2, 0, ContainerInput::QuickMove),
+        ] {
+            let (fixture, mut host) = bridge_host("live_menu_takes");
+            let mut inventory = vec![StdHost::empty_item_stack(); 43];
+            inventory[0] = host.make_item_stack_for_id("minecraft:cobblestone", 10, false);
+            inventory[1] = host.make_item_stack_for_id("minecraft:amethyst_shard", 3, false);
+            let opened = use_block(
+                &fixture,
+                &mut host,
+                block,
+                facts(inventory.clone(), 7.5, false),
+            );
+            let window = opened.open_menus().next().unwrap().container_id;
+            inventory = opened.inventory.unwrap();
+            for (slot, button) in [(30, 0), (0, 1), (30, 0), (31, 0)] {
+                let input = if slot == 31 {
+                    ContainerInput::QuickMove
+                } else {
+                    ContainerInput::Pickup
+                };
+                let outcome = click_menu(
+                    &fixture,
+                    &mut host,
+                    window,
+                    &facts(inventory.clone(), 7.5, false),
+                    slot,
+                    button,
+                    input,
+                );
+                inventory = outcome.inventory.unwrap();
+            }
+            host.take_stdout();
+            let taken = click_menu(
+                &fixture,
+                &mut host,
+                window,
+                &facts(inventory.clone(), 7.5, false),
+                slot,
+                button,
+                input,
+            );
+            assert!(
+                host.take_stdout().contains("mod: onTake"),
+                "{block}: the menu's onTake ran"
+            );
+            let takes: Vec<&LiveMenuEffect> = taken
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, LiveMenuEffect::SlotTaken { .. }))
+                .collect();
+            assert_eq!(
+                takes,
+                [&LiveMenuEffect::SlotTaken { slot: Some(2) }],
+                "{block}"
+            );
+        }
     });
 }
