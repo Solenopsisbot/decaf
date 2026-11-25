@@ -149,7 +149,7 @@ fn answer_state_for_placement(
 
 fn answer_state_for_placement_snapshot(
     state: &mut State,
-    mut level: LevelSide<'_>,
+    level: LevelSide<'_>,
     current_state: BlockState,
     context: &mod_api::PlacementContext,
 ) -> Option<Option<BlockState>> {
@@ -158,22 +158,15 @@ fn answer_state_for_placement_snapshot(
             host.state_block(current_state)?.to_owned()
         }
     };
-    // Sunrise's pinned `StateForPlacementEvent`/`PlacementContext` (d404b5f02f) does not yet carry
-    // whether a player or dispenser/non-player placed the block. Until the SDK exposes the placer,
-    // pass `Placer::Unknown` so any player- or rotation-dependent accessor is counted as unknown
-    // rather than guessed.
+    let (clicked_pos, can_place, placer) = placement_source(context);
     let data = runtime::BlockPlaceContextData {
-        clicked_pos: if context.replace_clicked {
-            [context.hit_pos.x, context.hit_pos.y, context.hit_pos.z]
-        } else {
-            [context.pos.x, context.pos.y, context.pos.z]
-        },
+        clicked_pos,
         clicked_face: placement_direction(context.face),
         click_location: context.hit,
         inside: context.inside,
         replacing_clicked_on_block: context.replace_clicked,
-        can_place: true,
-        placer: runtime::Placer::Unknown,
+        can_place,
+        placer,
         item_in_hand: match context.item {
             Some(item) => runtime::Value::Host(runtime::HostRef::new(
                 runtime::HostKind::ItemStack,
@@ -199,6 +192,18 @@ fn answer_state_for_placement_snapshot(
     };
     let returned = match outcome {
         content::PlacementContentOutcome::Refused => return Some(None),
+        // Java's `getStateForPlacement` threw out of the call (with no counted call before it),
+        // e.g. the NullPointerException `getNearestLookingVerticalDirection` throws under a
+        // `DirectionalPlaceContext`, which has no player. Vanilla places nothing then and keeps
+        // the stack; Sunrise's own rule for that case is a refusal
+        // (`PlacementStateError::NoVerticalLook`), so the answer is the same refusal. Leaving
+        // it unclaimed would let the block's template rule place a state Java never chose.
+        content::PlacementContentOutcome::Threw(class) => {
+            log::warn!(
+                "{LOG}: {block_id}: placement override threw {class}; refusing the placement as vanilla's throw does"
+            );
+            return Some(None);
+        }
         content::PlacementContentOutcome::State(returned_block, properties) => {
             (returned_block, properties)
         }
@@ -213,8 +218,77 @@ fn answer_state_for_placement_snapshot(
             return None;
         }
     };
+    finish_placement_state(level, &block_id, current_state, returned)
+}
+
+/// The `BlockPlaceContext` inputs that depend on who placed the block (`getClickedPos`,
+/// `canPlace` and the placer), from the hook's `PlacementContext::source` (#4334,
+/// `state_for_placement` v4).
+///
+/// * `PlacementSource::Player { yaw, pitch, sneaking }` is a `BlockPlaceContext` whose
+///   `getPlayer()` is non-null: `Placer::Player` with those angles and `isSecondaryUseActive`.
+///   The hook doesn't lend the `PlayerRef` (only `placement_context`'s `PlacementPlacer` does),
+///   so `getPlayer()` is an opaque entity handle: comparing it with `null` is exact, and any
+///   call on it is counted. `getClickedPos` is the clicked block when it is replaced, else the
+///   resolved `pos`, and `replacingClickedOnBlock` is the value the context was built with.
+/// * `PlacementSource::Directional { direction }` is vanilla's `DirectionalPlaceContext`:
+///   `Placer::None { direction }`, whose accessors the runtime answers with that class's
+///   overrides (oracle-tested in #626). Its `getClickedPos` is the context's own `pos`, and
+///   its `canPlace()` and `replacingClickedOnBlock()` are both the clicked block's
+///   `canBeReplaced(this)`, which Sunrise works out before asking and passes as
+///   `replace_clicked` (a value a mod writes there is never read).
+/// * A source this SDK doesn't know yet (`PlacementSource` is non-exhaustive): `Placer::Unknown`,
+///   so every placer-dependent accessor is counted rather than guessed.
+fn placement_source(context: &mod_api::PlacementContext) -> ([i32; 3], bool, runtime::Placer) {
+    let pos = [context.pos.x, context.pos.y, context.pos.z];
+    let player_clicked_pos = if context.replace_clicked {
+        [context.hit_pos.x, context.hit_pos.y, context.hit_pos.z]
+    } else {
+        pos
+    };
+    match context.source {
+        mod_api::PlacementSource::Player {
+            yaw,
+            pitch,
+            sneaking,
+        } => (
+            player_clicked_pos,
+            // `BlockItem.place` asks only after `canPlace()` admitted the placement, so `true`
+            // is vanilla's answer there. A `LevelRef::state_for_placement` query doesn't check
+            // it, and the hook doesn't say which of the two it is (unchanged from before).
+            true,
+            runtime::Placer::Player {
+                player: runtime::Value::Host(runtime::HostRef::new(
+                    runtime::HostKind::GameEntity,
+                    "placement/player",
+                )),
+                yaw,
+                pitch,
+                secondary_use: sneaking,
+            },
+        ),
+        mod_api::PlacementSource::Directional { direction } => (
+            pos,
+            context.replace_clicked,
+            runtime::Placer::None {
+                direction: Some(placement_direction(direction)),
+            },
+        ),
+        _ => (player_clicked_pos, true, runtime::Placer::Unknown),
+    }
+}
+
+/// The `BlockState` the hook answers for Java's decoded `(block, properties)` result: the
+/// returned block's state (`current_state` when it is the placed block itself) with each
+/// property set, or `None` (unclaimed) when Sunrise can't name the block or refuses a property.
+fn finish_placement_state(
+    mut level: LevelSide<'_>,
+    block_id: &str,
+    current_state: BlockState,
+    returned: (String, BTreeMap<String, String>),
+) -> Option<Option<BlockState>> {
     let Some(Some((returned_block, properties))) =
-        placement_conversion(&block_id, true, Some(returned))
+        placement_conversion(block_id, true, Some(returned))
     else {
         log::warn!("{LOG}: {block_id}: placement override selected an unknown state");
         return None;
@@ -2748,7 +2822,17 @@ fn deliver(
             let _ = player.tell(host, text);
             continue;
         }
-        let _ = host.commands().feedback(text);
+        // Each reply goes through the service call that is vanilla's own method on the source:
+        // `sendSuccess(text, broadcastToAdmins)` is `feedback` with the same flag (its
+        // `broadcast_to_admins` since 3d34bbe63d: `true` also tells operators and the log), and
+        // `sendFailure` is `failure` (red, shown regardless of `sendCommandFeedback`).
+        // `source.sendSystemMessage` has no service call of its own, so it keeps the success
+        // channel it always had (identical unless `sendCommandFeedback` is off).
+        let _ = match message.kind {
+            MessageKind::Success { broadcast } => host.commands().feedback(text, broadcast),
+            MessageKind::Failure => host.commands().failure(text),
+            MessageKind::System | MessageKind::Player(_) => host.commands().feedback(text, false),
+        };
     }
     match outcome {
         CommandOutcome::Returned(result) => {
@@ -4765,6 +4849,9 @@ mod tests {
     struct PlacementTestLevel {
         by_state: std::collections::HashMap<BlockState, String>,
         by_id: BTreeMap<String, BlockState>,
+        /// Every `state_with_property` call, in order: the test states carry no properties, so
+        /// this is how a test sees which ones the answer set.
+        properties: std::cell::RefCell<Vec<(String, String)>>,
     }
 
     impl PlacementTestLevel {
@@ -4779,7 +4866,15 @@ mod tests {
                 by_state.insert(state, id.to_owned());
                 by_id.insert(id.to_owned(), state);
             }
-            Self { by_state, by_id }
+            Self {
+                by_state,
+                by_id,
+                properties: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn take_properties(&self) -> Vec<(String, String)> {
+            std::mem::take(&mut *self.properties.borrow_mut())
         }
 
         fn state_of(&self, id: &str) -> BlockState {
@@ -4805,12 +4900,17 @@ mod tests {
         fn state_with_property(
             &self,
             state: BlockState,
-            _key: &str,
-            _value: &str,
+            key: &str,
+            value: &str,
         ) -> Option<BlockState> {
+            self.properties
+                .borrow_mut()
+                .push((key.to_owned(), value.to_owned()));
             Some(state)
         }
     }
+
+    static PLACEMENT_BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     fn build_placement_test_state() -> State {
         use std::io::Write;
@@ -4839,7 +4939,11 @@ mod tests {
             ),
             (
                 "net/minecraft/world/item/context/BlockPlaceContext.java",
-                "package net.minecraft.world.item.context; import net.minecraft.core.Direction; public class BlockPlaceContext { public Direction getHorizontalDirection(){return null;} public Direction getClickedFace(){return null;} public boolean isSecondaryUseActive(){return false;} }",
+                "package net.minecraft.world.item.context; import net.minecraft.core.Direction; import net.minecraft.world.entity.player.Player; public class BlockPlaceContext { public Direction getHorizontalDirection(){return null;} public Direction getClickedFace(){return null;} public boolean isSecondaryUseActive(){return false;} public Player getPlayer(){return null;} public Direction getNearestLookingVerticalDirection(){return null;} public boolean replacingClickedOnBlock(){return false;} public boolean canPlace(){return false;} }",
+            ),
+            (
+                "net/minecraft/world/entity/player/Player.java",
+                "package net.minecraft.world.entity.player; public class Player { public boolean isCreative(){return false;} }",
             ),
             (
                 "net/minecraft/world/level/block/Block.java",
@@ -4847,7 +4951,7 @@ mod tests {
             ),
             (
                 "net/minecraft/world/level/block/Blocks.java",
-                "package net.minecraft.world.level.block; public final class Blocks { public static final Block STONE = null; }",
+                "package net.minecraft.world.level.block; public final class Blocks { public static final Block STONE = null; public static final Block DIRT = null; public static final Block GRANITE = null; public static final Block DIORITE = null; }",
             ),
             (
                 "demoprobe/StoneBlock.java",
@@ -4869,16 +4973,44 @@ mod tests {
                 "demoprobe/RefusingBlock.java",
                 "package demoprobe; import net.minecraft.core.Direction; import net.minecraft.world.item.context.BlockPlaceContext; import net.minecraft.world.level.block.*; import net.minecraft.world.level.block.state.BlockState; public class RefusingBlock extends Block { @Override public BlockState getStateForPlacement(BlockPlaceContext c) { return c.getClickedFace() == Direction.DOWN ? null : defaultBlockState(); } }",
             ),
+            // One block per placer-dependent `BlockPlaceContext` question, each answering a
+            // different vanilla block for each answer it can get (no enum `switch`, which would
+            // need a synthetic `$1` class in the jar).
+            (
+                "demoprobe/HorizontalBlock.java",
+                "package demoprobe; import net.minecraft.core.Direction; import net.minecraft.world.item.context.BlockPlaceContext; import net.minecraft.world.level.block.*; import net.minecraft.world.level.block.state.BlockState; public class HorizontalBlock extends Block { @Override public BlockState getStateForPlacement(BlockPlaceContext c) { Direction d = c.getHorizontalDirection(); if (d == Direction.NORTH) return Blocks.STONE.defaultBlockState(); if (d == Direction.SOUTH) return Blocks.DIRT.defaultBlockState(); if (d == Direction.EAST) return Blocks.GRANITE.defaultBlockState(); if (d == Direction.WEST) return Blocks.DIORITE.defaultBlockState(); return null; } }",
+            ),
+            (
+                "demoprobe/PlayerProbeBlock.java",
+                "package demoprobe; import net.minecraft.world.item.context.BlockPlaceContext; import net.minecraft.world.level.block.*; import net.minecraft.world.level.block.state.BlockState; public class PlayerProbeBlock extends Block { @Override public BlockState getStateForPlacement(BlockPlaceContext c) { return c.getPlayer() == null ? Blocks.DIRT.defaultBlockState() : Blocks.STONE.defaultBlockState(); } }",
+            ),
+            (
+                "demoprobe/PlayerCallBlock.java",
+                "package demoprobe; import net.minecraft.world.item.context.BlockPlaceContext; import net.minecraft.world.level.block.*; import net.minecraft.world.level.block.state.BlockState; public class PlayerCallBlock extends Block { @Override public BlockState getStateForPlacement(BlockPlaceContext c) { return c.getPlayer().isCreative() ? Blocks.STONE.defaultBlockState() : defaultBlockState(); } }",
+            ),
+            (
+                "demoprobe/VerticalBlock.java",
+                "package demoprobe; import net.minecraft.core.Direction; import net.minecraft.world.item.context.BlockPlaceContext; import net.minecraft.world.level.block.*; import net.minecraft.world.level.block.state.BlockState; public class VerticalBlock extends Block { @Override public BlockState getStateForPlacement(BlockPlaceContext c) { return c.getNearestLookingVerticalDirection() == Direction.UP ? Blocks.STONE.defaultBlockState() : Blocks.DIRT.defaultBlockState(); } }",
+            ),
+            (
+                "demoprobe/ReplaceBlock.java",
+                "package demoprobe; import net.minecraft.world.item.context.BlockPlaceContext; import net.minecraft.world.level.block.*; import net.minecraft.world.level.block.state.BlockState; public class ReplaceBlock extends Block { @Override public BlockState getStateForPlacement(BlockPlaceContext c) { if (c.replacingClickedOnBlock()) return c.canPlace() ? Blocks.STONE.defaultBlockState() : Blocks.GRANITE.defaultBlockState(); return c.canPlace() ? Blocks.DIRT.defaultBlockState() : Blocks.DIORITE.defaultBlockState(); } }",
+            ),
             (
                 "demoprobe/Main.java",
-                "package demoprobe; import net.minecraft.core.Registry; import net.minecraft.core.registries.BuiltInRegistries; import net.minecraft.resources.Identifier; public final class Main { public void onInitialize() { Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"stone_placer\"), new StoneBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"unregistered_placer\"), new UnregisteredBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"missing_in_engine\"), MissingEngineBlock.TARGET); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"missing_engine_placer\"), new MissingEngineBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"player_dep\"), new PlayerDependentBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"refusing\"), new RefusingBlock()); } }",
+                "package demoprobe; import net.minecraft.core.Registry; import net.minecraft.core.registries.BuiltInRegistries; import net.minecraft.resources.Identifier; public final class Main { public void onInitialize() { Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"stone_placer\"), new StoneBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"unregistered_placer\"), new UnregisteredBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"missing_in_engine\"), MissingEngineBlock.TARGET); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"missing_engine_placer\"), new MissingEngineBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"player_dep\"), new PlayerDependentBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"refusing\"), new RefusingBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"horizontal\"), new HorizontalBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"player_probe\"), new PlayerProbeBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"player_call\"), new PlayerCallBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"vertical\"), new VerticalBlock()); Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"replace\"), new ReplaceBlock()); } }",
             ),
         ];
 
         let root = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir)
-            .join(format!("horizon-java-mod-placement-{}", std::process::id()));
+            .join(format!(
+                "horizon-java-mod-placement-{}-{}",
+                std::process::id(),
+                // Several tests build this jar at once: each gets its own folder.
+                PLACEMENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
         let _ = std::fs::remove_dir_all(&root);
         let (src, classes) = (root.join("src"), root.join("classes"));
         let mut paths = Vec::new();
@@ -4915,6 +5047,11 @@ mod tests {
             "MissingEngineBlock",
             "PlayerDependentBlock",
             "RefusingBlock",
+            "HorizontalBlock",
+            "PlayerProbeBlock",
+            "PlayerCallBlock",
+            "VerticalBlock",
+            "ReplaceBlock",
         ] {
             let path = classes.join(format!("demoprobe/{name}.class"));
             zip.start_file(format!("demoprobe/{name}.class"), options)
@@ -5016,22 +5153,447 @@ mod tests {
         assert_eq!(refused, Some(None));
         assert_eq!(state.jars[0].host.unknown_host_call_count(), 0);
 
-        // 5. Player-dependent placement (`isSecondaryUseActive`) counts under `Placer::Unknown`
-        //    and refuses to guess a state (`None`).
-        let unknown = answer_state_for_placement_snapshot(
+        // 5. Player-dependent placement (`isSecondaryUseActive`) reads the source's sneak state
+        //    since `state_for_placement` v4 carries it: `PlacementContext::new` is a player who
+        //    isn't sneaking (the block's own default state), and a sneaking one gets stone.
+        let standing = answer_state_for_placement_snapshot(
             &mut state,
             LevelSide::Server(&level),
             player_dep,
             &ctx_up,
         );
-        assert_eq!(unknown, None);
+        assert_eq!(standing, Some(Some(player_dep)));
+        let sneaking = answer_state_for_placement_snapshot(
+            &mut state,
+            LevelSide::Server(&level),
+            player_dep,
+            &player_placement(0.0, 0.0, true),
+        );
+        assert_eq!(sneaking, Some(Some(stone)));
+        assert_eq!(state.jars[0].host.unknown_host_call_count(), 0);
+        assert_eq!(state.jars[0].row.callback_unknown_host_calls, 0);
+
+        // 6. Each placement's `BlockPlaceContext` snapshot ended with its call (#635): six
+        //    placements, a refusal among them, leave the jar's host holding no context and no
+        //    direction array.
+        assert_eq!(state.jars[0].host.block_place_context_count(), 0);
+        assert_eq!(state.jars[0].host.placement_array_count(), 0);
+    }
+
+    /// A player's placement at (1, 2, 3) clicking the top of the block below, as
+    /// `BlockItem.place` hands it to the hook.
+    fn player_placement(yaw: f32, pitch: f32, sneaking: bool) -> mod_api::PlacementContext {
+        let mut context = mod_api::PlacementContext::new(
+            mod_api::BlockPos::new(1, 2, 3),
+            mod_api::Direction::Up,
+            None,
+        );
+        context.source = mod_api::PlacementSource::Player {
+            yaw,
+            pitch,
+            sneaking,
+        };
+        context
+    }
+
+    /// A `DirectionalPlaceContext` placement (a dispenser) at (1, 2, 3) along `direction`, with
+    /// the `replace_clicked` Sunrise settled from the clicked block (its `canPlace()`).
+    fn directional_placement(
+        direction: mod_api::Direction,
+        replace_clicked: bool,
+    ) -> mod_api::PlacementContext {
+        let mut context = mod_api::PlacementContext::directional(
+            mod_api::BlockPos::new(1, 2, 3),
+            direction,
+            mod_api::Direction::Up,
+            None,
+        );
+        context.replace_clicked = replace_clicked;
+        context
+    }
+
+    #[test]
+    fn placement_source_maps_player_and_directional_contexts_to_the_java_placer() {
+        let mut state = build_placement_test_state();
+        let level = PlacementTestLevel::new(&[
+            ("minecraft:stone", 1),
+            ("minecraft:dirt", 7),
+            ("minecraft:granite", 8),
+            ("minecraft:diorite", 9),
+            ("demo:player_dep", 5),
+            ("demo:horizontal", 10),
+            ("demo:player_probe", 11),
+            ("demo:player_call", 12),
+            ("demo:vertical", 13),
+            ("demo:replace", 14),
+        ]);
+        let [stone, dirt, granite, diorite] = [
+            "minecraft:stone",
+            "minecraft:dirt",
+            "minecraft:granite",
+            "minecraft:diorite",
+        ]
+        .map(|id| level.state_of(id));
+        let mut place = |block: &str, context: &mod_api::PlacementContext| {
+            answer_state_for_placement_snapshot(
+                &mut state,
+                LevelSide::Server(&level),
+                level.state_of(block),
+                context,
+            )
+        };
+        use mod_api::Direction::{Down, East, North, South, Up, West};
+
+        // `getHorizontalDirection`: a player's `Direction.fromYRot(yaw)` (yaw 0 faces south);
+        // a `DirectionalPlaceContext`'s own direction, or NORTH for a vertical one (its
+        // override).
+        for (context, expected) in [
+            (player_placement(0.0, 0.0, false), dirt),
+            (player_placement(90.0, 0.0, false), diorite),
+            (player_placement(180.0, 0.0, false), stone),
+            (player_placement(-90.0, 0.0, false), granite),
+            (player_placement(-135.0, 80.0, false), granite),
+            (directional_placement(East, true), granite),
+            (directional_placement(West, true), diorite),
+            (directional_placement(South, true), dirt),
+            (directional_placement(North, true), stone),
+            (directional_placement(Up, true), stone),
+            (directional_placement(Down, true), stone),
+        ] {
+            assert_eq!(
+                place("demo:horizontal", &context),
+                Some(Some(expected)),
+                "{:?}",
+                context.source
+            );
+        }
+
+        // `getPlayer() == null` only for a directional context.
+        assert_eq!(
+            place("demo:player_probe", &player_placement(0.0, 0.0, false)),
+            Some(Some(stone))
+        );
+        assert_eq!(
+            place("demo:player_probe", &directional_placement(South, true)),
+            Some(Some(dirt))
+        );
+
+        // `isSecondaryUseActive` is the player's sneak state, and always false for a
+        // `DirectionalPlaceContext`.
+        assert_eq!(
+            place("demo:player_dep", &player_placement(0.0, 0.0, true)),
+            Some(Some(stone))
+        );
+        assert_eq!(
+            place("demo:player_dep", &directional_placement(South, true)),
+            Some(Some(level.state_of("demo:player_dep")))
+        );
+
+        // `getNearestLookingVerticalDirection`: UP for a player looking up (negative pitch),
+        // DOWN otherwise.
+        assert_eq!(
+            place("demo:vertical", &player_placement(0.0, -30.0, false)),
+            Some(Some(stone))
+        );
+        assert_eq!(
+            place("demo:vertical", &player_placement(0.0, 30.0, false)),
+            Some(Some(dirt))
+        );
+
+        // `replacingClickedOnBlock` / `canPlace`: a player's context keeps the value it was built
+        // with and was admitted by `canPlace()`; a directional context answers both with
+        // `canPlace()`, which Sunrise settled from the clicked block into `replace_clicked`.
+        let mut replacing = player_placement(0.0, 0.0, false);
+        replacing.replace_clicked = true;
+        assert_eq!(place("demo:replace", &replacing), Some(Some(stone)));
+        assert_eq!(
+            place("demo:replace", &player_placement(0.0, 0.0, false)),
+            Some(Some(dirt))
+        );
+        assert_eq!(
+            place("demo:replace", &directional_placement(South, true)),
+            Some(Some(stone))
+        );
+        assert_eq!(
+            place("demo:replace", &directional_placement(South, false)),
+            Some(Some(diorite))
+        );
+        drop(place);
+        assert_eq!(state.jars[0].host.unknown_host_call_count(), 0);
+
+        // A `DirectionalPlaceContext` has no player, so `getNearestLookingVerticalDirection`
+        // throws vanilla's NullPointerException (Sunrise's `PlacementStateError::NoVerticalLook`
+        // for its own blocks). It escapes `getStateForPlacement`, and the placement is refused
+        // as vanilla's throw leaves it: no block, stack kept, nothing counted.
+        let vertical = level.state_of("demo:vertical");
+        for direction in [Down, Up, North, South, West, East] {
+            assert_eq!(
+                answer_state_for_placement_snapshot(
+                    &mut state,
+                    LevelSide::Server(&level),
+                    vertical,
+                    &directional_placement(direction, true),
+                ),
+                Some(None),
+                "{direction:?}"
+            );
+        }
+        // The same for `getPlayer().isCreative()` with no player.
+        let player_call = level.state_of("demo:player_call");
+        assert_eq!(
+            answer_state_for_placement_snapshot(
+                &mut state,
+                LevelSide::Server(&level),
+                player_call,
+                &directional_placement(South, true),
+            ),
+            Some(None)
+        );
+        assert_eq!(state.jars[0].host.unknown_host_call_count(), 0);
+
+        // The hook names no `PlayerRef`, so the player `getPlayer()` answers is opaque: a call on
+        // it is counted, and the placement is left unclaimed rather than answered from a guess.
+        assert_eq!(
+            answer_state_for_placement_snapshot(
+                &mut state,
+                LevelSide::Server(&level),
+                player_call,
+                &player_placement(0.0, 0.0, false),
+            ),
+            None
+        );
         assert_eq!(state.jars[0].host.unknown_host_call_count(), 1);
         assert_eq!(state.jars[0].row.callback_unknown_host_calls, 1);
 
-        // 6. Each placement's `BlockPlaceContext` snapshot ended with its call (#635): five
-        //    placements, a refusal and a counted one among them, leave the jar's host holding
-        //    no context and no direction array.
         assert_eq!(state.jars[0].host.block_place_context_count(), 0);
         assert_eq!(state.jars[0].host.placement_array_count(), 0);
+        assert!(level.take_properties().is_empty());
+    }
+
+    /// The real Runes jar's crafting altar through the Sunrise placement hook: its
+    /// `getStateForPlacement` sets `FACING` to `getHorizontalDirection().getOpposite()`, so the
+    /// altar faces the player. Before `state_for_placement` v4 the bridge passed
+    /// `Placer::Unknown`, and that one call was counted; now nothing is.
+    #[test]
+    fn real_runes_altar_placement_faces_the_placer_with_no_unknown_calls() {
+        let Some(jar_path) = std::env::var_os("RUNES_JAR") else {
+            eprintln!("RUNES_JAR is unset; real Runes placement test skipped");
+            return;
+        };
+        std::thread::Builder::new()
+            .name("mod-runes-placement".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || run_runes_placement_test(std::path::Path::new(&jar_path)))
+            .expect("spawn test thread")
+            .join()
+            .unwrap();
+    }
+
+    fn run_runes_placement_test(jar_path: &std::path::Path) {
+        let _ = mod_api::__private::initialize();
+        let jar = Arc::new(NativeJar::from_path(jar_path).expect("load RUNES_JAR"));
+        let mut host = jar
+            .try_seed_host(StdHost::new().with_game_version("26.3"))
+            .expect("seed Runes host");
+        for entry in jar.discover_entrypoints("main") {
+            jar.execute(&entry.class, entry.method.as_deref(), "main", &mut host)
+                .expect("run Runes main");
+        }
+        assert_eq!(
+            host.unknown_host_call_count(),
+            0,
+            "Runes main: {:?}",
+            host.unknown_host_calls()
+        );
+        let mut state = State {
+            jars: vec![LoadedJar {
+                row: JarRow::refused("runes.jar", "runes".to_owned(), String::new()),
+                jar,
+                host,
+                listeners: Vec::new(),
+                orderings: Vec::new(),
+                commands: Vec::new(),
+                native_commands: Vec::new(),
+                commands_registered: false,
+                stages_ran: 1,
+                failures: Vec::new(),
+                hooks: runtime::GameHookRegistrations::default(),
+                hook_state: runtime::GameHookState::default(),
+            }],
+            ..State::default()
+        };
+        let level = PlacementTestLevel::new(&[("runes:crafting_altar", 1)]);
+        let altar = level.state_of("runes:crafting_altar");
+        use mod_api::Direction::{East, North, South, West};
+
+        // Before: the old bridge's `Placer::Unknown` counts Runes' `getHorizontalDirection`.
+        let mut unknown = placement_source(&player_placement(0.0, 0.0, false));
+        unknown.2 = runtime::Placer::Unknown;
+        let before = state.jars[0].host.unknown_host_call_count();
+        let outcome = content::state_for_placement_content(
+            &mut state.jars[0],
+            "runes:crafting_altar",
+            runtime::BlockPlaceContextData {
+                clicked_pos: unknown.0,
+                clicked_face: placement_direction(mod_api::Direction::Up),
+                click_location: [1.0, 2.0, 3.0],
+                inside: false,
+                replacing_clicked_on_block: false,
+                can_place: unknown.1,
+                placer: unknown.2,
+                item_in_hand: StdHost::empty_item_stack(),
+                level: runtime::Value::Host(runtime::HostRef::new(
+                    runtime::HostKind::GameLevel,
+                    "placement/level",
+                )),
+            },
+        )
+        .expect("Runes placement runs");
+        assert!(matches!(
+            outcome,
+            content::PlacementContentOutcome::CountedUnknown(1)
+        ));
+        assert_eq!(state.jars[0].host.unknown_host_call_count() - before, 1);
+        let counted_before = state.jars[0].host.unknown_host_call_count();
+
+        // After: a player's yaw (0 faces south) and a dispenser's direction both reach
+        // `getHorizontalDirection`, and the altar faces the opposite way, with nothing counted.
+        for (context, facing) in [
+            (player_placement(0.0, 0.0, false), "north"),
+            (player_placement(90.0, 0.0, false), "east"),
+            (player_placement(180.0, 0.0, false), "south"),
+            (player_placement(-90.0, 0.0, false), "west"),
+            (player_placement(30.0, 60.0, true), "north"),
+            (directional_placement(East, true), "west"),
+            (directional_placement(West, true), "east"),
+            (directional_placement(North, true), "south"),
+            (directional_placement(South, true), "north"),
+        ] {
+            let answer = answer_state_for_placement_snapshot(
+                &mut state,
+                LevelSide::Server(&level),
+                altar,
+                &context,
+            );
+            assert_eq!(answer, Some(Some(altar)), "{:?}", context.source);
+            assert_eq!(
+                level.take_properties(),
+                vec![("facing".to_owned(), facing.to_owned())],
+                "{:?}",
+                context.source
+            );
+        }
+        assert_eq!(
+            state.jars[0].host.unknown_host_call_count(),
+            counted_before,
+            "{:?}",
+            state.jars[0].host.unknown_host_calls()
+        );
+        assert_eq!(state.jars[0].host.block_place_context_count(), 0);
+        assert_eq!(state.jars[0].host.placement_array_count(), 0);
+    }
+
+    /// A server host whose only service is a `Commands` that records each line it is handed.
+    #[derive(Default)]
+    struct CommandLinesHost {
+        lines: CommandLines,
+        none: NoServices,
+    }
+
+    /// `(channel, text, broadcast_to_admins)` per call; `failure` has no broadcast flag.
+    #[derive(Default)]
+    struct CommandLines(Vec<(&'static str, Text, bool)>);
+
+    impl mod_api::Commands for CommandLines {
+        fn feedback(
+            &mut self,
+            line: Text,
+            broadcast_to_admins: bool,
+        ) -> Result<(), mod_api::TextFormError> {
+            self.0.push(("feedback", line, broadcast_to_admins));
+            Ok(())
+        }
+
+        fn failure(&mut self, line: Text) -> Result<(), mod_api::TextFormError> {
+            self.0.push(("failure", line, false));
+            Ok(())
+        }
+    }
+
+    /// The services this test never reaches: every method keeps the trait's default.
+    #[derive(Default)]
+    struct NoServices;
+    impl mod_api::Levels for NoServices {}
+    impl mod_api::Messages for NoServices {}
+    impl mod_api::Players for NoServices {}
+    impl mod_api::Profiles for NoServices {}
+    impl mod_api::RuntimeLevels for NoServices {}
+
+    impl mod_api::Host for CommandLinesHost {
+        fn backend(&self) -> Option<mod_api::BackendRef<'_>> {
+            None
+        }
+    }
+    mod_api::impl_host_areas!(CommandLinesHost);
+    impl mod_api::ServerHost for CommandLinesHost {}
+    impl mod_api::prelude::ServicesServerHost for CommandLinesHost {
+        fn commands(&mut self) -> &mut dyn mod_api::Commands {
+            &mut self.lines
+        }
+        fn levels(&self) -> &dyn mod_api::Levels {
+            &NoServices
+        }
+        fn messages(&self) -> &dyn mod_api::Messages {
+            &NoServices
+        }
+        fn players(&self) -> &dyn mod_api::Players {
+            &NoServices
+        }
+        fn profiles(&self) -> &dyn mod_api::Profiles {
+            &NoServices
+        }
+        fn runtime_levels(&mut self) -> &mut dyn mod_api::RuntimeLevels {
+            &mut self.none
+        }
+    }
+    mod_api::impl_server_host_areas!(CommandLinesHost, except(services));
+
+    /// Each Java reply reaches the source through vanilla's own method's service call:
+    /// `sendSuccess(text, broadcastToAdmins)` keeps its flag (`Commands::feedback` v2), and
+    /// `sendFailure` is the source's red failure line (`Commands::failure`), not a success line.
+    #[test]
+    fn command_replies_keep_the_broadcast_flag_and_failures_go_out_as_failures() {
+        let line = |kind, text: &str| CommandMessage {
+            kind,
+            text: CommandText {
+                text: text.to_owned(),
+                translate: false,
+                component: None,
+            },
+        };
+        let messages = [
+            line(MessageKind::Success { broadcast: false }, "listed"),
+            line(MessageKind::Success { broadcast: true }, "changed"),
+            line(MessageKind::Failure, "refused"),
+            line(MessageKind::System, "system"),
+        ];
+        let mut host = CommandLinesHost::default();
+        let result = deliver(
+            &mut host,
+            "demo",
+            "demo",
+            CommandOutcome::Returned(0),
+            &messages,
+        );
+        assert_eq!(result, Ok(0));
+        assert_eq!(
+            host.lines.0,
+            vec![
+                ("feedback", Text::literal("listed"), false),
+                ("feedback", Text::literal("changed"), true),
+                ("failure", Text::literal("refused"), false),
+                ("feedback", Text::literal("system"), false),
+            ]
+        );
     }
 }

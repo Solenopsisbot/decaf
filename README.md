@@ -139,7 +139,7 @@ Minecraft/loader install skip when the corresponding files or environment variab
 `mod/` is a Horizon **native mod** (`docs/mod-plan.md`): the first way this runtime runs inside the
 game instead of in the probe. It implements the game's typed `Hooks` from the mod API on
 [sunrise-org/sunrise](https://github.com/sunrise-org/sunrise) (crate `sunrise-mod-api`, library
-`mod_api`), pinned to build `d404b5f02f69f4684f6b4d4fbb8cea6a98565b91` (the newest build with a
+`mod_api`), pinned to build `3d34bbe63d71bb24c098c1e4021ef866be12fe2d` (a build with a
 published SDK) in `mod/sunrise-mod.toml`; `cargo sunrise-mod` fetches that build's signed SDK into `mod/.sunrise/sdk/`.
 
 What it does today:
@@ -157,8 +157,10 @@ What it does today:
   `ServerStartingEvent`/`ServerStartedEvent`/`ServerStoppingEvent` listeners the entrypoints
   registered. Java commands from Fabric's `CommandRegistrationCallback` (NeoForge's
   `RegisterCommandsEvent`) become typed mod API commands; running one calls its Java
-  `Command.run` and sends the reply through the mod API's command-source feedback. Literal,
-  `word`/`text` and `integer` nodes only: anything else is refused by name and logged.
+  `Command.run` and sends its `sendSuccess` lines through the mod API's command-source feedback
+  (with the same broadcast-to-admins flag) and its `sendFailure` lines as the source's red
+  failure lines. Literal, `word`/`text` and `integer` nodes only: anything else is refused by
+  name and logged.
 
 A native mod is one flat crate, so the runtime is copied into `mod/src/runtime/` by
 `tools/vendor.py` (which rewrites `crate::` to `crate::runtime::`). A Sunrise package carries only
