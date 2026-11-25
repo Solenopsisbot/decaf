@@ -88,7 +88,14 @@ call as an unknown host call and never answers them):
 - `romanUpper`, `romanLower` — Roman numeral `\u2160`.
 - `deseretUpper`, `deseretLower` — supplementary `\uD800\uDC00` (U+10400).
 - `loneLowSurrogateUpper`, `loneLowSurrogateLower`, `loneHighSurrogateUpper`,
-  `loneHighSurrogateLower` — a lone surrogate receiver.
+  `loneHighSurrogateLower` — a lone surrogate receiver. The receiver is a
+  `String` constant over a lone surrogate, so its `ldc` is counted too
+  (`String#ldc`, #658) and yields a counted `String`: the case mapping of it
+  is counted, `row` of the result is counted (#423), and the run ends with the
+  counted marker rather than failing. The other counted rows fail instead:
+  their case mapping's neutral result is `null`, and `row` stops at
+  `text.length()`. Neither ending is Java's (every row prints on Java 25); the
+  test asserts only that no row answers text and that the right calls count.
 - `asciiTrLower`, `asciiTrUpper`, `asciiCapITrLower`, `asciiSmallITrUpper` —
   ASCII with the tailored `tr` locale
   (counted with all tailored locales).
