@@ -39,7 +39,10 @@
 //!   the iterator as it goes, so a predicate that throws leaves the earlier
 //!   removals done.
 //!
-//! An iterator's own `remove()` is not modelled by the host (counted).
+//! An `ArrayDeque` iterator's own `remove()` is JDK 25's `delete(lastRet)`
+//! (`array_deque.rs`); `descendingIterator()` is `DescendingIterator`, which
+//! walks the same live array backwards. Any other iterator's own `remove()`
+//! is not modelled by the host (counted).
 
 use super::*;
 use mod_count::{ModStamp, ModVerdict};
@@ -58,9 +61,19 @@ pub struct IteratorGuard {
     structure: Vec<String>,
     /// `ArrayDeque`: no `modCount`.
     deque: bool,
-    /// An `ArrayDeque` iterator whose layout is known: its `cursor` slot and
-    /// `remaining` count (`array_deque.rs`).
-    deque_cursor: Option<(usize, usize)>,
+    /// An `ArrayDeque` iterator whose layout is known: its `cursor` slot,
+    /// `remaining` count and `lastRet` slot (`array_deque.rs`).
+    deque_cursor: Option<DequeCursor>,
+}
+
+/// `ArrayDeque.DeqIterator`'s fields: `cursor`, `remaining` and `lastRet`
+/// (`None` for `-1`), and whether it is the `DescendingIterator`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DequeCursor {
+    cursor: usize,
+    remaining: usize,
+    last_ret: Option<usize>,
+    descending: bool,
 }
 
 /// How a fail-fast collection iterates.
@@ -215,7 +228,12 @@ impl<H: Host> Runtime<'_, H> {
                 let deque_cursor = (how == FailFast::Deque)
                     .then(|| self.host.deque_layout(&source_marker))
                     .flatten()
-                    .map(|layout| (layout.head(), structure.len()));
+                    .map(|layout| DequeCursor {
+                        cursor: layout.head(),
+                        remaining: structure.len(),
+                        last_ret: None,
+                        descending: false,
+                    });
                 let iterator = self.host.invoke_instance(r, receiver, args)?;
                 if let Some(iterator) = crate::runtime::host_iterator::marker(&iterator) {
                     self.host.store_iterator_guard(
@@ -241,8 +259,8 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(guard) = self.host.iterator_guard(&marker) else {
                     return Ok(None);
                 };
-                if let Some((_, remaining)) = guard.deque_cursor {
-                    return Ok(Some(Value::Int(i32::from(remaining > 0))));
+                if let Some(deque) = guard.deque_cursor {
+                    return Ok(Some(Value::Int(i32::from(deque.remaining > 0))));
                 }
                 let Some(not_equal) = guard.cursor else {
                     return Ok(None);
@@ -258,6 +276,18 @@ impl<H: Host> Runtime<'_, H> {
                     cursor < size
                 };
                 Ok(Some(Value::Int(i32::from(more))))
+            }
+            ("descendingIterator", "()Ljava/util/Iterator;") => {
+                self.deque_descending_iterator(receiver)
+            }
+            ("remove", "()V") => {
+                let Some(guard) = self.host.iterator_guard(&marker) else {
+                    return Ok(None);
+                };
+                if guard.deque_cursor.is_none() {
+                    return Ok(None);
+                }
+                self.deque_remove(r, &marker, guard).map(Some)
             }
             ("next", "()Ljava/lang/Object;") => {
                 let Some(guard) = self.host.iterator_guard(&marker) else {
@@ -546,17 +576,18 @@ impl<H: Host> Runtime<'_, H> {
 
     /// `DeqIterator.next()`: the live array's slot at `cursor`, a
     /// `ConcurrentModificationException` if a removal emptied it, then the
-    /// next slot (of the array as it is now).
+    /// next slot (of the array as it is now); the `DescendingIterator`'s
+    /// goes the other way. `lastRet` is the slot it read.
     fn deque_next(
         &mut self,
         r: &MethodRef,
         marker: &str,
         mut guard: IteratorGuard,
     ) -> Result<Value, NativeError> {
-        let Some((cursor, remaining)) = guard.deque_cursor else {
+        let Some(mut deque) = guard.deque_cursor else {
             return Ok(Value::Ref(None));
         };
-        if remaining == 0 {
+        if deque.remaining == 0 {
             return Err(NativeError::UncaughtException {
                 class: "java/util/NoSuchElementException".into(),
                 message: None,
@@ -572,13 +603,215 @@ impl<H: Host> Runtime<'_, H> {
                 .invoke_instance(r, &crate::runtime::jar_object::stored_value(marker), &[]);
         };
         let live = self.collection_elements(&source)?;
-        let element = layout.slot(cursor, &live);
+        let element = layout.slot(deque.cursor, &live);
         if element == Value::Ref(None) {
             return Err(concurrent_modification());
         }
-        guard.deque_cursor = Some((layout.next_slot(cursor), remaining - 1));
+        deque.last_ret = Some(deque.cursor);
+        deque.cursor = if deque.descending {
+            layout.prev_slot(deque.cursor)
+        } else {
+            layout.next_slot(deque.cursor)
+        };
+        deque.remaining -= 1;
+        guard.deque_cursor = Some(deque);
         self.host.store_iterator_guard(marker, guard);
         Ok(element)
+    }
+
+    /// `DeqIterator.remove()`: `delete(lastRet)`, then `postDelete`. The
+    /// element removed is the one in the slot `lastRet`, shifted as
+    /// `array_deque.rs` follows; the cursor steps back over a shift of the
+    /// elements after it (forward), or forward over one that did not shift
+    /// them (descending), so it still names the next element to return. A
+    /// slot outside the live range, or a deque whose layout is not known, is
+    /// counted and the deque left as the host holds it.
+    fn deque_remove(
+        &mut self,
+        r: &MethodRef,
+        marker: &str,
+        mut guard: IteratorGuard,
+    ) -> Result<Value, NativeError> {
+        let Some(mut deque) = guard.deque_cursor else {
+            return Ok(Value::Void);
+        };
+        let Some(last) = deque.last_ret else {
+            return Err(NativeError::UncaughtException {
+                class: "java/lang/IllegalStateException".into(),
+                message: None,
+                frame: None,
+            });
+        };
+        let source = crate::runtime::jar_object::stored_value(&guard.source);
+        let live = self.collection_elements(&source)?;
+        let deleted = self
+            .host
+            .deque_layout(&guard.source)
+            .and_then(|layout| layout.delete(last, live.len()).map(|done| (layout, done)));
+        let Some((layout, (index, after, left_shifted))) = deleted else {
+            // `delete` outside the live range moves slots the model does
+            // not hold: the layout is lost.
+            self.host.store_deque_layout(&guard.source, None);
+            return self.host.unknown_operand_call(r).map(|_| Value::Void);
+        };
+        let mut kept = live;
+        kept.remove(index);
+        self.host.replace_mutable_collection(&source, kept);
+        self.host.store_deque_layout(&guard.source, Some(after));
+        // `postDelete`.
+        if deque.descending {
+            if !left_shifted {
+                deque.cursor = layout.next_slot(deque.cursor);
+            }
+        } else if left_shifted {
+            deque.cursor = layout.prev_slot(deque.cursor);
+        }
+        deque.last_ret = None;
+        guard.deque_cursor = Some(deque);
+        self.host.store_iterator_guard(marker, guard);
+        Ok(Value::Void)
+    }
+
+    /// `ArrayDeque.descendingIterator()`: `DescendingIterator`, whose
+    /// `cursor` starts at the slot before `tail`. Counted when the layout is
+    /// unknown.
+    fn deque_descending_iterator(
+        &mut self,
+        receiver: &Value,
+    ) -> Result<Option<Value>, NativeError> {
+        let Some((source, FailFast::Deque)) = self.fail_fast_source(receiver) else {
+            return Ok(None);
+        };
+        let source_marker = expect_ref(&source).cloned().unwrap_or_default();
+        let Some(layout) = self.host.deque_layout(&source_marker) else {
+            return Ok(None);
+        };
+        let root = self.mod_count_root(&source_marker);
+        let structure = self.structure_of(&source, FailFast::Deque)?;
+        let expected = self.capture_mod_count(&source);
+        let deque = !self.has_mod_count(&source);
+        let mut values = runtime_collection_values(self.host, &source)?;
+        let size = values.len();
+        values.reverse();
+        // The snapshot is only the host's fallback; the guard reads the array.
+        let Some(iterator) = self.host.new_host_iterator(values, None) else {
+            return Ok(None);
+        };
+        if let Some(marker) = crate::runtime::host_iterator::marker(&iterator).cloned() {
+            self.host
+                .set_host_iterator_origin(&marker, receiver.clone());
+            self.host.store_iterator_guard(
+                &marker,
+                IteratorGuard {
+                    source: source_marker,
+                    root,
+                    cursor: None,
+                    expected,
+                    structure,
+                    deque,
+                    deque_cursor: Some(DequeCursor {
+                        cursor: layout.prev_slot(layout.tail(size)),
+                        remaining: size,
+                        last_ret: None,
+                        descending: true,
+                    }),
+                },
+            );
+        }
+        Ok(Some(iterator))
+    }
+
+    /// `DeqIterator.forEachRemaining`: `remaining = 0` first, then the live
+    /// array from `cursor` to the `tail` read at the start (a
+    /// `ConcurrentModificationException` if that slot is empty or `tail`
+    /// moved); `lastRet` is the last slot it handed over. The
+    /// `DescendingIterator`'s walk is answered only while the action leaves
+    /// the deque alone and the slots from `cursor` down to `head` are the
+    /// ones remaining; any other case is counted.
+    fn deque_for_each_remaining(
+        &mut self,
+        r: &MethodRef,
+        marker: &str,
+        mut guard: IteratorGuard,
+        deque: DequeCursor,
+        action: &Value,
+    ) -> Result<Option<Value>, NativeError> {
+        const ACCEPT: (&str, &str, &str) = (
+            "java/util/function/Consumer",
+            "accept",
+            "(Ljava/lang/Object;)V",
+        );
+        let source = crate::runtime::jar_object::stored_value(&guard.source);
+        if deque.remaining == 0 {
+            return Ok(Some(Value::Void));
+        }
+        let remaining = deque.remaining;
+        guard.deque_cursor = Some(DequeCursor {
+            remaining: 0,
+            ..deque
+        });
+        self.host.store_iterator_guard(marker, guard.clone());
+        let Some(layout) = self.host.deque_layout(&guard.source) else {
+            return self.host.unknown_operand_call(r).map(|_| None);
+        };
+        let live = self.collection_elements(&source)?;
+        let end = layout.tail(live.len());
+        let cursor = deque.cursor;
+        if deque.descending {
+            // The slots `cursor`, `cursor - 1`, ... down to `head`, all full.
+            let from_head = layout.distance_from_head(cursor);
+            if from_head >= live.len()
+                || from_head + 1 != remaining
+                || layout.slot(cursor, &live) == Value::Ref(None)
+            {
+                return self.host.unknown_operand_call(r).map(|_| None);
+            }
+        } else {
+            let span = (end + layout.capacity_of() - cursor) % layout.capacity_of();
+            if layout.slot(cursor, &live) == Value::Ref(None) || span != remaining {
+                return Err(concurrent_modification());
+            }
+        }
+        let mut slot = cursor;
+        let mut last = cursor;
+        for _ in 0..remaining {
+            let live = self.collection_elements(&source)?;
+            let Some(now) = self
+                .host
+                .deque_layout(&guard.source)
+                .filter(|now| now.capacity_of() == layout.capacity_of())
+            else {
+                return self.host.unknown_operand_call(r).map(|_| None);
+            };
+            if deque.descending && (now != layout || live.len() != layout_size(layout, end)) {
+                // The action changed the deque under a walk this model
+                // only follows while it holds still.
+                return self.host.unknown_operand_call(r).map(|_| None);
+            }
+            self.run_functional(ACCEPT, action, &[now.slot(slot, &live)])?;
+            last = slot;
+            slot = if deque.descending {
+                layout.prev_slot(slot)
+            } else {
+                layout.next_slot(slot)
+            };
+        }
+        let live = self.collection_elements(&source)?.len();
+        let now = self.host.deque_layout(&guard.source);
+        if deque.descending && (now != Some(layout) || live != layout_size(layout, end)) {
+            return self.host.unknown_operand_call(r).map(|_| None);
+        }
+        if now.is_some_and(|now| now.tail(live) != end) {
+            return Err(concurrent_modification());
+        }
+        // `lastRet` is set once the walk is over.
+        guard.deque_cursor = Some(DequeCursor {
+            remaining: 0,
+            last_ret: Some(last),
+            ..deque
+        });
+        self.host.store_iterator_guard(marker, guard);
+        Ok(Some(Value::Void))
     }
 
     /// `forEachRemaining(action)` on a guarded iterator, with JDK 25's
@@ -597,7 +830,7 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = crate::runtime::host_iterator::marker(iterator).cloned() else {
             return Ok(None);
         };
-        let Some(mut guard) = self.host.iterator_guard(&marker) else {
+        let Some(guard) = self.host.iterator_guard(&marker) else {
             return Ok(None);
         };
         let source = crate::runtime::jar_object::stored_value(&guard.source);
@@ -614,40 +847,8 @@ impl<H: Host> Runtime<'_, H> {
                 ModVerdict::Unknown => this.host.unknown_operand_call(r).map(|_| ()),
             }
         };
-        if let Some((cursor, remaining)) = guard.deque_cursor {
-            // `DeqIterator.forEachRemaining`: `remaining = 0` first.
-            if remaining == 0 {
-                return Ok(Some(Value::Void));
-            }
-            guard.deque_cursor = Some((cursor, 0));
-            self.host.store_iterator_guard(&marker, guard.clone());
-            let Some(layout) = self.host.deque_layout(&guard.source) else {
-                return self.host.unknown_operand_call(r).map(|_| None);
-            };
-            let live = self.collection_elements(&source)?;
-            let end = layout.tail(live.len());
-            let span = (end + layout.capacity_of() - cursor) % layout.capacity_of();
-            if layout.slot(cursor, &live) == Value::Ref(None) || span != remaining {
-                return Err(concurrent_modification());
-            }
-            let mut slot = cursor;
-            for _ in 0..remaining {
-                let live = self.collection_elements(&source)?;
-                let Some(now) = self
-                    .host
-                    .deque_layout(&guard.source)
-                    .filter(|now| now.capacity_of() == layout.capacity_of())
-                else {
-                    return self.host.unknown_operand_call(r).map(|_| None);
-                };
-                self.run_functional(ACCEPT, action, &[now.slot(slot, &live)])?;
-                slot = layout.next_slot(slot);
-            }
-            let live = self.collection_elements(&source)?.len();
-            return match self.host.deque_layout(&guard.source) {
-                Some(now) if now.tail(live) != end => Err(concurrent_modification()),
-                _ => Ok(Some(Value::Void)),
-            };
+        if let Some(deque) = guard.deque_cursor {
+            return self.deque_for_each_remaining(r, &marker, guard, deque, action);
         }
         let Some(start) = self.host.iterator_cursor(&marker) else {
             return Ok(None);
@@ -721,4 +922,9 @@ impl<H: Host> Runtime<'_, H> {
         }
         Ok(Some(Value::Void))
     }
+}
+
+/// How many elements a deque of `layout` holds when its `tail` is `end`.
+fn layout_size(layout: array_deque::DequeLayout, end: usize) -> usize {
+    (end + layout.capacity_of() - layout.head()) % layout.capacity_of()
 }

@@ -19,6 +19,15 @@
 //! `addAll` growing once first. A call that changed the deque in a way not
 //! listed makes the layout unknown, and `forEach` or a step of an iterator
 //! is then counted.
+//!
+//! An iterator's own `remove()` is `delete(lastRet)` ([`DequeLayout::delete`]).
+//! It acts on the slot `lastRet` the iterator remembers, not on the element
+//! it returned, so a slot the deque no longer holds an element in (the
+//! element was polled, the deque cleared, the array grown) shifts slots
+//! outside the live range, and the JDK answers whatever the arithmetic does
+//! (an `ArrayIndexOutOfBoundsException` from `arraycopy`, or a removal of the
+//! neighbour). Only a slot inside the live range is answered; any other is
+//! counted.
 
 use super::*;
 
@@ -34,6 +43,42 @@ impl DequeLayout {
     /// The slot after `slot` (`inc`).
     pub(crate) fn next_slot(self, slot: usize) -> usize {
         (slot + 1) % self.capacity
+    }
+
+    /// The slot before `slot` (`dec`).
+    pub(crate) fn prev_slot(self, slot: usize) -> usize {
+        (slot + self.capacity - 1) % self.capacity
+    }
+
+    /// How many slots `slot` is after `head` (`sub(slot, head)`).
+    pub(crate) fn distance_from_head(self, slot: usize) -> usize {
+        (slot % self.capacity + self.capacity - self.head % self.capacity) % self.capacity
+    }
+
+    /// `delete(slot)` on `size` elements: the index of the element it
+    /// removes, the layout after it, and whether it moved the elements after
+    /// it to the left (`true`, the JDK's return value). `None` when `slot`
+    /// is outside the live range `[head, tail)`.
+    pub(crate) fn delete(self, slot: usize, size: usize) -> Option<(usize, Self, bool)> {
+        let front = self.distance_from_head(slot);
+        if front >= size {
+            return None;
+        }
+        let back = size - 1 - front;
+        // `front < back` moves the elements before `slot` forward (`head`
+        // moves on); otherwise the ones after it move back (`tail` moves).
+        Some(if front < back {
+            (
+                front,
+                DequeLayout {
+                    capacity: self.capacity,
+                    head: self.next_slot(self.head),
+                },
+                false,
+            )
+        } else {
+            (front, self, true)
+        })
     }
 
     /// The slot `tail`, for `size` elements.
