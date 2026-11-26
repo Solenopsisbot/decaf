@@ -63,8 +63,8 @@ methods, and nothing in it names a mod.
    them in `Hooks::component_types` (`mod/src/content.rs`), and `mod/sunrise-mod.toml` sets
    `[native] serves_content = true` so Sunrise accepts the bake's `served_by`. A Mixin
    `@Inject(method = "<clinit>", at = @At("TAIL"))` into a game class (Bundle API's
-   `DataComponentTypesMixin`) runs before the first entrypoint, for the jar's own mods and its
-   nested ones, in the order the server's bootstrap finishes those classes
+   `DataComponentTypesMixin`) runs in one pass over every loaded jar (its own mods and nested
+   ones), before any jar's entrypoint, in the order the server's bootstrap finishes those classes
    (`bootstrap_mixins.rs`, `bootstrap_clinit_order_26_3.txt` from
    `tools/trace_bootstrap_clinit_order.py`); any other shape that would apply is counted.
 2. **Default components.** The bake writes the item's component patch for jar types too (here

@@ -28,7 +28,9 @@ use mod_api::{
 };
 
 use crate::runtime;
-use crate::{JARS, JarRow, LOG, LoadedJar, State, jar_id, load_jar};
+use crate::{
+    JARS, JarRow, LOG, LoadedJar, State, bootstrap_jars, jar_id, prepare_jar, run_prepared,
+};
 
 /// Run a registered jar block's vanilla placement override. The game hook
 /// supplies a resolved Sunrise placement snapshot; the runtime owns the
@@ -215,6 +217,7 @@ impl State {
                 imc.add_mods(&parsed[index].1);
             }
         }
+        let mut prepared = Vec::new();
         for &index in &plan.order {
             let (file, jar) = parsed[index].clone();
             if let Some(missing) = plan.missing.get(&index) {
@@ -235,7 +238,24 @@ impl State {
                     (file.clone(), Arc::clone(jar))
                 })
                 .collect();
-            match load_jar(file, jar, &links, &imc, game_version) {
+            match prepare_jar(file, jar, &links, &imc, game_version) {
+                Ok(jar) => prepared.push(jar),
+                Err(row) => {
+                    log::info!("{LOG}: {row}");
+                    self.refused.push(row);
+                }
+            }
+        }
+        // The game bootstraps once, before any mod's entrypoint: every jar's Mixin callbacks
+        // into game classes' static initializers run in one pass, in the game's order
+        // (`runtime::bootstrap_mixins`). One that throws means the game does not start, and every
+        // jar is refused with it.
+        let boot = bootstrap_jars(&mut prepared);
+        if let Some(failure) = &boot {
+            log::warn!("{LOG}: the game's bootstrap failed in a jar's Mixin callback: {failure}");
+        }
+        for jar in prepared {
+            match run_prepared(jar, boot.as_deref()) {
                 Ok(loaded) => {
                     log::info!("{LOG}: {}", loaded.row);
                     self.jars.push(loaded);
@@ -876,6 +896,19 @@ mod tests {
     /// A jar built by `javac` from `sources` with `main` as its Fabric `main` entrypoint, its
     /// `demo/` classes packed. The game classes stay stubs, so every call reaches the runtime.
     fn javac_jar(test: &str, sources: &[(&str, &str)], main: &str) -> runtime::NativeJar {
+        let mod_json =
+            format!(r#"{{"id":"typesdemo","version":"1","entrypoints":{{"main":["{main}"]}}}}"#);
+        runtime::NativeJar::from_bytes(&javac_jar_bytes(test, sources, &mod_json, &[])).unwrap()
+    }
+
+    /// [`javac_jar`]'s bytes, with `mod_json` as `fabric.mod.json`, `extra` `(entry, text)` files,
+    /// and every class under `demo/` (sub-packages included) packed.
+    fn javac_jar_bytes(
+        test: &str,
+        sources: &[(&str, &str)],
+        mod_json: &str,
+        extra: &[(&str, &str)],
+    ) -> Vec<u8> {
         use std::io::Write;
         use std::path::PathBuf;
         let root = std::env::var_os("CARGO_TARGET_DIR")
@@ -906,20 +939,111 @@ mod tests {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file("fabric.mod.json", options).unwrap();
-        zip.write_all(
-            format!(r#"{{"id":"typesdemo","version":"1","entrypoints":{{"main":["{main}"]}}}}"#)
-                .as_bytes(),
-        )
-        .unwrap();
-        for entry in std::fs::read_dir(classes.join("demo")).unwrap() {
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            zip.start_file(format!("demo/{name}"), options).unwrap();
-            zip.write_all(&std::fs::read(&path).unwrap()).unwrap();
+        zip.write_all(mod_json.as_bytes()).unwrap();
+        for (entry, text) in extra {
+            zip.start_file(*entry, options).unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        let mut folders = vec![classes.join("demo")];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                    continue;
+                }
+                let name = path.strip_prefix(&classes).unwrap().to_string_lossy();
+                zip.start_file(name.replace('\\', "/"), options).unwrap();
+                zip.write_all(&std::fs::read(&path).unwrap()).unwrap();
+            }
         }
         zip.finish().unwrap();
         let _ = std::fs::remove_dir_all(&root);
-        runtime::NativeJar::from_bytes(&bytes).unwrap()
+        bytes
+    }
+
+    /// Review of #609 steps 1-2: the game bootstraps once, before any jar's entrypoint, so the
+    /// content phase seeds every jar, runs every jar's bootstrap Mixin callbacks in one pass, and
+    /// only then their entrypoints. A callback that throws (here the second jar's) is the game not
+    /// starting: neither jar runs an entrypoint, and both are refused with that reason, the first
+    /// jar (which loads first and has no callback of its own) included.
+    #[test]
+    fn a_bootstrap_callback_that_throws_refuses_every_jar() {
+        let stubs: &[(&str, &str)] = &[
+            (
+                "net/minecraft/core/component/DataComponents.java",
+                "package net.minecraft.core.component; public final class DataComponents {}",
+            ),
+            (
+                "org/spongepowered/asm/mixin/Mixin.java",
+                "package org.spongepowered.asm.mixin; import java.lang.annotation.*; @Retention(RetentionPolicy.CLASS) @Target(ElementType.TYPE) public @interface Mixin { Class<?>[] value() default {}; }",
+            ),
+            (
+                "org/spongepowered/asm/mixin/injection/At.java",
+                "package org.spongepowered.asm.mixin.injection; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) @Target({}) public @interface At { String value() default \"\"; }",
+            ),
+            (
+                "org/spongepowered/asm/mixin/injection/Inject.java",
+                "package org.spongepowered.asm.mixin.injection; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) @Target(ElementType.METHOD) public @interface Inject { String[] method(); At[] at(); boolean cancellable() default false; }",
+            ),
+            (
+                "org/spongepowered/asm/mixin/injection/callback/CallbackInfo.java",
+                "package org.spongepowered.asm.mixin.injection.callback; public class CallbackInfo {}",
+            ),
+        ];
+        let main = (
+            "demo/Main.java",
+            "package demo; public final class Main { public void onInitialize() { System.out.println(\"entrypoint ran\"); } }",
+        );
+        let mut plain = stubs.to_vec();
+        plain.push(main);
+        let first = javac_jar_bytes(
+            "bootstrap-plain",
+            &plain,
+            r#"{"id":"plain","version":"1","entrypoints":{"main":["demo.Main"]}}"#,
+            &[],
+        );
+        let mut throwing = plain.clone();
+        throwing.push((
+            "demo/mixin/Refuse.java",
+            "package demo.mixin; import net.minecraft.core.component.DataComponents; import org.spongepowered.asm.mixin.Mixin; import org.spongepowered.asm.mixin.injection.*; import org.spongepowered.asm.mixin.injection.callback.CallbackInfo; @Mixin(DataComponents.class) public class Refuse { @Inject(method = \"<clinit>\", at = @At(\"TAIL\")) private static void tail(CallbackInfo ci) { if (true) throw new IllegalStateException(\"no\"); } }",
+        ));
+        let second = javac_jar_bytes(
+            "bootstrap-throwing",
+            &throwing,
+            r#"{"id":"throwing","version":"1","entrypoints":{"main":["demo.Main"]},"mixins":["throwing.mixins.json"]}"#,
+            &[(
+                "throwing.mixins.json",
+                r#"{"required":true,"package":"demo.mixin","mixins":["Refuse"]}"#,
+            )],
+        );
+        let mut state = State::default();
+        state.ensure_loaded_with(
+            || {
+                vec![
+                    ("a-plain.jar".to_owned(), first),
+                    ("b-throwing.jar".to_owned(), second),
+                ]
+            },
+            &[],
+            None,
+        );
+        assert!(state.jars.is_empty(), "no jar runs");
+        let reasons: Vec<(&str, &str)> = state
+            .refused
+            .iter()
+            .map(|row| (row.file.as_str(), row.reason.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(reasons.len(), 2, "{reasons:?}");
+        for (file, reason) in &reasons {
+            assert!(
+                reason.starts_with(
+                    "the game did not start: demo/mixin/Refuse#tail at the end of \
+                     net/minecraft/core/component/DataComponents.<clinit>"
+                ),
+                "{file}: {reason}"
+            );
+        }
     }
 
     /// docs/java-item-parts.md step 1: `Hooks::component_types` registers every data component

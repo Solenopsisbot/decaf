@@ -46,6 +46,7 @@ pub use block_use::{
     PlayerContainer, SwingSource,
 };
 mod bootstrap_mixins;
+pub use bootstrap_mixins::{BootstrapUnit, run_bootstrap_injectors};
 mod boxed;
 pub mod brigadier;
 mod callback_marker;

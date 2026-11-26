@@ -979,6 +979,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let mut linked = Vec::new();
     for link in &links {
         let dependency = match NativeJar::from_path(&PathBuf::from(link)) {
             Ok(dependency) => dependency,
@@ -1005,6 +1006,7 @@ fn main() -> ExitCode {
             }
             return ExitCode::FAILURE;
         }
+        linked.push(dependency);
     }
     // Each entrypoint runs under the stage that names it. A failing one is
     // recorded and the rest still run, as in the game's loader (`load_jar`
@@ -1014,9 +1016,14 @@ fn main() -> ExitCode {
     let mut ran = 0;
     let mut failed_classes = Vec::new();
     // The Mixin callbacks a real server runs as it bootstraps game classes, before any
-    // entrypoint (`bootstrap_mixins.rs`). One that throws stops the game: no entrypoint runs.
-    let mut failures = jar.run_bootstrap_static_injectors(
-        &mut host,
+    // entrypoint (`bootstrap_mixins.rs`): the jar's, its nested jars' and the `--link`ed jars'
+    // (all on this one host), in one pass. One that throws stops the game: no entrypoint runs.
+    let mut failures = horizon_native_java::run_bootstrap_injectors(
+        &mut [horizon_native_java::BootstrapUnit {
+            runner: &jar,
+            host: &mut host,
+            sources: std::iter::once(&jar).chain(linked.iter()).collect(),
+        }],
         &horizon_native_java::ExecutionBudget::UNBOUNDED,
     );
     let booted = failures.is_empty();

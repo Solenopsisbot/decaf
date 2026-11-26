@@ -3640,7 +3640,14 @@ pub(crate) fn jar_id(jar: &NativeJar, file: &str) -> String {
 /// runs inside [`caught`], so an interpreter panic is that stage failing like any other error,
 /// never a crashed game. The jar is refused only when every stage failed; a partial run is
 /// `ran-partial` and its `reason` names the failed stages.
+///
+/// `load_jar` is a game of this jar alone: a loader with several jars seeds them all with
+/// [`prepare_jar`], runs the game's bootstrap over all of them at once with [`bootstrap_jars`]
+/// (Mixin's callbacks into game classes' static initializers: one global order, before any jar's
+/// entrypoint), and only then runs each with [`run_prepared`].
 // The `Err` is the refused jar's report row, built once per jar at load: boxing it buys nothing.
+// The game loads every jar at once (`content::State::ensure_loaded`); a one-jar game is the tests'.
+#[cfg(test)]
 #[allow(clippy::result_large_err)]
 fn load_jar(
     file: String,
@@ -3649,6 +3656,51 @@ fn load_jar(
     imc: &runtime::neoforge_imc::ImcBus,
     game_version: Option<&str>,
 ) -> Result<LoadedJar, JarRow> {
+    let mut prepared = [prepare_jar(file, jar, links, imc, game_version)?];
+    let boot = bootstrap_jars(&mut prepared);
+    let [prepared] = prepared;
+    run_prepared(prepared, boot.as_deref())
+}
+
+/// A jar whose host is seeded and linked, before the game's bootstrap and its entrypoints.
+pub(crate) struct PreparedJar {
+    file: String,
+    id: String,
+    jar: Arc<NativeJar>,
+    host: StdHost,
+}
+
+/// Runs the game's bootstrap Mixin callbacks of every prepared jar in one pass
+/// (`runtime::run_bootstrap_injectors`), each on its own host. `Some` is the callback that threw:
+/// the game does not start, so no jar may run an entrypoint ([`run_prepared`] refuses each).
+pub(crate) fn bootstrap_jars(prepared: &mut [PreparedJar]) -> Option<String> {
+    let outcome = caught("bootstrap Mixin callbacks", || {
+        let mut units: Vec<runtime::BootstrapUnit<'_>> = prepared
+            .iter_mut()
+            .map(|jar| runtime::BootstrapUnit {
+                runner: jar.jar.as_ref(),
+                host: &mut jar.host,
+                sources: vec![jar.jar.as_ref()],
+            })
+            .collect();
+        runtime::run_bootstrap_injectors(&mut units, &runtime::ExecutionBudget::within(JAR_BUDGET))
+    });
+    match outcome {
+        Ok(failures) => failures.into_iter().next(),
+        Err(panic) => Some(format!("bootstrap Mixin callbacks panicked: {panic}")),
+    }
+}
+
+/// Seeds one jar's host (its game version, its nested jars, the IMC bus) and links its
+/// dependencies, refusing the jar when it has no server entrypoint or cannot be seeded.
+#[allow(clippy::result_large_err)]
+pub(crate) fn prepare_jar(
+    file: String,
+    jar: Arc<NativeJar>,
+    links: &[(String, Arc<NativeJar>)],
+    imc: &runtime::neoforge_imc::ImcBus,
+    game_version: Option<&str>,
+) -> Result<PreparedJar, JarRow> {
     let id = jar_id(&jar, &file);
     let entrypoints = jar.role_entrypoints(false);
     if entrypoints.is_empty() {
@@ -3682,18 +3734,33 @@ fn load_jar(
             ));
         }
     }
+    Ok(PreparedJar {
+        file,
+        id,
+        jar,
+        host,
+    })
+}
+
+/// Runs a prepared jar's server entrypoints (see [`load_jar`]) once the game's bootstrap ran
+/// ([`bootstrap_jars`]). `boot` is the bootstrap's failure, if any: the game did not start, so
+/// the jar runs nothing and is refused with that reason, whichever jar's callback threw.
+#[allow(clippy::result_large_err)]
+pub(crate) fn run_prepared(prepared: PreparedJar, boot: Option<&str>) -> Result<LoadedJar, JarRow> {
+    let PreparedJar {
+        file,
+        id,
+        jar,
+        mut host,
+    } = prepared;
+    let entrypoints = jar.role_entrypoints(false);
     let mut calls = 0;
     let mut ran = 0;
     let mut failed_classes = Vec::new();
-    // The Mixin callbacks a real server runs as the game bootstraps its classes, before any
-    // entrypoint (`runtime::bootstrap_mixins`). One that throws is the game not starting: no
-    // entrypoint runs, and the jar is refused below.
-    let mut failures = match caught(&format!("{id} bootstrap Mixin callbacks"), || {
-        jar.run_bootstrap_static_injectors(&mut host, &runtime::ExecutionBudget::within(JAR_BUDGET))
-    }) {
-        Ok(failures) => failures,
-        Err(panic) => vec![format!("bootstrap Mixin callbacks panicked: {panic}")],
-    };
+    let mut failures: Vec<String> = boot
+        .map(|failure| format!("the game did not start: {failure}"))
+        .into_iter()
+        .collect();
     let booted = failures.is_empty();
     for (kind, entry) in entrypoints.iter().filter(|_| booted) {
         if let Some(adapter) = entry.adapter.as_deref() {

@@ -721,3 +721,299 @@ fn on_a_client_callbacks_into_several_game_classes_are_counted_not_run() {
         ])
     );
 }
+
+/// A Mixin class `demo.mixin.<name>` injecting at the `TAIL` of `target`'s `<clinit>` (`import`
+/// is the target's binary name), whose handler runs `body`.
+fn tail_mixin(name: &str, import: &str, body: &str) -> String {
+    let simple = import.rsplit('.').next().unwrap();
+    format!(
+        r#"package demo.mixin;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+import {import};
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+@Mixin({simple}.class)
+public class {name} {{
+  @Inject(method = "<clinit>", at = @At("TAIL"))
+  private static void tail(CallbackInfo ci) {{ {body} }}
+}}
+"#
+    )
+}
+
+/// `Registry.register(BuiltInRegistries.<registry>, <ns>:<path>, new Object())`.
+fn register(registry: &str, id: &str) -> String {
+    let (namespace, path) = id.split_once(':').unwrap();
+    format!(
+        "Registry.register(BuiltInRegistries.{registry}, Identifier.fromNamespaceAndPath(\"{namespace}\", \"{path}\"), new Object());"
+    )
+}
+
+/// A top-level mod jar `mod_id` whose one Mixin config lists `mixins` (`(class, source)`).
+fn mod_jar(test: &str, mod_id: &str, mixins: &[(&str, String)]) -> javac_fixture::Fixture {
+    let mut sources = demo_sources();
+    let paths: Vec<String> = mixins
+        .iter()
+        .map(|(name, _)| format!("demo/mixin/{name}.java"))
+        .collect();
+    for ((_, source), path) in mixins.iter().zip(&paths) {
+        sources.push((path.as_str(), source.as_str()));
+    }
+    let mod_json = format!(
+        r#"{{"schemaVersion":1,"id":"{mod_id}","version":"1.0.0","mixins":["{mod_id}.mixins.json"]}}"#
+    );
+    let names: Vec<String> = mixins
+        .iter()
+        .map(|(name, _)| format!("\"{name}\""))
+        .collect();
+    let config = format!(
+        r#"{{"required":true,"package":"demo.mixin","mixins":[{}]}}"#,
+        names.join(",")
+    );
+    let config_path = format!("{mod_id}.mixins.json");
+    javac_fixture::Fixture::build_with_mod_json_and_extra(
+        test,
+        &sources,
+        &mod_json,
+        &[(config_path.as_str(), config.as_bytes())],
+    )
+}
+
+fn server_host(fixture: &javac_fixture::Fixture) -> StdHost {
+    fixture
+        .jar
+        .seed_host(StdHost::new().with_environment_type("SERVER"))
+}
+
+/// Review of #609 steps 1-2: the bootstrap pass is one pass over every loaded jar. Two different
+/// mods injecting the same game class's `<clinit>` are ordered by Mixin across their configs,
+/// which is not modelled: both callbacks are counted, on each jar's own host, and neither runs.
+/// Their callbacks into another class (one mod each) still run.
+#[test]
+fn two_mods_injecting_one_game_initializer_are_counted_not_run() {
+    let a = mod_jar(
+        "bootstrap_shared_a",
+        "alpha",
+        &[
+            (
+                "AlphaTypes",
+                tail_mixin(
+                    "AlphaTypes",
+                    "net.minecraft.core.component.DataComponents",
+                    &register("DATA_COMPONENT_PREDICATE_TYPE", "alpha:types"),
+                ),
+            ),
+            (
+                "AlphaPredicates",
+                tail_mixin(
+                    "AlphaPredicates",
+                    "net.minecraft.core.component.predicates.DataComponentPredicates",
+                    &register("DATA_COMPONENT_PREDICATE_TYPE", "alpha:predicates"),
+                ),
+            ),
+        ],
+    );
+    let b = mod_jar(
+        "bootstrap_shared_b",
+        "beta",
+        &[(
+            "BetaTypes",
+            tail_mixin(
+                "BetaTypes",
+                "net.minecraft.core.component.DataComponents",
+                &register("DATA_COMPONENT_PREDICATE_TYPE", "beta:types"),
+            ),
+        )],
+    );
+    let (mut host_a, mut host_b) = (server_host(&a), server_host(&b));
+    let failures = horizon_native_java::run_bootstrap_injectors(
+        &mut [
+            horizon_native_java::BootstrapUnit {
+                runner: &a.jar,
+                host: &mut host_a,
+                sources: vec![&a.jar],
+            },
+            horizon_native_java::BootstrapUnit {
+                runner: &b.jar,
+                host: &mut host_b,
+                sources: vec![&b.jar],
+            },
+        ],
+        &ExecutionBudget::UNBOUNDED,
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+    let pair = |registry: &str, id: &str| (registry.to_owned(), id.to_owned());
+    assert_eq!(
+        rows(&host_a),
+        vec![pair(
+            "minecraft:data_component_predicate_type",
+            "alpha:predicates"
+        )]
+    );
+    assert!(rows(&host_b).is_empty(), "{:?}", rows(&host_b));
+    let shared = "net/minecraft/core/component/DataComponents#<clinit>".to_owned();
+    assert_eq!(unknown(&host_a), BTreeMap::from([(shared.clone(), 1)]));
+    assert_eq!(unknown(&host_b), BTreeMap::from([(shared, 1)]));
+}
+
+/// Callbacks of two mods into different classes run in the order the server's bootstrap finishes
+/// those classes, across jars and before any entrypoint: the second jar's `DataComponents`
+/// callback (position 601) runs before the first jar's `DataComponentPredicates` one (1499). The
+/// latter throws, so the game does not start: the pass reports it, after the former ran. (Run per
+/// jar, the first jar's callback would throw first and the second's never run.)
+#[test]
+fn callbacks_of_two_mods_run_in_the_bootstraps_global_order() {
+    let a = mod_jar(
+        "bootstrap_order_a",
+        "alpha",
+        &[(
+            "AlphaPredicates",
+            tail_mixin(
+                "AlphaPredicates",
+                "net.minecraft.core.component.predicates.DataComponentPredicates",
+                "if (true) throw new IllegalStateException(\"alpha refuses\");",
+            ),
+        )],
+    );
+    let b = mod_jar(
+        "bootstrap_order_b",
+        "beta",
+        &[(
+            "BetaTypes",
+            tail_mixin(
+                "BetaTypes",
+                "net.minecraft.core.component.DataComponents",
+                &register("DATA_COMPONENT_PREDICATE_TYPE", "beta:types"),
+            ),
+        )],
+    );
+    let (mut host_a, mut host_b) = (server_host(&a), server_host(&b));
+    let failures = horizon_native_java::run_bootstrap_injectors(
+        &mut [
+            horizon_native_java::BootstrapUnit {
+                runner: &a.jar,
+                host: &mut host_a,
+                sources: vec![&a.jar],
+            },
+            horizon_native_java::BootstrapUnit {
+                runner: &b.jar,
+                host: &mut host_b,
+                sources: vec![&b.jar],
+            },
+        ],
+        &ExecutionBudget::UNBOUNDED,
+    );
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].starts_with(
+            "demo/mixin/AlphaPredicates#tail at the end of net/minecraft/core/component/predicates/DataComponentPredicates.<clinit>"
+        ) && failures[0].contains("alpha refuses"),
+        "{failures:?}"
+    );
+    assert_eq!(
+        rows(&host_b),
+        vec![(
+            "minecraft:data_component_predicate_type".to_owned(),
+            "beta:types".to_owned()
+        )]
+    );
+    assert!(unknown(&host_a).is_empty() && unknown(&host_b).is_empty());
+    // Each host had its pass: a later pass over either runs nothing.
+    assert!(
+        horizon_native_java::run_bootstrap_injectors(
+            &mut [horizon_native_java::BootstrapUnit {
+                runner: &b.jar,
+                host: &mut host_b,
+                sources: vec![&b.jar],
+            }],
+            &ExecutionBudget::UNBOUNDED,
+        )
+        .is_empty()
+    );
+    assert_eq!(rows(&host_b).len(), 1);
+}
+
+/// One mod in two jars (a library both bundle: the same mod id) is one mod to Mixin, not two:
+/// its callback is not a second mod's into the same class, and it runs on each jar's host.
+#[test]
+fn one_mod_in_two_jars_runs_on_each_host() {
+    let mixin = || {
+        tail_mixin(
+            "LibraryTypes",
+            "net.minecraft.core.component.DataComponents",
+            &register("DATA_COMPONENT_PREDICATE_TYPE", "library:types"),
+        )
+    };
+    let a = mod_jar("bootstrap_same_a", "library", &[("LibraryTypes", mixin())]);
+    let b = mod_jar("bootstrap_same_b", "library", &[("LibraryTypes", mixin())]);
+    let (mut host_a, mut host_b) = (server_host(&a), server_host(&b));
+    let failures = horizon_native_java::run_bootstrap_injectors(
+        &mut [
+            horizon_native_java::BootstrapUnit {
+                runner: &a.jar,
+                host: &mut host_a,
+                sources: vec![&a.jar],
+            },
+            horizon_native_java::BootstrapUnit {
+                runner: &b.jar,
+                host: &mut host_b,
+                sources: vec![&b.jar],
+            },
+        ],
+        &ExecutionBudget::UNBOUNDED,
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+    for host in [&host_a, &host_b] {
+        assert_eq!(rows(host).len(), 1);
+        assert!(unknown(host).is_empty());
+    }
+}
+
+/// The probe's `--link`ed jar is a loaded mod on the same host: its callbacks join the pass, so a
+/// second mod's callback into the same class is counted there too.
+#[test]
+fn a_linked_jars_callbacks_join_its_hosts_pass() {
+    let a = mod_jar(
+        "bootstrap_linked_a",
+        "alpha",
+        &[(
+            "AlphaTypes",
+            tail_mixin(
+                "AlphaTypes",
+                "net.minecraft.core.component.DataComponents",
+                &register("DATA_COMPONENT_PREDICATE_TYPE", "alpha:types"),
+            ),
+        )],
+    );
+    let b = mod_jar(
+        "bootstrap_linked_b",
+        "beta",
+        &[(
+            "BetaPredicates",
+            tail_mixin(
+                "BetaPredicates",
+                "net.minecraft.core.component.predicates.DataComponentPredicates",
+                &register("DATA_COMPONENT_PREDICATE_TYPE", "beta:predicates"),
+            ),
+        )],
+    );
+    let mut host = server_host(&a);
+    // As `main.rs` links each `--link` jar before the pass.
+    host.link_jar("beta.jar", &b.jar).unwrap();
+    let failures = horizon_native_java::run_bootstrap_injectors(
+        &mut [horizon_native_java::BootstrapUnit {
+            runner: &a.jar,
+            host: &mut host,
+            sources: vec![&b.jar, &a.jar],
+        }],
+        &ExecutionBudget::UNBOUNDED,
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+    // The global order: `DataComponents` (alpha) first, though beta is the first source.
+    let ids: Vec<String> = rows(&host).into_iter().map(|(_, id)| id).collect();
+    assert_eq!(ids, ["alpha:types", "beta:predicates"]);
+}
