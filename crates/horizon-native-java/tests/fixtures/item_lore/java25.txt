@@ -1,0 +1,5 @@
+wand=[{"translate":"item.fixture.wand.hint","color":"gray"}]
+rod=["First","Second"]
+staff=[{"translate":"item.fixture.staff.uses","with":[3],"color":"aqua","bold":true},{"text":"x","extra":[{"text":"y","color":"red"}]}]
+blank=[]
+over_limit=java.lang.IllegalArgumentException: Got 257 lines, but maximum is 256

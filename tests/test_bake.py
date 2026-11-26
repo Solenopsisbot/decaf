@@ -158,6 +158,155 @@ class BakeTests(unittest.TestCase):
             ["ruby_mod:odd"],
         )
 
+    def loaded_mods_probe(self, mods: list[str], items: list[dict] | None = None) -> None:
+        report_text = json.loads(declarations(items=items))
+        report_text["content"]["mods"] = mods
+        self.probe = fake_probe(self.root, json.dumps(report_text))
+
+    def test_packages_are_the_mods_the_runtime_loaded_and_other_namespaces_join_the_jars(self):
+        """BUGS-3d34-round2 #3: Sunrise's `mod_loaded` reads the enabled packages' ids, Fabric
+        Loader's its mod map (the jar's mod and its nested jars). With the probe's `mods`, the
+        packages are exactly those: the nested mod gets a manifest-only package, and a namespace
+        that is no mod's (a tag file for another mod) is carried by the jar's own package."""
+        self.loaded_mods_probe(
+            ["ruby_mod", "gem_api"],
+            items=[
+                {"id": "ruby_mod:ruby", "file": ITEM},
+                {"id": "other_ns:gem", "file": {"template": "minecraft:stick"}},
+            ],
+        )
+        make_jar(
+            self.mods / "ruby_mod.jar",
+            ruby_jar(
+                {
+                    "data/quiver_mod/tags/item/quivers.json": b'{"values":["ruby_mod:ruby"]}',
+                    "assets/other_ns/lang/en_us.json": b'{"item.other_ns.gem":"Gem"}',
+                }
+            ),
+        )
+        report = self.bake()
+
+        mods_dir = self.game / "sunrise-mods"
+        self.assertEqual(sorted(path.name for path in mods_dir.iterdir()),
+                         ["gem_api.smod", "ruby_mod.smod"])
+        self.assertEqual(report["enabled"], ["ruby_mod", "gem_api"])
+        with zipfile.ZipFile(mods_dir / "ruby_mod.smod") as archive:
+            names = archive.namelist()
+            manifest = archive.read("sunrise-mod.toml").decode()
+        self.assertIn('id = "ruby_mod"\n', manifest)
+        self.assertIn('namespaces = ["other_ns", "quiver_mod"]\n', manifest)
+        for name in (
+            "data/quiver_mod/tags/item/quivers.json",
+            "assets/other_ns/lang/en_us.json",
+            "data/other_ns/sunrise/item/gem.json",
+            "data/ruby_mod/sunrise/item/ruby.json",
+            "data/minecraft/tags/block/mineable/pickaxe.json",
+        ):
+            self.assertIn(name, names)
+        with zipfile.ZipFile(mods_dir / "gem_api.smod") as archive:
+            self.assertEqual(archive.namelist(), ["sunrise-mod.toml"])
+            nested = archive.read("sunrise-mod.toml").decode()
+        self.assertIn('id = "gem_api"\n', nested)
+        self.assertNotIn("namespaces", nested)
+        rows = {row["id"]: row for row in report["jars"][0]["packages"]}
+        self.assertEqual(rows["ruby_mod"]["declarations"], {"blocks": 1, "items": 2})
+        self.assertEqual(rows["gem_api"]["files"], 0)
+        self.assertIsNone(report["jars"][0]["error"])
+
+    def test_an_items_component_patch_is_baked_for_sunrise(self):
+        """BUGS-3d34-round2 #4: the runtime's `components` (the lore an `Item.Properties` set)
+        is the Sunrise declaration's, byte for byte as the probe wrote it."""
+        lore = {"minecraft:lore": [{"translate": "item.ruby_mod.ruby.hint", "color": "gray"}]}
+        self.probe = fake_probe(
+            self.root, declarations(items=[{"id": "ruby_mod:ruby", "file": {**ITEM, "components": lore}}])
+        )
+        make_jar(self.mods / "ruby_mod.jar", ruby_jar())
+        self.bake()
+        with zipfile.ZipFile(self.game / "sunrise-mods" / "ruby_mod.smod") as archive:
+            item = json.loads(archive.read("data/ruby_mod/sunrise/item/ruby.json"))
+        self.assertEqual(item["components"], lore)
+
+    def test_the_horizon_target_keeps_an_item_without_its_component_patch(self):
+        lore = {"minecraft:lore": ["Ruby"]}
+        self.probe = fake_probe(
+            self.root, declarations(items=[{"id": "ruby_mod:ruby", "file": {**ITEM, "components": lore}}])
+        )
+        make_jar(self.mods / "ruby_mod.jar", ruby_jar())
+        report = BAKE_MODULE.bake_directory(
+            self.mods, self.game, probe=self.probe, target=BAKE_MODULE.HORIZON
+        ).as_json()
+        with zipfile.ZipFile(self.game / "horizon-mods" / "ruby_mod.hmod") as archive:
+            item = json.loads(archive.read("data/ruby_mod/horizon/item/ruby.json"))
+        self.assertEqual(item, ITEM)
+        skipped = {entry["reason"]: entry["paths"] for entry in report["jars"][0]["skipped"]}
+        self.assertEqual(skipped["item components (not established, left out)"], ["ruby_mod:ruby"])
+
+    def test_a_provides_alias_the_runtime_loaded_is_a_manifest_only_package(self):
+        """#668 review: Fabric's `isModLoaded` finds a `provides` alias, and Sunrise's `mod_loaded`
+        reads package ids only, so the alias the probe names gets a package of its own."""
+        self.loaded_mods_probe(["ruby_mod", "ruby_compat"])
+        make_jar(self.mods / "ruby_mod.jar", ruby_jar())
+        report = self.bake()
+        self.assertEqual(report["enabled"], ["ruby_mod", "ruby_compat"])
+        with zipfile.ZipFile(self.game / "sunrise-mods" / "ruby_compat.smod") as archive:
+            self.assertEqual(archive.namelist(), ["sunrise-mod.toml"])
+            self.assertIn('id = "ruby_compat"\n', archive.read("sunrise-mod.toml").decode())
+
+    def test_a_loaded_mod_that_cannot_be_a_package_is_named(self):
+        """A Fabric id may hold `-`; a Sunrise package id may not, so that mod can't be loaded
+        there, and the report says so. The jar's other mods still get their packages."""
+        self.loaded_mods_probe(["ruby_mod", "gem-api"])
+        make_jar(self.mods / "ruby_mod.jar", ruby_jar())
+        report = self.bake()
+        self.assertEqual([row["id"] for row in report["jars"][0]["packages"]], ["ruby_mod"])
+        skipped = {entry["reason"]: entry["paths"] for entry in report["jars"][0]["skipped"]}
+        self.assertEqual(
+            skipped[
+                "loaded mod whose id is not a Sunrise package id ([a-z0-9_], not reserved): "
+                "Sunrise cannot count it as loaded"
+            ],
+            ["gem-api"],
+        )
+
+    def test_a_namespace_another_jar_baked_refuses_the_package_that_would_carry_it(self):
+        make_jar(self.mods / "a_mod.jar", {"fabric.mod.json": b'{"id":"a_mod"}',
+                                           "assets/shared_ns/lang/en_us.json": b"{}"})
+        make_jar(self.mods / "b_mod.jar", {"fabric.mod.json": b'{"id":"b_mod"}',
+                                           "assets/shared_ns/lang/en_us.json": b"{}"})
+        report_a = json.loads(declarations(blocks=[], items=[]))
+        report_a["content"]["mods"] = ["a_mod"]
+        # One probe for both jars: each names itself by the jar it is given.
+        path = self.root / "horizon-native-java"
+        path.write_text(
+            "#!/usr/bin/env python3\nimport json, sys, pathlib\n"
+            f"report = json.loads({json.dumps(report_a)!r})\n"
+            "report['content']['mods'] = [pathlib.Path(sys.argv[2]).stem]\n"
+            "print(json.dumps(report))\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        self.probe = path
+        report = self.bake()
+        jars = {row["jar"]: row for row in report["jars"]}
+        self.assertEqual([p["id"] for p in jars["a_mod.jar"]["packages"]], ["a_mod"])
+        self.assertEqual(jars["b_mod.jar"]["packages"], [])
+        self.assertEqual(
+            jars["b_mod.jar"]["error"],
+            "namespace shared_ns is already baked from a_mod.jar; "
+            "two content mods may not own one namespace",
+        )
+
+    def test_without_the_probes_mods_each_namespace_is_its_own_package(self):
+        make_jar(
+            self.mods / "ruby_mod.jar",
+            ruby_jar({"data/quiver_mod/tags/item/quivers.json": b'{"values":[]}'}),
+        )
+        self.bake()
+        self.assertEqual(
+            sorted(path.name for path in (self.game / "sunrise-mods").iterdir()),
+            ["quiver_mod.smod", "ruby_mod.smod"],
+        )
+
     def test_assets_data_and_declarations_bake_into_the_namespace_package(self):
         make_jar(self.mods / "ruby_mod.jar", ruby_jar())
         report = self.bake()
@@ -834,10 +983,8 @@ class HorizonTargetTests(unittest.TestCase):
                 {"template": "minecraft:stick", "bogus_key": 1},
                 "item key the official game refuses (unknown field, 3.3)",
             ),
-            "components": (
-                {"template": "minecraft:stick", "components": {}},
-                "item key components (not established, left out)",
-            ),
+            # `components` is not here: the item is kept without it
+            # (`test_the_horizon_target_keeps_an_item_without_its_component_patch`).
             "arm_pose": (
                 {"template": "minecraft:stick", "arm_pose": "bow"},
                 "item key arm_pose (not established, left out)",

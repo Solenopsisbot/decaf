@@ -224,6 +224,37 @@ drops", and it travels through the same bake. Without the package the item is na
 
 ## Fork seams needed
 
+- **`fabric:load_conditions` is never read (BUGS-3d34-round2 #3, proposal; not filed).** At the
+  pin (`3d34bbe63d`) and at Sunrise `origin/main` `0013a6fe96`, nothing reads the key Fabric API's
+  resource conditions put on a data file (`fabric-resource-conditions-api-v1`,
+  `ResourceConditions.CONDITIONS_KEY`); only `neoforge:conditions` is evaluated. So a file a
+  Fabric jar guards with `fabric:load_conditions` alone loads whatever the condition says. Runes'
+  pouch recipes carry both keys, so the bake's loaded-mod packages (`tools/bake.py`
+  `_mod_packages`) are enough for them; a jar that ships only the Fabric key is not covered.
+  *Fabric*: Fabric Loader reads only `fabric:load_conditions` and ignores `neoforge:conditions`.
+  Smallest fix: the load-condition reader (the one `register_load_conditions` handlers plug into)
+  also reads `fabric:load_conditions`, one condition object `{"condition": <id>, ...}`, and maps
+  Fabric's built-in ids (`DefaultResourceConditionTypes` in `fabric-resource-conditions-api-v1`
+  6.2.0: `fabric:true`, `fabric:false`, `fabric:not` (`value`), `fabric:and` /
+  `fabric:or` (`values`), `fabric:all_mods_loaded` / `fabric:any_mods_loaded` (`values`, mod ids
+  read like `neoforge:mod_loaded`), `fabric:tags_populated`, `fabric:features_enabled`,
+  `fabric:registry_contains`); any other id goes to the registered handlers with the object minus
+  `condition`, as a `type` does now. A file holding both keys loads only when both hold (each loader
+  ignores the other's key, so a file that loads on both loaders loads here).
+
+- **An item's default lore is never drawn (BUGS-3d34-round2 #4, proposal; not filed).** The bake
+  now declares a jar item's `Item.Properties` lore as its `components."minecraft:lore"`, and
+  Sunrise takes it: the run's `mod-content/<hash>/items.json` lists
+  `"minecraft:lore":[{"color":"gray","translate":"item.runes.rune_pouch.hint"}]` among each rune
+  pouch's components. The tooltip still shows no lore line, because
+  `sunrise-client` `item_tooltip::lore_texts` reads only the stack's own patch
+  (`stack.data().other("minecraft:lore")`), never the item's defaults (pin and `origin/main`
+  `0013a6fe96`). A `/give` stack whose patch sets the same lore shows it (in game, 2026-11-26).
+  *Vanilla*: `ItemStack.addDetailsToTooltip` reads `get(DataComponents.LORE)`, the prototype
+  merged with the patch. Smallest fix: `lore_texts` falls back to the item's default
+  `minecraft:lore` when the patch neither sets nor removes (`!minecraft:lore`) it, as
+  `item_tooltip::rarity` already falls back to the item's default rarity.
+
 - **A namespace a manifest id cannot spell.** A package id is `[a-z0-9_]{1,64}`
   (`Manifest::parse`), while a namespace is `[a-z0-9_.-]`; a jar that registers in `my-mod` or
   `my.mod` has no package id its declarations can join by (`accept_declared` matches `m.id == ns`).

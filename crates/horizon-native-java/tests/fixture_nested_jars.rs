@@ -300,6 +300,44 @@ fn duplicate_fabric_ids_and_aliases_refuse_with_fabric_message() {
     assert_eq!(error.to_string(), "duplicate mod alias");
 }
 
+/// The mods the probe reports for the bake (`content.mods`): the jar's own, its nested jar's,
+/// and the `provides` aliases of both, since Fabric's `isModLoaded` finds an alias. The bake makes
+/// a package of each, so Sunrise's `mod_loaded` (package ids) answers as the jar's code was told.
+#[test]
+fn loaded_jar_mods_hold_nested_mods_and_provides_aliases() {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    let mut child = zip::ZipWriter::new(&mut bytes);
+    child
+        .start_file("fabric.mod.json", SimpleFileOptions::default())
+        .unwrap();
+    child
+        .write_all(br#"{"schemaVersion":1,"id":"child","version":"1","provides":["child_api"]}"#)
+        .unwrap();
+    child.finish().unwrap();
+    let child = bytes.into_inner();
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    let mut outer = zip::ZipWriter::new(&mut bytes);
+    outer
+        .start_file("fabric.mod.json", SimpleFileOptions::default())
+        .unwrap();
+    outer
+        .write_all(
+            br#"{"schemaVersion":1,"id":"outer","version":"1","provides":["outer_compat"],"jars":[{"file":"META-INF/jars/child.jar"}]}"#,
+        )
+        .unwrap();
+    outer
+        .start_file("META-INF/jars/child.jar", SimpleFileOptions::default())
+        .unwrap();
+    outer.write_all(&child).unwrap();
+    outer.finish().unwrap();
+    let jar = NativeJar::from_bytes(&bytes.into_inner()).unwrap();
+    let host = jar.try_seed_host(StdHost::new()).unwrap();
+    assert_eq!(
+        host.loaded_jar_mods(jar.fabric_id.as_deref()),
+        ["outer", "child", "child_api", "outer_compat"]
+    );
+}
+
 #[test]
 fn unlisted_and_explicitly_empty_fabric_jars_do_not_leak_mods() {
     fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
