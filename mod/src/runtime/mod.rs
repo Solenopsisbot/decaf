@@ -4151,10 +4151,11 @@ pub struct StdHost {
     /// Entries are seeded by the loaded jar, so this query never scans a host
     /// classpath or invents providers.
     fabric_entrypoint_containers: Vec<FabricEntrypointContainer>,
-    /// The entrypoint classes (internal names) the runtime constructed: their
-    /// instances are the run's own entrypoint objects.
-    /// The entrypoint objects the runtime built, by class (internal name).
-    constructed_entrypoints: BTreeMap<(String, String), Value>,
+    /// The entrypoint objects the runtime built, by kind and class (internal name), in the
+    /// order it built them: one per declaration it ran, so a class declared twice has two
+    /// (Fabric's `EntrypointStorage.add` makes a `NewEntry`, with its own cached instance, per
+    /// declaration).
+    constructed_entrypoints: BTreeMap<(String, String), Vec<Value>>,
     /// Identifiers retained by `CustomPacketPayload.Type` values created by
     /// the bounded networking façade.
     packet_types: BTreeMap<String, String>,
@@ -5090,26 +5091,28 @@ impl StdHost {
         if requested != host_fabric_runtime::invocation_type(kind) {
             return None;
         }
-        // One object per entrypoint key (Fabric Loader 0.19.5's
-        // `EntrypointStorage.add`: a new `NewEntry`, with its own instance
-        // map, per key).
-        let object = self
-            .constructed_entrypoints
-            .get(&(kind.to_owned(), internal.clone()))
-            .cloned()?;
-        if ordinal == 0 {
-            Some(object)
-        } else {
-            // Fabric's storage creates a distinct Entry (and therefore a
-            // distinct cached instance) for every duplicate declaration. The
-            // native entrypoint runner has one constructed object for the
-            // class, so give later duplicate rows distinct handles while
-            // retaining the normal object for the first row.
-            Some(jar_object::handle(format!(
-                "{internal}#{}",
-                1_000_000 + ordinal
-            )))
-        }
+        // One object per declaration (Fabric Loader 0.19.5, javap: `EntrypointStorage.add`
+        // makes a new `NewEntry` per declaration, and `NewEntry.getOrCreate` caches one
+        // instance per requested type in its own `instanceMap`): the `n`th declaration of
+        // `class` in storage order is the `n`th instance the runtime built for it, the one the
+        // loader's `invokeEntrypoints` ran. `ordinal` counts every entry of the kind, so it is
+        // turned into `class`'s own declaration index first.
+        //
+        // #669 review: a later declaration answered a stand-in `<class>#(1_000_000 + ordinal)`,
+        // a number the heap also hands out (so the next jar object could take its key), whose
+        // constructor never ran, and `ordinal` was the kind-wide index, so a second *distinct*
+        // entry class got a stand-in instead of its own instance. A declaration the runtime did
+        // not build has no instance: `None`, counted by the caller.
+        let declaration = self
+            .fabric_entrypoints(kind)
+            .iter()
+            .take(ordinal)
+            .filter(|(entry, _)| entry == class)
+            .count();
+        self.constructed_entrypoints
+            .get(&(kind.to_owned(), internal))?
+            .get(declaration)
+            .cloned()
     }
 
     fn empty_collection(&mut self, kind: &str) -> Value {
@@ -9072,7 +9075,9 @@ impl Host for StdHost {
 
     fn note_entrypoint_constructed(&mut self, kind: &str, class: &str, instance: &Value) {
         self.constructed_entrypoints
-            .insert((kind.to_owned(), class.to_owned()), instance.clone());
+            .entry((kind.to_owned(), class.to_owned()))
+            .or_default()
+            .push(instance.clone());
     }
 
     fn fabric_entrypoints(&self, kind: &str) -> Vec<(String, String)> {

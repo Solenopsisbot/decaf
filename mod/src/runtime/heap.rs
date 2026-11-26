@@ -388,6 +388,7 @@ impl StdHost {
         // a `DeferredRegister`'s values) and the JDK's shared empties.
         self.constructed_entrypoints
             .values()
+            .flatten()
             .for_each(|held| value(held, out));
         for (key, held) in &self.deferred_registers {
             out.push(key);
