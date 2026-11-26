@@ -13,8 +13,8 @@ mod javac_fixture;
 
 use horizon_native_java::{
     BlockUsePlayerData, ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemClick, ItemClickDirection,
-    ItemHook, ItemUse, LiveMenuEffect, MenuPlayerFacts, NativeJar, Nbt, PlayerContainer,
-    RuntimeComponentValue, StdHost, Value, level_sound::SoundRecord,
+    ItemDestroyed, ItemHook, ItemUse, LiveMenuEffect, MenuPlayerFacts, NativeJar, Nbt, NbtCompound,
+    PlayerContainer, RuntimeComponentValue, StdHost, Value, level_sound::SoundRecord,
 };
 
 const UUID: u128 = 0x0000_7a11_0000_0000_0000_0000_0000_0001;
@@ -174,7 +174,15 @@ const STUBS: &[(&str, &str)] = &[
     ),
     (
         "net/minecraft/world/entity/item/ItemEntity.java",
-        "package net.minecraft.world.entity.item; public class ItemEntity {}",
+        "package net.minecraft.world.entity.item;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         public class ItemEntity { public ItemStack getItem() { throw new AssertionError(); } }",
+    ),
+    (
+        "net/minecraft/world/item/ItemUtils.java",
+        "package net.minecraft.world.item;\n\
+         import java.util.stream.Stream; import net.minecraft.world.entity.item.ItemEntity;\n\
+         public class ItemUtils { public static void onContainerDestroyed(ItemEntity e, Stream<ItemStack> s) { throw new AssertionError(); } }",
     ),
     (
         "net/minecraft/world/entity/SlotAccess.java",
@@ -246,6 +254,7 @@ const STUBS: &[(&str, &str)] = &[
            public int getBarWidth(ItemStack s) { return 0; }\n\
            public int getBarColor(ItemStack s) { return 0; }\n\
            public InteractionResult use(Level l, Player p, InteractionHand h) { return null; }\n\
+           public void onDestroyed(net.minecraft.world.entity.item.ItemEntity e) {}\n\
          }",
     ),
 ];
@@ -344,6 +353,15 @@ fn java_float(value: f32) -> String {
     }
 }
 
+/// `Double.toString` for the plain values the script uses.
+fn java_double(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.1}")
+    } else {
+        format!("{value}")
+    }
+}
+
 fn sound_lines(host: &mut StdHost, out: &mut Vec<String>) {
     for record in host.take_sound_records() {
         let SoundRecord::Play(effect) = record else {
@@ -426,27 +444,12 @@ fn run_script() -> Vec<String> {
         ItemHook::BarVisible,
         ItemHook::BarWidth,
         ItemHook::BarColor,
+        ItemHook::Destroyed,
     ] {
         assert_eq!(overrides.owners.get(&hook).map(String::as_str), Some(OWNER));
     }
-    assert!(!overrides.overrides(ItemHook::Destroyed));
-    let mut defaults: Vec<(String, Option<Nbt>)> = GAME_PROTOTYPE_COMPONENTS
-        .iter()
-        .map(|id| ((*id).to_owned(), None))
-        .collect();
-    defaults.push((TALLY.to_owned(), None));
-    let tally = jar
-        .make_item_stack(
-            &mut host,
-            Some(item.clone()),
-            TALLY_ITEM,
-            1,
-            Vec::new(),
-            defaults,
-            false,
-            Vec::new(),
-        )
-        .expect("tally stack");
+    assert!(!overrides.overrides(ItemHook::TooltipImage));
+    let tally = tally_stack(jar, &mut host, &item, None);
 
     let mut out = Vec::new();
     let mut inventory = vec![StdHost::empty_item_stack(); 36];
@@ -560,7 +563,72 @@ fn run_script() -> Vec<String> {
             &result
         }
     ));
+
+    // An item entity destroyed while holding a full tally, as the game stores it.
+    let doomed = tally_stack(
+        jar,
+        &mut host,
+        &item,
+        Some(Nbt::Compound(NbtCompound::from([
+            ("count".to_owned(), Nbt::Int(4)),
+            ("last".to_owned(), Nbt::String("minecraft:stone".to_owned())),
+        ]))),
+    );
+    let position = [4.5, 70.0, 8.5];
+    let destroyed = jar
+        .item_destroyed(
+            &mut host,
+            &item,
+            OWNER,
+            &ItemDestroyed {
+                dimension: "minecraft:overworld".to_owned(),
+                stack: doomed.clone(),
+                position,
+            },
+            &ExecutionBudget::UNBOUNDED,
+        )
+        .expect("destroyed");
+    assert!(destroyed.report.exact(), "{:?}", destroyed.report);
+    for drop in &destroyed.drops {
+        // `ItemUtils.onContainerDestroyed` adds each at the entity's position, where the
+        // embedder spawns the drops it is handed.
+        out.push(format!(
+            "spawn {} at {} {} {}",
+            stack_line(jar, &mut host, drop),
+            java_double(position[0]),
+            java_double(position[1]),
+            java_double(position[2])
+        ));
+    }
+    out.push(format!(
+        "destroyed held={}",
+        stack_line(jar, &mut host, &doomed)
+    ));
     out
+}
+
+/// A tally item stack with `tally` in its patch (`None`: none), the item's prototype holding
+/// no tally and none of the vanilla container components, as the game's does.
+fn tally_stack(jar: &NativeJar, host: &mut StdHost, item: &Value, tally: Option<Nbt>) -> Value {
+    let mut defaults: Vec<(String, Option<Nbt>)> = GAME_PROTOTYPE_COMPONENTS
+        .iter()
+        .map(|id| ((*id).to_owned(), None))
+        .collect();
+    defaults.push((TALLY.to_owned(), None));
+    let patch = tally
+        .map(|nbt| vec![(TALLY.to_owned(), Some(RuntimeComponentValue::Nbt(nbt)))])
+        .unwrap_or_default();
+    jar.make_item_stack(
+        host,
+        Some(item.clone()),
+        TALLY_ITEM,
+        1,
+        patch,
+        defaults,
+        false,
+        Vec::new(),
+    )
+    .expect("tally stack")
 }
 
 #[test]
@@ -572,5 +640,8 @@ fn tally_item_overrides_match_java25() {
         .join()
         .unwrap();
     let expected: Vec<&str> = JAVA25.lines().collect();
-    assert_eq!(lines, expected);
+    for (index, (got, want)) in lines.iter().zip(&expected).enumerate() {
+        assert_eq!(got, want, "line {}", index + 1);
+    }
+    assert_eq!(lines.len(), expected.len(), "{lines:#?}");
 }

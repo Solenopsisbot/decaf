@@ -28,6 +28,7 @@ import net.minecraft.world.inventory.ClickAction;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import sun.misc.Unsafe;
 
@@ -74,6 +75,42 @@ public final class ItemPartsOracle {
               + pitch
               + " except="
               + (except == player));
+    }
+
+    @Override
+    public int getNextEntityId() {
+      return 1000;
+    }
+
+    @Override
+    public boolean addFreshEntity(Entity entity) {
+      ItemEntity item = (ItemEntity) entity;
+      System.out.println(
+          "spawn "
+              + item.getItem()
+              + " "
+              + tally(item.getItem())
+              + " at "
+              + item.getX()
+              + " "
+              + item.getY()
+              + " "
+              + item.getZ());
+      return true;
+    }
+  }
+
+  /** The destroyed item entity: its stack where `ItemEntity.getItem` would read it. */
+  static final class FakeItemEntity extends ItemEntity {
+    ItemStack held;
+
+    FakeItemEntity() {
+      super(null, null);
+    }
+
+    @Override
+    public ItemStack getItem() {
+      return held;
     }
   }
 
@@ -240,5 +277,17 @@ public final class ItemPartsOracle {
             + tally
             + " "
             + tally(tally));
+
+    // An item entity destroyed while it holds a full tally: `Item.onDestroyed` spills it
+    // through `ItemUtils.onContainerDestroyed`, which adds one new item entity per stack.
+    ItemStack doomed = new ItemStack(Probe.TALLY_ITEM);
+    doomed.set(Probe.TALLY, new Tally(4, "minecraft:stone"));
+    set(Level.class, level, "random", net.minecraft.util.RandomSource.create(0L));
+    FakeItemEntity entity = (FakeItemEntity) allocate(FakeItemEntity.class);
+    entity.held = doomed;
+    set(Entity.class, entity, "level", level);
+    set(Entity.class, entity, "position", new Vec3(4.5, 70.0, 8.5));
+    Probe.TALLY_ITEM.onDestroyed(entity);
+    System.out.println("destroyed held=" + doomed + " " + tally(doomed));
   }
 }

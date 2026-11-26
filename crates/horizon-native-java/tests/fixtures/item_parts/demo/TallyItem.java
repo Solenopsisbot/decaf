@@ -5,12 +5,15 @@ import net.minecraft.stats.Stats;
 import net.minecraft.util.Prediction;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
+import java.util.stream.Stream;
 import net.minecraft.world.entity.SlotAccess;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.ClickAction;
 import net.minecraft.world.inventory.Slot;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemUtils;
 import net.minecraft.world.level.Level;
 
 /**
@@ -85,5 +88,18 @@ public class TallyItem extends Item {
     player.drop(held.copyWithCount(1), true, Prediction.PREDICTED);
     held.remove(Probe.TALLY);
     return level.isClientSide() ? InteractionResult.SUCCESS : InteractionResult.SUCCESS_SERVER;
+  }
+
+  /** A destroyed tally spills one plain copy of itself per item it took in, in two drops. */
+  @Override
+  public void onDestroyed(ItemEntity entity) {
+    ItemStack stack = entity.getItem();
+    Tally tally = stack.get(Probe.TALLY);
+    if (tally == null) {
+      return;
+    }
+    stack.remove(Probe.TALLY);
+    ItemUtils.onContainerDestroyed(
+        entity, Stream.of(stack.copyWithCount(1), stack.copyWithCount(tally.count() - 1)));
   }
 }

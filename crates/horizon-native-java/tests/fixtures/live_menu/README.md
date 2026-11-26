@@ -9,9 +9,11 @@ from a local install and is not part of this repository. The launcher's log pref
 ```sh
 SERVER="<path-to-26.3-server>/META-INF"
 CP="$SERVER/versions/26.3/server-26.3.jar:$(find "$SERVER/libraries" -name '*.jar' | tr '\n' ':')"
-javac -XDignore.symbol.file -cp "$CP" -d out demo/*.java oracle/demo/Types.java \
+javac -XDignore.symbol.file -cp "$CP" -d out demo/*.java item_click/*.java oracle/demo/Types.java \
   oracle/net/fabricmc/api/ModInitializer.java oracle/*.java
 java -cp "out:$CP" LiveMenuOracle script.txt | sed 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' > java25.txt
+java -cp "out:$CP" LiveMenuOracle script_item_click.txt item_click \
+  | sed 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' | grep -v '^WARNING' > item_click_java25.txt
 java -cp "out:$CP" CaptureItemHooks | sed 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' \
   > ../../../src/live_menu_item_hooks_java25.txt
 java -cp "out:$CP" MenuLayoutOracle | sed 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: //' \
@@ -26,3 +28,9 @@ checks `NativeJar::menu_type_declarations` against it.
 `types/Types.java` builds the menu's `MenuType` for the Decaf fixture; the plain server jar keeps
 that constructor private (Fabric's access widener opens it for mods), so the oracle compiles
 `oracle/demo/Types.java` instead, which nothing it runs reads.
+
+`item_click_java25.txt` is the same oracle with `item_click`: the demo grab item
+(`item_click/GrabItem.java`, registered by `GrabProbe` into the built-in item registry opened
+again) sits in hotbar slot 3, and `script_item_click.txt`'s pickup clicks run its own
+`overrideOtherStackedOnMe` / `overrideStackedOnOther` inside the bench menu's `doClick`.
+`jar_item_click_overrides_in_a_live_menu_match_java25` checks Decaf's live-menu bridge against it.

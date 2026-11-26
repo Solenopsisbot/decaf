@@ -1,0 +1,10 @@
+# Run by oracle/LiveMenuOracle.java with `item_click` and by tests/fixture_live_menu.rs: the
+# demo grab item (item_click/GrabItem.java) sits in hotbar slot 3 (menu slot 33) of the bench
+# menu, and pickup clicks run its own overrides inside the menu's doClick.
+open
+click 30 0 PICKUP
+click 33 1 PICKUP
+click 33 0 PICKUP
+click 31 1 PICKUP
+click 33 0 PICKUP
+click 30 0 PICKUP
