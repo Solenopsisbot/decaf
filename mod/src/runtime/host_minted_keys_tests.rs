@@ -467,3 +467,22 @@ fn own_kind_model_keys_are_no_allocation_keys() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Enum constants' text (#670)
+
+/// An enum constant in a collection prints its class's own `toString()`: a constant-specific
+/// body's override, an enum-wide override, else the name. Every path a jar turns one into text
+/// agrees (`EnumSet`, `ArrayList`, `HashMap` and its `values()`, `List.of`,
+/// `String.valueOf`, concatenation, `StringBuilder.append(Object)`). Java 25:
+/// `tests/fixtures/enum_text/java25.txt` (JDK 25.0.5 run of the same class). Before #670 a
+/// collection printed a constant-specific body's constant by its name (`GREEN`), uncounted.
+#[test]
+fn enum_constants_print_their_own_to_string_in_collections() {
+    let jar = compile("enum_text", &["enum_text"]);
+    let oracle = std::fs::read_to_string(fixture("enum_text/java25.txt")).unwrap();
+    let mut host = jar.seed_host(StdHost::new());
+    let (answer, counted) = run(&jar, &mut host, "demo/EnumText", "run");
+    assert_eq!(answer, oracle.trim_end());
+    assert!(counted.is_empty(), "{counted:?}");
+}

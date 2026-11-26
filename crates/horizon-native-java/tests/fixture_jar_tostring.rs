@@ -8,9 +8,8 @@
 //! (`javac --release 21`, `java -cp`). `Object.toString()`'s identity hash is
 //! not reproducible, so those cases pin the runtime's contract instead: the
 //! call is counted as an unknown `Object#toString`, and the object's marker
-//! never reaches the text. A jar object inside a host collection is counted
-//! the same way (the host cannot run jar code), which is also the runtime's
-//! contract, not JVM behaviour.
+//! never reaches the text. A jar object inside a host collection prints its own
+//! `toString()`, which the runtime runs (#670), as the JVM does.
 
 #[path = "support/javac_fixture.rs"]
 mod javac_fixture;
@@ -249,18 +248,13 @@ fn identity_hash_text_is_counted_not_invented() {
     }
 }
 
-/// The host prints a collection's elements and cannot run jar code: a jar
-/// element is counted (the JVM printed `[A, fancy-x]`). Runtime contract, not
-/// JVM behaviour.
+/// A host collection holding jar objects prints each one's own `toString()`, run by the runtime
+/// (#670): the JVM prints `[A, fancy-x]` (JDK 25.0.5 run of `inList`), nothing counted. Before,
+/// the host printed the collection and could not run jar code, so each jar element was counted.
 #[test]
-fn jar_objects_inside_host_collections_are_counted() {
+fn jar_objects_inside_host_collections_print_their_own_to_string() {
     let fixture = fixture("tostring-collection");
     let run = run(&fixture, "inList");
-    assert!(
-        run.unknown
-            .iter()
-            .any(|(call, count)| call == OBJECT_TO_STRING && *count == 2),
-        "{:?}",
-        run.unknown
-    );
+    assert_eq!(run.value, Value::Ref(Some("[A, fancy-x]".into())));
+    assert!(run.unknown.is_empty(), "{:?}", run.unknown);
 }

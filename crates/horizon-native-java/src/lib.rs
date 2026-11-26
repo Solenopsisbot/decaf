@@ -19753,6 +19753,111 @@ pub(crate) fn same_items(a: &[Value], b: &[Value]) -> bool {
             .all(|(a, b)| collection_item_marker(a) == collection_item_marker(b))
 }
 
+/// What `AbstractCollection.toString` / `AbstractMap.toString` print over, for a collection a
+/// host model holds: the elements (a map's as key, value, key, value, …), whether it prints as
+/// a map, and the receiver an element is compared with for `(this Collection)`. One shape for
+/// the host's printer ([`collection_text`]) and the runtime's ([`Runtime::collection_to_string`],
+/// which can run an element's own `toString`, #670).
+pub(crate) struct CollectionShape {
+    receiver: Value,
+    marker: String,
+    values: Vec<Value>,
+    is_map: bool,
+    checks_itself: bool,
+}
+
+impl CollectionShape {
+    pub(crate) fn of<H: Host + ?Sized>(
+        host: &H,
+        value: &Value,
+        owner_is_map: bool,
+    ) -> Result<Self, NativeError> {
+        let marker = expect_string(value).to_owned();
+        // `Collections.unmodifiable*`'s `toString` is `c.toString()` (Java 25's `javap`): the
+        // view prints the collection it wraps, which is then the receiver `(this Collection)`
+        // compares against, never the view itself.
+        if let Some(source) = host
+            .unmodifiable_view_source(&marker)
+            .map(|source| jar_object::stored_value(&source))
+            .filter(|source| host.mutable_collection_values(source).is_some())
+        {
+            return Self::of(host, &source, false);
+        }
+        let values = host
+            .mutable_collection_values(value)
+            .map_or_else(|| not_a_collection(value), Ok)?;
+        let class = marker.split_once('#').map(|(class, _)| class);
+        let is_map = owner_is_map
+            || class.is_some_and(|class| {
+                is_map_owner(class) || java_immutable::supertypes(class).contains(&"java/util/Map")
+            });
+        // Only a class whose `toString` is `AbstractCollection`'s/`AbstractMap`'s (or checks
+        // the same way: `ConcurrentHashMap`, the reversed views, `Helpers.collectionToString`'s
+        // blocking queues) prints itself as `(this Collection)`. `CopyOnWriteArrayList`
+        // (`Arrays.toString` of its array) and the concurrent linked queues print every
+        // element, so a list holding itself recurses until a `StackOverflowError`, as on the
+        // JVM.
+        let checks_itself = !class.is_some_and(|class| {
+            matches!(
+                class,
+                "java/util/concurrent/CopyOnWriteArrayList"
+                    | "java/util/concurrent/ConcurrentLinkedQueue"
+                    | "java/util/concurrent/ConcurrentLinkedDeque"
+                    | "java/util/concurrent/LinkedTransferQueue"
+            )
+        });
+        Ok(Self {
+            receiver: value.clone(),
+            marker,
+            values,
+            is_map,
+            checks_itself,
+        })
+    }
+
+    pub(crate) fn values(&self) -> &[Value] {
+        &self.values
+    }
+
+    /// `(this Collection)` / `(this Map)` for the receiver itself (`e == this`), else `None`.
+    /// A collection is a handle, so `==` is its identity, not its text (#250: a list holding
+    /// itself recursed until the native stack overflowed). A deeper cycle recurses, as on the
+    /// JVM, until a `StackOverflowError` (`host_recursion.rs`).
+    pub(crate) fn itself(&self, element: &Value) -> Option<String> {
+        let itself = self.checks_itself
+            && match element {
+                Value::Ref(Some(inner)) => *inner == self.marker,
+                element => object_methods::identical(element, &self.receiver),
+            };
+        itself.then(|| {
+            if self.is_map {
+                "(this Map)"
+            } else {
+                "(this Collection)"
+            }
+            .to_owned()
+        })
+    }
+
+    /// The text of the collection whose elements print as `texts` (`String.valueOf` each).
+    pub(crate) fn join(&self, texts: Vec<String>) -> String {
+        if self.is_map {
+            let pairs = texts
+                .chunks(2)
+                .map(|pair| pair.join("="))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{pairs}}}")
+        } else {
+            format!("[{}]", texts.join(", "))
+        }
+    }
+}
+
+/// `AbstractCollection.toString` / `AbstractMap.toString` of a collection a host model holds,
+/// printed by the host: each element is `String.valueOf(element)` as the host knows it
+/// ([`object_text`]: a jar object it cannot print is counted). The runtime prints a collection
+/// holding objects itself ([`Runtime::collection_to_string`]), running their own `toString`.
 fn collection_text(
     host: &mut StdHost,
     value: &Value,
@@ -19760,70 +19865,16 @@ fn collection_text(
 ) -> Result<String, NativeError> {
     // One level of nested printing (#250).
     let _level = host_recursion::enter()?;
-    let marker = expect_string(value).to_owned();
-    // `Collections.unmodifiable*`'s `toString` is `c.toString()` (Java 25's `javap`): the view
-    // prints the collection it wraps, which is then the receiver `(this Collection)` compares
-    // against, never the view itself.
-    if let Some(source) = Host::unmodifiable_view_source(host, &marker)
-        .map(|source| jar_object::stored_value(&source))
-        .filter(|source| host.mutable_values(source).is_some())
-    {
-        return collection_text(host, &source, false);
-    }
-    let values = host_collection_values(host, value)?;
-    let class = marker.split_once('#').map(|(class, _)| class);
-    let is_map = owner_is_map
-        || class.is_some_and(|class| {
-            is_map_owner(class) || java_immutable::supertypes(class).contains(&"java/util/Map")
-        });
-    // `AbstractCollection.toString`/`AbstractMap.toString`: each element is
-    // `String.valueOf(element)`, and the collection itself inside it (`e == this`)
-    // prints `(this Collection)`/`(this Map)`. A collection is a handle, so `==` is
-    // its identity, not its text (#250: a list holding itself recursed until the
-    // native stack overflowed). A deeper cycle recurses, as on the JVM, until a
-    // `StackOverflowError` (`host_recursion.rs`).
-    // Only a class whose `toString` is `AbstractCollection`'s/`AbstractMap`'s (or checks the
-    // same way: `ConcurrentHashMap`, the reversed views, `Helpers.collectionToString`'s blocking
-    // queues) prints itself as `(this Collection)`. `CopyOnWriteArrayList` (`Arrays.toString` of
-    // its array) and the concurrent linked queues print every element, so a list holding itself
-    // recurses until a `StackOverflowError`, as on the JVM.
-    let checks_itself = !class.is_some_and(|class| {
-        matches!(
-            class,
-            "java/util/concurrent/CopyOnWriteArrayList"
-                | "java/util/concurrent/ConcurrentLinkedQueue"
-                | "java/util/concurrent/ConcurrentLinkedDeque"
-                | "java/util/concurrent/LinkedTransferQueue"
-        )
-    });
-    let mut texts = Vec::with_capacity(values.len());
-    for element in &values {
-        let itself = checks_itself
-            && match element {
-                Value::Ref(Some(inner)) => *inner == marker,
-                element => object_methods::identical(element, value),
-            };
-        texts.push(if itself {
-            if is_map {
-                "(this Map)"
-            } else {
-                "(this Collection)"
-            }
-            .to_owned()
-        } else {
-            object_text(host, element)?
+    let shape = CollectionShape::of(&*host, value, owner_is_map)
+        .map_err(|error| host_call_context(host, error))?;
+    let mut texts = Vec::with_capacity(shape.values().len());
+    for element in shape.values() {
+        texts.push(match shape.itself(element) {
+            Some(text) => text,
+            None => object_text(host, element)?,
         });
     }
-    Ok(if is_map {
-        let pairs = texts
-            .chunks(2)
-            .map(|pair| pair.join("="))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{{{pairs}}}")
-    } else {
-        format!("[{}]", texts.join(", "))
-    })
+    Ok(shape.join(texts))
 }
 
 /// `String.valueOf(Object)` of one value a model holds (a collection's
@@ -36506,11 +36557,15 @@ impl<H: Host> Runtime<'_, H> {
         Ok(Some(result))
     }
 
+    /// `toString()` of a collection a host model holds, when the runtime must print it
+    /// ([`Self::collection_to_string`]).
     #[inline(never)]
-    fn invoke_enum_set_text(
+    fn invoke_collection_text(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
+        class: &str,
+        method: &str,
     ) -> Result<Option<Value>, NativeError> {
         if r.name != "toString" || r.descriptor != "()Ljava/lang/String;" {
             return Ok(None);
@@ -36518,34 +36573,51 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver else {
             return Ok(None);
         };
-        let class = match receiver {
-            Value::Host(handle) if handle.kind() == HostKind::Collection => {
-                handle.key().split_once('#').map(|(class, _)| class)
-            }
-            Value::Ref(Some(marker)) => marker.split_once('#').map(|(class, _)| class),
-            _ => None,
-        };
-        if class != Some("java/util/EnumSet") {
+        Ok(self
+            .collection_to_string(receiver, is_map_owner(&r.owner), class, method)?
+            .map(|text| Value::Ref(Some(text))))
+    }
+
+    /// `AbstractCollection.toString` / `AbstractMap.toString` of a collection a host model
+    /// holds whose elements include an object only the runtime can print (a jar object, a
+    /// collection that may hold one): each element is `String.valueOf(element)`, its own
+    /// `toString()` selected virtually (`value_of_text`), as on Java 25. #670: the host printed
+    /// these, and cannot run jar code, so a jar enum constant came out as its handle's key
+    /// (`demo/Probe$Color#1`) and a constant-specific body's or enum's `toString()` override was
+    /// never run (an `EnumSet` printed names). `None` for any other value, and for a collection
+    /// of values the host prints itself (strings, boxes, its own models), which keeps the host's
+    /// path.
+    #[inline(never)]
+    pub(crate) fn collection_to_string(
+        &mut self,
+        receiver: &Value,
+        owner_is_map: bool,
+        class: &str,
+        method: &str,
+    ) -> Result<Option<String>, NativeError> {
+        if self.host_collection_kind(receiver).is_none() {
             return Ok(None);
         }
-        let values = runtime_collection_values(self.host, receiver)?;
-        let mut names = Vec::with_capacity(values.len());
-        for value in values {
-            let name = self
-                .invoke_enum_member(
-                    &MethodRef {
-                        owner: "java/lang/Enum".into(),
-                        name: "toString".into(),
-                        descriptor: "()Ljava/lang/String;".into(),
-                    },
-                    Some(&value),
-                    &[],
-                )?
-                .and_then(|value| expect_ref(&value).cloned())
-                .ok_or_else(|| NativeError::Metadata("EnumSet element is not a jar enum".into()))?;
-            names.push(name);
+        let Ok(shape) = CollectionShape::of(&*self.host, receiver, owner_is_map) else {
+            return Ok(None);
+        };
+        let runtime_prints = |element: &Value| {
+            self.jar_object_class(element).is_some()
+                || matches!(element, Value::Host(handle) if handle.kind() == HostKind::Collection)
+        };
+        if !shape.values().iter().any(runtime_prints) {
+            return Ok(None);
         }
-        Ok(Some(Value::Ref(Some(format!("[{}]", names.join(", "))))))
+        // One level of nested printing: a cycle ends in a `StackOverflowError` (#250).
+        let _level = host_recursion::enter()?;
+        let mut texts = Vec::with_capacity(shape.values().len());
+        for element in shape.values() {
+            texts.push(match shape.itself(element) {
+                Some(text) => text,
+                None => self.value_of_text(element, "Ljava/lang/Object;", class, method)?,
+            });
+        }
+        Ok(Some(shape.join(texts)))
     }
 
     /// Walk jar superclasses from `class` and return the first non-jar
@@ -38215,7 +38287,7 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
-        if let Some(value) = self.invoke_enum_set_text(r, receiver)? {
+        if let Some(value) = self.invoke_collection_text(r, receiver, class, method)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_host_object_method(r, op, receiver, args, class, method)? {
