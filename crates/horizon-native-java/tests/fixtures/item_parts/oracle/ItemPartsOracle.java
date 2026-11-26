@@ -85,6 +85,12 @@ public final class ItemPartsOracle {
     @Override
     public boolean addFreshEntity(Entity entity) {
       ItemEntity item = (ItemEntity) entity;
+      if (item.getOwner() == player) {
+        // A player's drop (`createItemStackToDrop`): thrown from their eyes, so its position
+        // is the embedder's throw; whose it is is what Decaf hands over.
+        System.out.println("spawn " + item.getItem() + " " + tally(item.getItem()) + " thrower=player");
+        return true;
+      }
       System.out.println(
           "spawn "
               + item.getItem()
@@ -119,25 +125,27 @@ public final class ItemPartsOracle {
       super(null, null, null, null);
     }
 
+    // `drop` is ServerPlayer's own: LivingEntity.drop's swing and item entity, then its
+    // ITEM_DROPPED and DROP stats.
+
     @Override
-    public ItemEntity drop(ItemStack stack, boolean retainOwnership, Prediction prediction) {
-      if (stack.isEmpty()) {
-        return null;
-      }
-      System.out.println(
-          "drop " + stack + " " + tally(stack) + " retain=" + retainOwnership + " " + prediction);
-      return null;
+    public boolean swing(
+        InteractionHand hand,
+        net.minecraft.world.item.component.SwingAnimation animation,
+        boolean updateSelf) {
+      System.out.println("swing " + hand + " updateSelf=" + updateSelf);
+      return true;
     }
 
     @Override
     public void awardStat(Stat<?> stat, int amount) {
+      Object value = stat.getValue();
+      Object key =
+          value instanceof net.minecraft.world.item.Item item
+              ? BuiltInRegistries.ITEM.getKey(item)
+              : value;
       System.out.println(
-          "stat "
-              + BuiltInRegistries.STAT_TYPE.getKey(stat.getType())
-              + " "
-              + BuiltInRegistries.ITEM.getKey((net.minecraft.world.item.Item) stat.getValue())
-              + " "
-              + amount);
+          "stat " + BuiltInRegistries.STAT_TYPE.getKey(stat.getType()) + " " + key + " " + amount);
     }
   }
 
@@ -247,6 +255,11 @@ public final class ItemPartsOracle {
     set(net.minecraft.world.entity.LivingEntity.class, player, "equipment", equipment);
     set(Entity.class, player, "level", level);
     set(Entity.class, player, "position", new Vec3(1.5, 64.0, -2.5));
+    Field eye = Entity.class.getDeclaredField("eyeHeight");
+    unsafe.putFloat(player, unsafe.objectFieldOffset(eye), 1.62f);
+    set(Entity.class, player, "uuid", new java.util.UUID(0L, 1L));
+    // The thrown item's spread draws the player's own random (`createItemStackToDrop`).
+    set(Entity.class, player, "random", net.minecraft.util.RandomSource.create(0L));
 
     inventory.setItem(0, new ItemStack(Probe.TALLY_ITEM));
     inventory.setItem(1, new ItemStack(Items.DIAMOND, 5));

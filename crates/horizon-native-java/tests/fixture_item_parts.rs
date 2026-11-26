@@ -15,6 +15,7 @@ use horizon_native_java::{
     BlockUsePlayerData, ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemClick, ItemClickDirection,
     ItemDestroyed, ItemHook, ItemUse, LiveMenuEffect, MenuPlayerFacts, NativeJar, Nbt, NbtCompound,
     PlayerContainer, RuntimeComponentValue, StdHost, Value, level_sound::SoundRecord,
+    player_drop_plan,
 };
 
 const UUID: u128 = 0x0000_7a11_0000_0000_0000_0000_0000_0001;
@@ -539,12 +540,25 @@ fn run_script() -> Vec<String> {
                 stack,
                 retain_ownership,
                 prediction,
-            } => out.push(format!(
-                "drop {} {} retain={retain_ownership} {}",
-                stack_text(stack.count, &stack.item_id),
-                tally_text(&stack.patch),
-                format!("{prediction:?}").to_uppercase()
-            )),
+            } => {
+                // `ServerPlayer.drop` past Java's call, as the embedder carries it out
+                // (`player_drop_plan`): the swing, the thrown item entity, and the drop stats
+                // once that entity is in the world (the oracle's fake level always takes it).
+                let plan = player_drop_plan(stack, *retain_ownership, *prediction);
+                out.push(format!(
+                    "swing MAIN_HAND updateSelf={}",
+                    plan.swing_updates_self
+                ));
+                out.push(format!(
+                    "spawn {} {} thrower={}",
+                    stack_text(stack.count, &stack.item_id),
+                    tally_text(&stack.patch),
+                    if plan.thrower { "player" } else { "none" }
+                ));
+                for (stat_type, value, amount) in &plan.stats_when_dropped {
+                    out.push(format!("stat {stat_type} {value} {amount}"));
+                }
+            }
             other => panic!("unexpected effect {other:?}"),
         }
     }

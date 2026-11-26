@@ -524,24 +524,46 @@ impl JavaItemPart {
         for effect in &outcome.effects {
             match effect {
                 LiveMenuEffect::Drop {
-                    stack,
+                    stack: components,
                     retain_ownership,
-                    ..
+                    prediction,
                 } => {
-                    let stack = crate::client::api_stack_from_components(&*host, stack.clone());
-                    match stack {
-                        Some(stack) => {
-                            // `Ok(None)`: thrown; a stack handed back was refused.
-                            if !matches!(
-                                player.drop_stack(host, stack, *retain_ownership),
-                                Ok(None)
-                            ) {
-                                jar.host.note_unknown_game_hook("use_item:drop refused");
-                            }
+                    // `ServerPlayer.drop` as the runtime spells it out (`player_drop_plan`).
+                    // `drop_stack`'s `thrown_by_player` is `createItemStackToDrop`'s
+                    // `retainOwnership` (Sunrise's `drop_stack_from_eyes` names the player as
+                    // thrower); it awards no stats, so the plan's are awarded here once the item
+                    // entity is in the world, in `ServerPlayer.drop`'s order.
+                    let plan = crate::runtime::player_drop_plan(
+                        components,
+                        *retain_ownership,
+                        *prediction,
+                    );
+                    // The SDK's drop takes no `Prediction`: whether the swing reaches the
+                    // dropping player's own client (`swing(.., updateSelf)`) isn't in its
+                    // contract, so that part counts.
+                    jar.host.note_unknown_game_hook("use_item:drop prediction");
+                    let stack =
+                        crate::client::api_stack_from_components(&*host, components.clone());
+                    let Some(stack) = stack else {
+                        jar.host
+                            .note_unknown_game_hook("use_item:drop unconvertible");
+                        continue;
+                    };
+                    // `Ok(None)`: the item entity is in the world; a stack handed back was refused
+                    // (vanilla's `Player.drop` answered `null`: no stats).
+                    if !matches!(player.drop_stack(host, stack, plan.thrower), Ok(None)) {
+                        jar.host.note_unknown_game_hook("use_item:drop refused");
+                        continue;
+                    }
+                    for (stat_type, value, amount) in &plan.stats_when_dropped {
+                        let awarded =
+                            crate::live_menu::stat_type_of(stat_type).is_some_and(|stat_type| {
+                                player.award_stat(host, stat_type, value, *amount)
+                            });
+                        if !awarded {
+                            jar.host
+                                .note_unknown_game_hook("use_item:drop stat refused");
                         }
-                        None => jar
-                            .host
-                            .note_unknown_game_hook("use_item:drop unconvertible"),
                     }
                 }
                 LiveMenuEffect::AwardStat {

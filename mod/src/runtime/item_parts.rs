@@ -986,6 +986,56 @@ impl NativeJar {
     }
 }
 
+/// What 26.3 `ServerPlayer.drop(stack, retainOwnership, prediction)` does once Java has asked
+/// for it ([`LiveMenuEffect::Drop`]), for an embedder that carries the drop out:
+///
+/// - `LivingEntity.drop` (offsets 0-70): `swing(MAIN_HAND, SwingAnimation.DEFAULT,
+///   prediction != PREDICTED)`, whose last argument says whether the swing is also sent to the
+///   dropping player's own client ([`PlayerDropPlan::swing_updates_self`]); then
+///   `createItemStackToDrop(stack, false, retainOwnership)`, which names the player as the item
+///   entity's thrower when `retainOwnership` ([`PlayerDropPlan::thrower`]), and adds it to the
+///   level.
+/// - `ServerPlayer.drop` offsets 9-62: when `retainOwnership` and the item entity that came of
+///   it holds a non-empty stack, `awardStat(Stats.ITEM_DROPPED.get(item), stack.getCount())`
+///   then `awardStat(Stats.DROP)` ([`PlayerDropPlan::stats_when_dropped`], awarded only if
+///   the embedder's drop put an item entity in the world).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerDropPlan {
+    pub swing_updates_self: bool,
+    pub thrower: bool,
+    /// `(stat type, value, amount)`, in award order.
+    pub stats_when_dropped: Vec<(String, String, i32)>,
+}
+
+/// [`PlayerDropPlan`] of a recorded drop.
+pub fn player_drop_plan(
+    stack: &StackComponents,
+    retain_ownership: bool,
+    prediction: crate::runtime::live_menu::Prediction,
+) -> PlayerDropPlan {
+    let stats_when_dropped = if retain_ownership && stack.count > 0 {
+        vec![
+            (
+                "minecraft:dropped".to_owned(),
+                stack.item_id.clone(),
+                stack.count,
+            ),
+            (
+                "minecraft:custom".to_owned(),
+                "minecraft:drop".to_owned(),
+                1,
+            ),
+        ]
+    } else {
+        Vec::new()
+    };
+    PlayerDropPlan {
+        swing_updates_self: prediction != crate::runtime::live_menu::Prediction::Predicted,
+        thrower: retain_ownership,
+        stats_when_dropped,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Interpreter entry: the façades' methods
 // ---------------------------------------------------------------------------
