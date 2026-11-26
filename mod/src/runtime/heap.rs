@@ -2301,6 +2301,10 @@ mod tests {
             "random_time_origin",
             "fired_creative_tab_registrations",
             "peak_identity_tokens",
+            // Whether the bootstrap Mixin callbacks ran (`bootstrap_mixins.rs`): a flag.
+            "bootstrap_injectors_ran",
+            // A count of registrations handled (`jar_components.rs`).
+            "component_defaults_declared",
         ];
         let debug = format!("{:#?}", StdHost::new());
         let fields: BTreeSet<&str> = debug

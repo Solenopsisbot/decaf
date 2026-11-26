@@ -229,6 +229,7 @@ impl State {
             .collect();
         let plan = runtime::dependencies::plan(&refs);
         let imc = runtime::neoforge_imc::ImcBus::new();
+        let mut prepared = Vec::new();
         for &index in &plan.order {
             let (file, jar) = parsed[index].clone();
             if let Some(missing) = plan.missing.get(&index) {
@@ -250,7 +251,33 @@ impl State {
                     (name.clone(), Arc::clone(jar))
                 })
                 .collect();
-            match load_jar(file, jar, &links, &imc, game_version) {
+            match prepare_jar(file, jar, &links, &imc, game_version) {
+                Ok(jar) => prepared.push(jar),
+                Err(row) => self.refused.push(row),
+            }
+        }
+        // The client bootstraps once before any mod's entrypoint: every jar's Mixin callbacks
+        // into game classes' static initializers run in one pass (`runtime::bootstrap_mixins`),
+        // each on its jar's client host. One that throws means the game does not start: every
+        // jar is refused with it.
+        let boot = {
+            let mut units: Vec<runtime::BootstrapUnit<'_>> = prepared
+                .iter_mut()
+                .map(|jar| runtime::BootstrapUnit {
+                    runner: jar.jar.as_ref(),
+                    host: &mut jar.host,
+                    sources: vec![jar.jar.as_ref()],
+                })
+                .collect();
+            match caught("client bootstrap Mixin callbacks", || {
+                runtime::run_bootstrap_injectors(&mut units, &ExecutionBudget::within(JAR_BUDGET))
+            }) {
+                Ok(failures) => failures.into_iter().next(),
+                Err(panic) => Some(format!("bootstrap Mixin callbacks panicked: {panic}")),
+            }
+        };
+        for jar in prepared {
+            match run_prepared(jar, &imc, boot.as_deref()) {
                 Ok(jar) => self.jars.push(jar),
                 Err(row) => self.refused.push(row),
             }
@@ -1240,14 +1267,23 @@ fn log_registration(row: &Row) {
     );
 }
 
+/// A client jar whose host is seeded and linked, before the bootstrap and its entrypoints.
+struct PreparedJar {
+    file: String,
+    id: String,
+    jar: Arc<NativeJar>,
+    host: StdHost,
+}
+
+/// Seeds one client jar's host and links its dependencies; refused without a client entrypoint.
 #[allow(clippy::result_large_err)]
-fn load_jar(
+fn prepare_jar(
     file: String,
     jar: Arc<NativeJar>,
     links: &[(String, Arc<NativeJar>)],
     imc: &runtime::neoforge_imc::ImcBus,
     game_version: Option<&str>,
-) -> Result<LoadedJar, Row> {
+) -> Result<PreparedJar, Row> {
     let id = jar_id(&jar, &file);
     let entrypoints = jar.role_entrypoints(true);
     if entrypoints.is_empty() {
@@ -1271,6 +1307,36 @@ fn load_jar(
             ));
         }
     }
+    Ok(PreparedJar {
+        file,
+        id,
+        jar,
+        host,
+    })
+}
+
+/// Runs a prepared client jar's entrypoints once the bootstrap ran. `boot` is the bootstrap's
+/// failure: the game did not start, so the jar runs nothing and is refused with that reason.
+#[allow(clippy::result_large_err)]
+fn run_prepared(
+    prepared: PreparedJar,
+    imc: &runtime::neoforge_imc::ImcBus,
+    boot: Option<&str>,
+) -> Result<LoadedJar, Row> {
+    let PreparedJar {
+        file,
+        id,
+        jar,
+        mut host,
+    } = prepared;
+    if let Some(failure) = boot {
+        return Err(Row::refused(
+            &file,
+            id,
+            format!("the game did not start: {failure}"),
+        ));
+    }
+    let entrypoints = jar.role_entrypoints(true);
     let mut row = Row {
         file,
         id: id.clone(),

@@ -42,6 +42,8 @@ pub use block_use::{
     InteractionItemContext, InteractionResultValue, MenuCloseOutcome, MenuEffect, OpenMenuEffect,
     PlayerContainer, SwingSource,
 };
+mod bootstrap_mixins;
+pub use bootstrap_mixins::{BootstrapUnit, run_bootstrap_injectors};
 mod boxed;
 pub mod brigadier;
 mod callback_marker;
@@ -169,6 +171,7 @@ mod http_client;
 mod immutable_collections;
 mod iteration_guard;
 mod jar_compare;
+mod jar_components;
 mod jar_object;
 mod jar_operands;
 mod jar_server_values;
@@ -179,6 +182,7 @@ mod java_format_args;
 mod java_identifier;
 mod java_immutable;
 mod java_math;
+pub use jar_components::{JarComponentType, content_json};
 mod java_nbt;
 mod java_numbers;
 mod java_regex;
@@ -4065,6 +4069,12 @@ pub struct StdHost {
     /// The data-component and attachment builder steps the interpreter
     /// reported (`declarations_content`), so a registration can be typed.
     content_builders: declarations_content::ContentBuilders,
+    /// Whether the Mixin callbacks into game classes' static initializers ran on this host
+    /// (`bootstrap_mixins.rs`): they run once, before the first entrypoint.
+    bootstrap_injectors_ran: bool,
+    /// How many registrations `NativeJar::declare_jar_component_defaults` has handled
+    /// (`jar_components.rs`): registrations only append, so each pass takes the ones after.
+    component_defaults_declared: usize,
     /// Registry keys the jar's own `META-INF/horizon-native.json` declares.
     /// Those rows are recorded opaque so the metadata merge stays the one
     /// authority for them, exactly as before inference existed.
@@ -4554,6 +4564,8 @@ impl StdHost {
             registrations: Vec::new(),
             inferred_declarations: BTreeSet::new(),
             content_builders: Default::default(),
+            bootstrap_injectors_ran: false,
+            component_defaults_declared: 0,
             declared_registrations: BTreeSet::new(),
             item_property_builders: BTreeMap::new(),
             block_property_builders: BTreeMap::new(),
@@ -8331,6 +8343,14 @@ impl StdHost {
                 };
                 for (key, value) in settings {
                     record_inferred_property(builders, marker, key, Some(value));
+                }
+                // `component(type, value)` with a type the jar built: its value, encoded with the
+                // type's own codec once the type is registered (`jar_components.rs`).
+                if item
+                    && let Some((key, value)) =
+                        jar_components::component_setting(&r.name, &r.descriptor, args)
+                {
+                    record_inferred_property(builders, marker, &key, Some(value));
                 }
                 if !item && r.name == "noCollision" {
                     self.block_copied_properties.remove(marker);
@@ -25518,6 +25538,25 @@ impl NativeJar {
         let roots = [codec.clone(), value.clone()];
         self.with_persistent_runtime(host, &roots, |runtime| {
             outcome = Some(dfu_codec::encode_value_json(runtime, codec, value)?);
+            Ok(Value::Void)
+        })?;
+        Ok(outcome.unwrap_or_else(|| DfuCodecResult::Unmodelled("no encode outcome".into())))
+    }
+
+    /// Encode a runtime value to the NBT `codec.encodeStart(NbtOps.INSTANCE, value)` gives, through
+    /// a modelled DFU `Codec` handle constructed by this jar: what a data component with that
+    /// persistent codec is saved as. The walk is [`Self::encode_dfu_codec_json`]'s; only the
+    /// primitives differ (a boolean is a `ByteTag`, a float a `FloatTag`, a list a `ListTag`).
+    pub fn encode_dfu_codec_nbt<H: Host>(
+        &self,
+        codec: &Value,
+        value: &Value,
+        host: &mut H,
+    ) -> Result<DfuCodecResult<Nbt>, NativeError> {
+        let mut outcome: Option<DfuCodecResult<Nbt>> = None;
+        let roots = [codec.clone(), value.clone()];
+        self.with_persistent_runtime(host, &roots, |runtime| {
+            outcome = Some(dfu_codec::encode_value_nbt(runtime, codec, value)?);
             Ok(Value::Void)
         })?;
         Ok(outcome.unwrap_or_else(|| DfuCodecResult::Unmodelled("no encode outcome".into())))

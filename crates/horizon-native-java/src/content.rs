@@ -168,9 +168,10 @@ pub struct Item {
     pub rarity: Option<Rarity>,
     pub crafting_remainder: Option<String>,
     /// The 26.3 data component patch over the template the jar's `Item.Properties.component`
-    /// calls set, each value as the component's codec writes it to JSON (only the types the host
-    /// encodes exactly: `minecraft:lore`). The loader's `components` key
-    /// (`sunrise-mod-package` `ItemFile`).
+    /// calls set (only the types the host encodes exactly): `minecraft:lore` as its codec writes
+    /// it to JSON, and each type the jar built and registered with a persistent codec as the JSON
+    /// Sunrise reads back as the NBT that codec writes (`jar_components.rs`). The loader's
+    /// `components` key (`sunrise-mod-package` `ItemFile`).
     pub components: BTreeMap<String, Value>,
 }
 
