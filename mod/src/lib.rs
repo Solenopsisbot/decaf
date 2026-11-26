@@ -1951,6 +1951,11 @@ impl HorizonJava {
         let mut state = self.lock();
         let mut client = self.lock_client();
         let rows = client.report_rows().count();
+        // One line per client jar, as the server's stop logs its rows: the counted calls and
+        // failures by name, which the report holds too.
+        for line in client.row_lines() {
+            log::info!("{LOG}: {line}");
+        }
         if let Err(error) = write_report(host, &mut state, &client) {
             log::warn!("{LOG}: {REPORT} could not be flushed at client stopping: {error}");
         }

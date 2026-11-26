@@ -1222,7 +1222,7 @@ pub(crate) mod tests {
         assert_eq!(
             host.unknown_host_calls(),
             [(
-                "game-hook re-entry: level sound has no bridge on the official Horizon".to_owned(),
+                "bridge: level sound has no bridge on the official Horizon".to_owned(),
                 1
             )]
         );
