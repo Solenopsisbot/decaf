@@ -319,6 +319,30 @@ impl StdHost {
                 && !matches!(id, "neoforge" | "forge"))
     }
 
+    /// The mods this run loaded from jars, as the offline bake reads them (`tools/bake.py`
+    /// `_mod_packages`): `primary` (the jar's own id) first when it was loaded, then the rest
+    /// in id order, each once. They are the jar-backed half of what [`Self::fabric_mod_present`]
+    /// answers: every Fabric container recorded from a jar (the jar's and each nested jar
+    /// `fabric.mod.json` `jars` selected, a nested one replaced by a newer copy no longer
+    /// listed) and every NeoForge `[[mods]]` entry of a linked mod file. Aliases (`provides`),
+    /// the loader's built-in mods and the dependencies the host assumes are left out: no jar of
+    /// the run supplies them, so no package of the bake may claim them.
+    pub fn loaded_jar_mods(&self, primary: Option<&str>) -> Vec<String> {
+        let ids: BTreeSet<&str> = self
+            .fabric_metadata
+            .keys()
+            .chain(self.neoforge_mod_files.keys())
+            .map(String::as_str)
+            .filter(|id| !Self::builtin_fabric_mod(id) && !is_always_loaded_mod(id))
+            .collect();
+        primary
+            .filter(|id| ids.contains(id))
+            .into_iter()
+            .chain(ids.iter().copied().filter(|id| Some(*id) != primary))
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// Every container `getAllMods` lists, in mod-id order.
     fn fabric_containers(&self) -> Vec<Value> {
         let mut ids = self

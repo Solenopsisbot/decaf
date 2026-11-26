@@ -3961,6 +3961,10 @@ pub struct StdHost {
     /// included), so `asItem()` answers only blocks it knows.
     constructed_blocks: BTreeSet<String>,
     block_items: BTreeMap<String, Value>,
+    /// `new ItemLore(List<Component>)` objects: each one's `lines` list (26.3 `ItemLore` is a
+    /// record whose one-list constructor keeps the list it is given). Traced and pruned with the
+    /// lore object (`heap.rs`), so a lore an `Item.Properties` builder holds keeps its lines.
+    item_lores: BTreeMap<String, Value>,
     /// `requiredFeatures` bitmask (`None` = unknown, so `isEnabled` is counted) tracked on
     /// `Item.Properties` builders and propagated to constructed `Item` / `BlockItem` instances.
     item_required_features: BTreeMap<String, Option<u64>>,
@@ -4478,6 +4482,7 @@ impl StdHost {
             constructed_items: BTreeSet::new(),
             constructed_blocks: BTreeSet::new(),
             block_items: BTreeMap::new(),
+            item_lores: BTreeMap::new(),
             item_required_features: BTreeMap::new(),
             fired_creative_tab_registrations: BTreeSet::new(),
             service_providers: BTreeMap::new(),
@@ -7494,12 +7499,19 @@ impl StdHost {
         let marker = expect_ref(value)?;
         match registry {
             "minecraft:item" => {
-                self.item_property_builders
-                    .get(marker)
-                    .map(|builder| RegistryDeclaration::Item {
+                self.item_property_builders.get(marker).map(|builder| {
+                    let mut properties = item_declaration_properties(builder);
+                    // A data component the builder set, as the content vocabulary's component
+                    // patch (`components`, keyed `component:<type>`): only those the host can
+                    // write exactly as the game's codec does.
+                    if let Some(lore) = self.recorded_lore_json(builder) {
+                        properties.insert("component:minecraft:lore".to_owned(), lore);
+                    }
+                    RegistryDeclaration::Item {
                         template: INFERRED_ITEM_TEMPLATE.to_owned(),
-                        properties: item_declaration_properties(builder),
-                    })
+                        properties,
+                    }
+                })
             }
             "minecraft:data_component_type" => self.content_builders.component_declaration(marker),
             "minecraft:block" => {
@@ -7708,6 +7720,46 @@ impl StdHost {
             ("isOpaque", "()Z") => Value::Int(i32::from(parts.opaque)),
             _ => return None,
         })
+    }
+
+    /// 26.3 `ItemLore.<init>(List)` on the object a `new ItemLore` made: it stores the list as
+    /// the record's `lines` (and `Lists.transform`'s lazily styled view of it), with no other
+    /// effect. Answered only for a list the host holds of at most 256 lines; a `null` (an NPE in
+    /// `Lists.transform`), an opaque list, or a longer one (the canonical constructor's
+    /// `IllegalArgumentException`) keeps the call as it was.
+    fn item_lore_init(&mut self, r: &MethodRef, receiver: &Value, args: &[Value]) -> Option<Value> {
+        if r.owner != ITEM_LORE_CLASS || r.name != "<init>" || r.descriptor != "(Ljava/util/List;)V" {
+            return None;
+        }
+        let marker = jar_object::instance_key(receiver)?;
+        if jar_object::key_class(marker) != Some(ITEM_LORE_CLASS) {
+            return None;
+        }
+        let lines = args.first()?;
+        if self.mutable_collection_values(lines)?.len() > 256 {
+            return None;
+        }
+        self.item_lores.insert(marker.to_owned(), lines.clone());
+        Some(Value::Void)
+    }
+
+    /// The `minecraft:lore` component an item's builder recorded (`Item.Properties.component(
+    /// DataComponents.LORE, lore)`), as `ItemLore.CODEC` writes it to JSON: its lines, each through
+    /// `ComponentSerialization.CODEC`, as they are when the item is registered. `None` when the
+    /// lore is not one [`Self::item_lore_init`] answered, a line is not a component the host can
+    /// encode, or there are more lines than the codec's 256 (`sizeLimitedListOf(256)` fails).
+    fn recorded_lore_json(&self, builder: &BTreeMap<String, String>) -> Option<String> {
+        let lore = builder.get(LORE_SETTING)?;
+        let lines = self.item_lores.get(lore)?;
+        let lines = self.mutable_collection_values(lines)?;
+        if lines.len() > 256 {
+            return None;
+        }
+        let encoded = lines
+            .iter()
+            .map(|line| self.component_json(line))
+            .collect::<Option<Vec<_>>>()?;
+        Some(format!("[{}]", encoded.join(",")))
     }
 
     fn property_builder_call(
@@ -12264,6 +12316,9 @@ impl Host for StdHost {
                 }
             }
             return Ok(Value::Void);
+        }
+        if let Some(value) = self.item_lore_init(r, receiver, args) {
+            return Ok(value);
         }
         if let Some(value) = self.property_builder_call(r, receiver, args)? {
             return Ok(value);
@@ -17515,6 +17570,10 @@ fn builder_number(descriptor: &str, value: &Value) -> Option<String> {
     }
 }
 
+const ITEM_LORE_CLASS: &str = "net/minecraft/world/item/component/ItemLore";
+/// The builder setting holding the `ItemLore` object `component(LORE, ..)` was given.
+const LORE_SETTING: &str = "component:minecraft:lore";
+
 /// The settings one `Item.Properties` method records, under the builder's own
 /// marker. An unknown method records nothing; the caller still answers with
 /// the receiver, so a chain is never broken by a setting the host cannot name.
@@ -17551,6 +17610,26 @@ fn item_builder_settings(
                 _ => "true".to_owned(),
             }),
         ),
+        // `component(DataComponents.LORE, lore)`: the lore object, whose lines are encoded when
+        // the item is registered (`StdHost::recorded_lore_json`). Any other value (a `null`,
+        // which removes the component, or one the host did not build) records an empty marker,
+        // so an earlier lore is not kept for it and none is declared.
+        "component"
+            if first
+                .and_then(game_object::handle_key)
+                .is_some_and(|key| key == "game/data-component-type/minecraft:lore") =>
+        {
+            (
+                LORE_SETTING,
+                Some(
+                    args.get(1)
+                        .and_then(jar_object::instance_key)
+                        .filter(|key| jar_object::key_class(key) == Some(ITEM_LORE_CLASS))
+                        .unwrap_or_default()
+                        .to_owned(),
+                ),
+            )
+        }
         "component"
             if first
                 .and_then(game_object::handle_key)

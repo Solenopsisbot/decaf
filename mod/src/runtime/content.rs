@@ -167,6 +167,11 @@ pub struct Item {
     pub max_stack_size: Option<u8>,
     pub rarity: Option<Rarity>,
     pub crafting_remainder: Option<String>,
+    /// The 26.3 data component patch over the template the jar's `Item.Properties.component`
+    /// calls set, each value as the component's codec writes it to JSON (only the types the host
+    /// encodes exactly: `minecraft:lore`). The loader's `components` key
+    /// (`sunrise-mod-package` `ItemFile`).
+    pub components: BTreeMap<String, Value>,
 }
 
 /// One block or item a jar registered.
@@ -264,6 +269,9 @@ impl ContentDeclaration {
                 if let Some(remainder) = &item.crafting_remainder {
                     value["crafting_remainder"] = json!(remainder);
                 }
+                if !item.components.is_empty() {
+                    value["components"] = json!(item.components);
+                }
                 value
             }
         }
@@ -315,8 +323,21 @@ pub fn declarations(entries: &[RegistryEntry]) -> Vec<ContentDeclaration> {
                     .get("rarity")
                     .and_then(|rarity| Rarity::parse(rarity)),
                 crafting_remainder: properties.get("crafting_remainder").cloned(),
+                components: item_components(properties),
             })),
             _ => None,
+        })
+        .collect()
+}
+
+/// The `component:<type>` properties as a component patch: each value is the component's JSON
+/// as the host encoded it; one that does not parse is left out.
+fn item_components(properties: &BTreeMap<String, String>) -> BTreeMap<String, Value> {
+    properties
+        .iter()
+        .filter_map(|(key, value)| {
+            let kind = key.strip_prefix("component:")?;
+            Some((kind.to_owned(), serde_json::from_str(value).ok()?))
         })
         .collect()
 }
@@ -420,6 +441,32 @@ mod tests {
         assert_eq!(item["crafting_remainder"], "minecraft:paper");
         assert_eq!(declarations[1].namespace(), "m3_fixture");
         assert_eq!(declarations[1].path(), "ruby");
+    }
+
+    /// BUGS-3d34-round2 #4: a `component:<type>` property is the item file's component patch,
+    /// the value as the host encoded it; one that is not JSON is left out.
+    #[test]
+    fn recorded_components_become_the_item_files_component_patch() {
+        let entries = vec![entry(
+            "m3_fixture:pouch",
+            RegistryDeclaration::Item {
+                template: "minecraft:stick".into(),
+                properties: BTreeMap::from([
+                    ("max_stack_size".to_owned(), "1".to_owned()),
+                    (
+                        "component:minecraft:lore".to_owned(),
+                        r#"[{"translate":"item.m3_fixture.pouch.hint","color":"gray"}]"#.to_owned(),
+                    ),
+                    ("component:minecraft:broken".to_owned(), "not json".to_owned()),
+                ]),
+            },
+        )];
+        let item = declarations(&entries)[0].file_json();
+        assert_eq!(
+            item["components"],
+            json!({"minecraft:lore": [{"translate": "item.m3_fixture.pouch.hint", "color": "gray"}]})
+        );
+        assert_eq!(item["max_stack_size"], 1);
     }
 
     /// A recorded stack size outside the content vocabulary's range is not carried, as the
