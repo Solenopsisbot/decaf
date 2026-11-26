@@ -87,7 +87,10 @@ pub(crate) fn loader_service(value: &Value) -> Option<String> {
         return None;
     }
     match handle.values()?.as_slice() {
-        [Value::Ref(Some(service)), Value::Long(_) | Value::Ref(Some(_))] => Some(service.clone()),
+        [
+            Value::Ref(Some(service)),
+            Value::Long(_) | Value::Ref(Some(_)),
+        ] => Some(service.clone()),
         _ => None,
     }
 }
