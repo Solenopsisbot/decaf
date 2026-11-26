@@ -1513,3 +1513,84 @@ fn game_fields_on_a_game_object_refuse_reads_and_writes() {
         assert!(marks.is_empty() || marks == ["wrote"], "{mixin}: {marks:?}");
     }
 }
+
+/// A `ServerPlayer#tick` callback that marks `demoprobe.RandomDraws.draw()`: `java.util.Random`
+/// objects made inside a game hook.
+const RANDOM_TICK_MIXIN: &str = r#"package demo;
+import demoprobe.HookSink;
+import demoprobe.RandomDraws;
+import net.minecraft.server.level.ServerPlayer;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+@Mixin(ServerPlayer.class)
+public class RandomTickMixin {
+    @Inject(method = "tick", at = @At("TAIL"))
+    private static void afterTick(CallbackInfo ci) {
+        HookSink.mark(RandomDraws.draw());
+    }
+}
+"#;
+
+/// A `new Random(seed)` inside a game hook is the host's `Random` model, numbered by the hook's
+/// heap allocator, as one an entrypoint makes is (#669: `GameHookHost` did not forward
+/// `random_new`, so it was a plain object and every draw on it failed the firing as an
+/// unmodelled call). A `Random` kept in a static draws on across firings; one made fresh each
+/// firing restarts its sequence. Java 25: `tests/fixtures/game_hook_random/java25.txt`, the JDK
+/// 25.0.5 run of the same `RandomDraws` (two `draw()`s).
+#[test]
+fn a_random_made_in_a_game_hook_is_the_modelled_random() {
+    let fixture = Fixture::build_with(
+        "random",
+        BTreeMap::from([
+            (
+                "net/minecraft/world/entity/player/Player.java",
+                PLAYER.into(),
+            ),
+            (
+                "net/minecraft/server/level/ServerPlayer.java",
+                SERVER_PLAYER.into(),
+            ),
+            (
+                "demoprobe/RandomDraws.java",
+                include_str!("fixtures/game_hook_random/demoprobe/RandomDraws.java").into(),
+            ),
+            ("demo/RandomTickMixin.java", RANDOM_TICK_MIXIN.into()),
+        ]),
+        &["RandomTickMixin"],
+        COMPILE_ONLY,
+    );
+    let jar = fixture.load();
+    let weave = jar.plan_load_time_weave_with_game_hooks(MixinSide::Server);
+    let registrations = jar.register_game_hooks(&weave).unwrap();
+    let mut host = StdHost::new();
+    for _ in 0..2 {
+        jar.run_game_hook(
+            &registrations,
+            "player_tick",
+            Some(Value::Ref(Some("player/7".into()))),
+            &[],
+            &mut host,
+        )
+        .unwrap_or_else(|error| panic!("the tick failed: {error}"));
+    }
+    let marks = host
+        .invocations()
+        .iter()
+        .filter(|call| call.method.owner == "demoprobe/HookSink" && call.method.name == "mark")
+        .filter_map(|call| match call.args.as_slice() {
+            [Value::Ref(Some(text))] => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let oracle = include_str!("fixtures/game_hook_random/java25.txt");
+    assert_eq!(marks.join("|"), oracle.trim_end());
+    let counted = host
+        .unknown_host_calls()
+        .into_iter()
+        .filter(|(call, _)| !call.starts_with("demoprobe/HookSink#"))
+        .collect::<Vec<_>>();
+    assert!(counted.is_empty(), "{counted:?}");
+}

@@ -2027,6 +2027,16 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.note_allocation_numbers_exhausted(class);
     }
 
+    /// A callback's `new` of a class the bootstrap host models (`java.util.Random`, a
+    /// `RandomSource`, an `ItemStack`, …) is that host's object, as an entrypoint's is. Not
+    /// forwarding it made each one a plain object whose calls answered neutral values (#669: a
+    /// seeded `Random` drew `0`s). A model keyed as a jar object numbers it with `next_object`,
+    /// this firing's allocator, which starts past every number the resident heap handed out
+    /// (`adopt_resident_heap` takes the larger), so no key is taken twice.
+    fn random_new(&mut self, class: &str, next_object: &mut usize) -> Option<Value> {
+        self.inner.random_new(class, next_object)
+    }
+
     fn pause_collections(&mut self, paused: bool) {
         self.inner.pause_collections(paused);
     }
