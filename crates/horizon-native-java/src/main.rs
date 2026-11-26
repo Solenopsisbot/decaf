@@ -783,6 +783,9 @@ fn execution_json(
         "content": {
             "blocks": content(true),
             "items": content(false),
+            // The mods `isModLoaded` finds from this jar: its own, then the nested jars it
+            // loaded. The bake makes exactly these its packages (`_mod_packages`).
+            "mods": host.loaded_jar_mods(jar.fabric_id.as_deref().or(jar.neoforge_id.as_deref())),
         },
         "listeners": host.listener_registrations().count(),
         "events": host.posted_events().len(),

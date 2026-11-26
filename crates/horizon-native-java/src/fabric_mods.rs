@@ -319,6 +319,38 @@ impl StdHost {
                 && !matches!(id, "neoforge" | "forge"))
     }
 
+    /// The mods this run loaded from jars, as the offline bake reads them (`tools/bake.py`
+    /// `_mod_packages`): `primary` (the jar's own id) first when it was loaded, then the rest
+    /// in id order, each once. They are the jar-backed half of what [`Self::fabric_mod_present`]
+    /// (`isModLoaded`) answers true for, and answered the same way:
+    /// - every Fabric container recorded from a jar (the jar's and each nested jar
+    ///   `fabric.mod.json` `jars` selected; a nested one replaced by a newer copy is gone);
+    /// - every `provides` alias of those containers, since Fabric Loader's mod map indexes an
+    ///   alias to its container, so `isModLoaded("<alias>")` is true;
+    /// - every NeoForge `[[mods]]` entry of a linked mod file.
+    ///
+    /// An id `fabric_mod_present` refuses (a duplicate id or alias is a resolution error, so
+    /// Fabric loads neither) is left out, and so are the loader's built-in mods and the
+    /// dependencies the host assumes: no jar of the run supplies them, so no package of the
+    /// bake may claim them.
+    pub fn loaded_jar_mods(&self, primary: Option<&str>) -> Vec<String> {
+        let ids: BTreeSet<&str> = self
+            .fabric_metadata
+            .keys()
+            .chain(self.fabric_aliases.keys())
+            .filter(|id| self.fabric_mod_present(id))
+            .chain(self.neoforge_mod_files.keys())
+            .map(String::as_str)
+            .filter(|id| !Self::builtin_fabric_mod(id) && !is_always_loaded_mod(id))
+            .collect();
+        primary
+            .filter(|id| ids.contains(id))
+            .into_iter()
+            .chain(ids.iter().copied().filter(|id| Some(*id) != primary))
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// Every container `getAllMods` lists, in mod-id order.
     fn fabric_containers(&self) -> Vec<Value> {
         let mut ids = self
@@ -971,6 +1003,29 @@ mod tests {
             host.fabric_resolution_errors
                 .iter()
                 .any(|error| error == "duplicate mod alias")
+        );
+    }
+
+    /// `isModLoaded` finds a `provides` alias, so the bake must make it a package too; an alias
+    /// two jars claim is a resolution error that loads neither, and is left out.
+    #[test]
+    fn loaded_jar_mods_lists_provides_aliases_as_is_mod_loaded_finds_them() {
+        let mut host = StdHost::new();
+        host.record_fabric_metadata(&fabric("provider", &["provided_api", "zz_alias"]));
+        assert!(host.fabric_mod_present("provided_api"));
+        assert_eq!(
+            host.loaded_jar_mods(Some("provider")),
+            ["provider", "provided_api", "zz_alias"]
+        );
+
+        let mut host = StdHost::new();
+        host.record_fabric_metadata(&fabric("one", &["shared"]));
+        host.record_fabric_metadata(&fabric("two", &["shared"]));
+        assert!(!host.fabric_mod_present("shared"));
+        assert!(
+            !host
+                .loaded_jar_mods(Some("one"))
+                .contains(&"shared".to_owned())
         );
     }
 

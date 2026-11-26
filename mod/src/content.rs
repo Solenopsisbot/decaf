@@ -1043,6 +1043,7 @@ mod tests {
             max_stack_size: Some(1),
             rarity: Some(runtime::content::Rarity::Rare),
             crafting_remainder: None,
+            components: Default::default(),
         };
         let item = item_entry(&declaration, &declaration.id, true);
         assert_eq!(item.id, "horizon_java:proof_block");

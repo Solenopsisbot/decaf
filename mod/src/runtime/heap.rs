@@ -344,6 +344,16 @@ impl StdHost {
         out.extend(self.payload_bytes.keys().map(String::as_str));
         out.extend(self.packet_types.keys().map(String::as_str));
         out.extend(self.item_property_builders.keys().map(String::as_str));
+        // The data component values a builder holds (`component:<type>` settings, the
+        // `ItemLore` of `Item.Properties.component(LORE, ..)`): a builder keeps what it was
+        // given, as `Item.Properties`' component map does, until its item is declared.
+        out.extend(
+            self.item_property_builders
+                .values()
+                .flat_map(|builder| builder.iter())
+                .filter(|(key, value)| key.starts_with("component:") && !value.is_empty())
+                .map(|(_, value)| value.as_str()),
+        );
         // Per-block metadata (`block_property_builders`, `block_copied_properties`,
         // `block_state_properties`, `state_definition_builders`, `block_default_states`,
         // `unknown_block_state_definitions`) and canonical `block_states` are traced and
@@ -448,6 +458,7 @@ impl StdHost {
         push(self.red_black_trees.get(marker), out);
         push(self.probe_tables.get(marker), out);
         push(self.block_items.get(marker), out);
+        push(self.item_lores.get(marker), out);
         push(self.state_definition_builders.get(marker), out);
         // An `Arrays.asList` view's array, which its `get`/`set` work on, and
         // the view an iterator over one follows.
@@ -499,6 +510,7 @@ impl StdHost {
             .chain(self.constructed_items.iter())
             .chain(self.constructed_blocks.iter())
             .chain(self.block_items.keys())
+            .chain(self.item_lores.keys())
             .chain(self.item_required_features.keys())
             .chain(self.block_property_builders.keys())
             .chain(self.block_state_properties.keys())
@@ -549,6 +561,7 @@ impl StdHost {
         self.constructed_items.retain(|key| keep(key));
         self.constructed_blocks.retain(|key| keep(key));
         self.block_items.retain(|key, _| keep(key));
+        self.item_lores.retain(|key, _| keep(key));
         self.item_required_features.retain(|key, _| keep(key));
         self.mod_stamps.retain(|key, _| keep(key));
         self.deque_layouts.retain(|key, _| keep(key));
@@ -2041,6 +2054,7 @@ mod tests {
             "constructed_items",
             "constructed_blocks",
             "block_items",
+            "item_lores",
             "item_required_features",
             "payload_registrations",
             "payload_bytes",

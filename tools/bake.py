@@ -19,7 +19,12 @@ loads it as an ordinary content mod; the mod's runtime declaration for that name
 * ``sunrise`` (the default, this fork): ``<id>.smod`` with ``sunrise-mod.toml`` in
   ``<game-dir>/sunrise-mods/``, turned on in ``sunrise-mods.txt``, declarations in
   ``data/<ns>/sunrise/{block,item}/*.json``. Its output is byte for byte what the bake wrote before
-  the horizon target existed (``tests/data/bake_sunrise_golden.json``).
+  the horizon target existed (``tests/data/bake_sunrise_golden.json``) for a probe that names no
+  loaded mods. When the probe names them (``content.mods``: the jar's own mod, the nested jars
+  the runtime loaded and their ``provides`` aliases), the packages are exactly those ids, a nested
+  mod or an alias included even with no file of its own, and every other namespace of the jar rides in the jar's own package's manifest
+  ``namespaces``. Sunrise answers ``mod_loaded`` from package ids, so it then agrees with what the
+  jar's code was told (``_mod_packages``, BUGS-3d34-round2 #3).
 * ``horizon`` (the official horizon-rust/horizon build ``0a875da9``, content API ``0.2``):
   ``<id>.hmod`` with ``horizon-mod.toml`` in ``<game-dir>/horizon-mods/``, turned on with
   ``mod.<id>:true`` in ``horizon-mods.txt``, declarations in ``data/<ns>/horizon/{block,item}/``.
@@ -796,7 +801,11 @@ def _shown_name(name: str) -> str:
 
 
 def _manifest(
-    namespace: str, jar: str, target: Target = SUNRISE, mod_ids: frozenset[str] | None = None
+    namespace: str,
+    jar: str,
+    target: Target = SUNRISE,
+    mod_ids: frozenset[str] | None = None,
+    namespaces: list[str] | None = None,
 ) -> str:
     if target is HORIZON:
         # The minimal accepted manifest of 1.3, every key one the game reads. The description
@@ -815,6 +824,27 @@ def _manifest(
             'api = "0.2"\n'
             'side = "both"\n'
             'capabilities = ["registries"]\n'
+        )
+    if namespaces is not None:
+        # A package per loaded mod (`_mod_packages`): its id is the mod's, and the jar's other
+        # namespaces are listed so the package may carry their files (`content::check_namespace`).
+        carried = f", with the namespaces {', '.join(namespaces)}" if namespaces else ""
+        description = f"Assets and data baked from {jar} for the mod {namespace}{carried}."
+        listed = (
+            f"namespaces = [{', '.join(_toml_string(name) for name in namespaces)}]\n"
+            if namespaces
+            else ""
+        )
+        return (
+            f'id = "{namespace}"\n'
+            f'name = "{namespace}"\n'
+            'version = "1.0.0"\n'
+            f"description = {_toml_string(description)}\n"
+            "authors = []\n"
+            'api = "0.2"\n'
+            'side = "both"\n'
+            'capabilities = ["registries"]\n'
+            f"{listed}"
         )
     return (
         f'id = "{namespace}"\n'
@@ -946,6 +976,18 @@ def probe_declarations(
                     declarations.append((name, entry["id"], {"reason": entry["reason"]}))
                     continue
                 declarations.append((name, entry["id"], entry["file"]))
+        if malformed is None:
+            # `mods` (Sunrise only): the Fabric/NeoForge mods the runtime loaded from this jar,
+            # the jar's own first, then each nested jar it selected (`fabric.mod.json` `jars`,
+            # JarJar) and every `provides` alias, each id once. They are exactly the ids it answered `isModLoaded` true
+            # for, so the bake makes one package for each and no other (`_mod_packages`): a
+            # `mod_loaded` load condition then reads the same on Sunrise as in the jar's code.
+            # A probe that names none (an older runtime, the golden test's stand-in) leaves the
+            # bake as it was, one package per namespace. They come back as `mod` rows.
+            mods = content.get("mods", [])
+            for mod_id in mods if isinstance(mods, list) else []:
+                if isinstance(mod_id, str):
+                    declarations.append(("mod", mod_id, {}))
         return declarations
     raise ProbeError(f"no server entrypoint ran ({ran or last})")
 
@@ -982,12 +1024,13 @@ def write_package(
     files: list[tuple[str, bytes]],
     target: Target = SUNRISE,
     mod_ids: frozenset[str] | None = None,
+    namespaces: list[str] | None = None,
 ) -> int:
     """Writes a deterministic package (a zip: the manifest then the sorted files)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
-        manifest = _manifest(namespace, jar, target, mod_ids)
+        manifest = _manifest(namespace, jar, target, mod_ids, namespaces)
         info = zipfile.ZipInfo(target.manifest, ZIP_TIME)
         info.external_attr = ZIP_MODE
         info.compress_type = zipfile.ZIP_DEFLATED
@@ -1541,6 +1584,12 @@ def _horizon_declarations(
     blocks_left = HORIZON_MOD_BLOCKS if blocks_left is None else blocks_left
     valid = []
     for kind, declaration_id, _, _, file in candidates:
+        if kind == "item" and isinstance(file, dict) and "components" in file:
+            # The runtime records a component patch (`minecraft:lore`) for Sunrise; the
+            # official game's `components` is not established, so the item goes without it
+            # rather than being left out whole.
+            file = {key: value for key, value in file.items() if key != "components"}
+            bake.skip("item components (not established, left out)", declaration_id)
         problem = _horizon_declaration_problem(kind, file, vanilla)
         data = None
         if problem is None:
@@ -1969,7 +2018,10 @@ def bake_jar(
         if kind == "block" and file.get("item", True)
     }
     declared = set()
+    loaded_mods = list(dict.fromkeys(i for kind, i, _ in declarations if kind == "mod"))
     for kind, declaration_id, file in declarations:
+        if kind == "mod":
+            continue
         if kind == "menu-refused":
             # The live-menu bridge opens a jar's menu only as a declared Sunrise menu type; a
             # layout the runtime can't declare exactly is left out, and its opens are refused.
@@ -2009,6 +2061,9 @@ def bake_jar(
         )
 
     bake.namespaces = sorted(by_namespace)
+    grouped = _mod_packages(loaded_mods, by_namespace, bake)
+    if grouped is not None:
+        return _write_mod_packages(jar, out, claimed, target, bake, grouped, by_namespace, shared)
     if not bake.namespaces:
         if shared:
             bake.skip(
@@ -2049,6 +2104,122 @@ def bake_jar(
         )
         bake.packages.append(package)
         claimed[namespace] = jar.name
+    if shared and not bake.packages:
+        bake.skip("vanilla tag or atlas additions with no package to carry them", shared[0][0])
+    return bake
+
+
+# Namespaces no Sunrise manifest may list in `namespaces` (sunrise-mod-package
+# `manifest::RESERVED_NAMESPACES`); `minecraft` and `c` are `SHARED_NAMESPACES` and never reach
+# a package of their own.
+SUNRISE_RESERVED_NAMESPACES = {"minecraft", "c", "sunrise"}
+
+
+def _mod_packages(
+    loaded_mods: list[str], by_namespace: dict[str, list[tuple[str, bytes]]], bake: JarBake
+) -> list[tuple[str, list[str]]] | None:
+    """The Sunrise packages of a jar whose probe named the mods it loaded: one per mod id, in the
+    probe's order (the jar's own mod first), each with the other namespaces it carries. None
+    keeps one package per namespace (no mods named, or the jar's own id cannot be a package id).
+
+    Sunrise answers a `mod_loaded` load condition from the ids of the enabled packages
+    (sunrise-items `recipe_sources`: `EnabledMods::server_ids`, against the condition's `modid`),
+    and Fabric Loader 0.20.1 from its mod map, which holds the jar's mod, every nested jar it
+    loaded (`fabric.mod.json` `jars`) and each one's `provides` aliases. So the package ids must
+    be exactly those ids:
+    - a nested mod is a package even when it brings no file (Runes' nested `bundleapi`: a
+      manifest only), so `mod_loaded bundleapi` holds as it does for the jar's code;
+    - so is a `provides` alias: a Sunrise manifest has no aliases, and only an enabled package of
+      that id makes `mod_loaded <alias>` true;
+    - a namespace that is no mod's (a tag file another mod reads, such as Runes'
+      `data/spell_engine/tags/`) is listed in the jar's own package's manifest `namespaces`
+      instead of being a package, so `mod_loaded spell_engine` stays false as on Fabric.
+    A mod id that cannot be a package id (`-` is a Fabric id character, not a manifest one) is
+    named in the report: no package can make it a loaded mod on Sunrise."""
+    if not loaded_mods:
+        return None
+    primary = loaded_mods[0]
+
+    def package_id(mod_id: str) -> bool:
+        return (
+            PACKAGE_ID.match(mod_id) is not None
+            and mod_id not in RESERVED_IDS
+            and mod_id not in SUNRISE_RESERVED_NAMESPACES
+            and mod_id != "horizon_java"
+        )
+
+    if not package_id(primary):
+        return None
+    packages: dict[str, list[str]] = {}
+    for mod_id in loaded_mods:
+        if package_id(mod_id):
+            packages[mod_id] = []
+        else:
+            bake.skip(
+                "loaded mod whose id is not a Sunrise package id ([a-z0-9_], not reserved): "
+                "Sunrise cannot count it as loaded",
+                mod_id,
+            )
+    for namespace in sorted(by_namespace):
+        if namespace in packages:
+            continue
+        if namespace in SUNRISE_RESERVED_NAMESPACES:
+            for name, _ in by_namespace[namespace]:
+                bake.skip("Sunrise's reserved namespace: no package may own it", name)
+            continue
+        packages[primary].append(namespace)
+    return list(packages.items())
+
+
+def _write_mod_packages(
+    jar: Path,
+    out: Path,
+    claimed: dict[str, str],
+    target: Target,
+    bake: JarBake,
+    grouped: list[tuple[str, list[str]]],
+    by_namespace: dict[str, list[tuple[str, bytes]]],
+    shared: list[tuple[str, bytes]],
+) -> JarBake:
+    """Writes `_mod_packages`' packages: each mod's own namespace and the namespaces it carries,
+    the vanilla and `c` tag additions in the jar's own package. A namespace another jar of the
+    run already baked refuses the package that would carry it, as one per namespace did."""
+    for index, (mod_id, extra) in enumerate(grouped):
+        owned = [mod_id, *extra]
+        taken = next((namespace for namespace in owned if namespace in claimed), None)
+        if taken is not None:
+            bake.error = (
+                f"namespace {taken} is already baked from {claimed[taken]}; "
+                "two content mods may not own one namespace"
+            )
+            continue
+        files = [entry for namespace in owned for entry in by_namespace.get(namespace, [])]
+        if index == 0:
+            files = files + shared
+        package_path = out / f"{mod_id}{target.extension}"
+        size = write_package(package_path, mod_id, jar.name, files, target, namespaces=extra)
+        prefixes = [f"data/{namespace}/{target.declarations}/" for namespace in owned]
+
+        def declared(kind: str) -> int:
+            return sum(
+                1
+                for name, _ in files
+                if any(name.startswith(prefix + kind + "/") for prefix in prefixes)
+            )
+
+        bake.packages.append(
+            Package(
+                id=mod_id,
+                namespace=mod_id,
+                path=package_path,
+                files=[name for name, _ in sorted(files)],
+                bytes=size,
+                blocks=declared("block"),
+                items=declared("item"),
+            )
+        )
+        for namespace in owned:
+            claimed[namespace] = jar.name
     if shared and not bake.packages:
         bake.skip("vanilla tag or atlas additions with no package to carry them", shared[0][0])
     return bake
