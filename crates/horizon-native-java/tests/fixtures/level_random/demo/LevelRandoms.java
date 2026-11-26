@@ -92,6 +92,16 @@ public final class LevelRandoms {
     return kept == level.getRandom();
   }
 
+  /** A fork of the level's stream, and one draw from it. */
+  public static int forkDraw(Level level) {
+    return level.getRandom().fork().nextInt();
+  }
+
+  /** A positional fork of the level's stream, one of its sources, and one draw from it. */
+  public static int forkPositionalDraw(Level level) {
+    return level.getRandom().forkPositional().at(1, 64, -3).nextInt();
+  }
+
   /** `consumeCount(count)`, then one draw. */
   public static int consume(Level level, int count) {
     RandomSource random = level.getRandom();

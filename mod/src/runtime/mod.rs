@@ -4356,6 +4356,9 @@ pub struct StdHost {
     /// The level streams whose position is no longer vanilla's, by
     /// `<instance>/<dimension>` (`level_random.rs`): their draws count.
     level_random_unknown: BTreeSet<String>,
+    /// Random source handles forked from a level stream whose position wasn't vanilla's, and
+    /// what they handed out (`random_source.rs`): their calls count.
+    random_derived_unknown: BTreeSet<String>,
 }
 
 /// Who placed the block for a [`BlockPlaceContextData`] snapshot.
@@ -4681,6 +4684,7 @@ impl StdHost {
             level_sound: level_sound::LevelSoundState::default(),
             level_random_lend: None,
             level_random_unknown: BTreeSet::new(),
+            random_derived_unknown: BTreeSet::new(),
         }
     }
 

@@ -2226,6 +2226,8 @@ mod tests {
             "level_random_lend",
             // Stream names (`level_random.rs`).
             "level_random_unknown",
+            // Handle keys, numbered once and never reused (`random_source.rs`).
+            "random_derived_unknown",
             // A key counter (`random_source.rs`).
             "next_random_source",
             "next_unmodifiable_collection",

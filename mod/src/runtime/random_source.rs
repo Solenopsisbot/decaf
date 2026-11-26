@@ -332,7 +332,50 @@ impl StdHost {
         self.random_handle(state)
     }
 
+    /// A call on a random source handle. A handle derived from a level stream whose position
+    /// wasn't vanilla's (`level_random.rs`: a fork drawn while the stream was unknown, or
+    /// after a deferred effect) has a seed that may differ from vanilla's: its calls are
+    /// answered from its own seeded state but counted (`LEVEL_STREAM_UNKNOWN`), and a handle
+    /// it hands out (`fork`, `forkPositional`, `at`, `fromSeed`) is derived the same way.
     pub(crate) fn random_instance(
+        &mut self,
+        r: &MethodRef,
+        receiver: &Value,
+        args: &[Value],
+    ) -> Option<Result<Value, NativeError>> {
+        let derived =
+            Self::random_key(receiver).filter(|key| self.random_derived_unknown.contains(key));
+        let result = self.random_instance_answer(r, receiver, args);
+        if derived.is_some()
+            && let Some(Ok(value)) = &result
+        {
+            self.note_derived_unknown_call(value);
+        }
+        result
+    }
+
+    /// Count a call answered on a derived-unknown handle, and derive what it handed out.
+    #[inline(never)]
+    fn note_derived_unknown_call(&mut self, value: &Value) {
+        *self
+            .unknown_host_calls
+            .entry(crate::runtime::level_random::LEVEL_STREAM_UNKNOWN.to_owned())
+            .or_default() += 1;
+        if let Some(child) = Self::random_key(value) {
+            self.random_derived_unknown.insert(child);
+        }
+    }
+
+    /// Mark `handle`'s source as derived from a level stream whose position wasn't vanilla's
+    /// (see [`Self::random_instance`]).
+    pub(crate) fn mark_random_derived_unknown(&mut self, handle: &Value) {
+        if let Some(key) = Self::random_key(handle) {
+            self.random_derived_unknown.insert(key);
+        }
+    }
+
+    #[inline(never)]
+    fn random_instance_answer(
         &mut self,
         r: &MethodRef,
         receiver: &Value,

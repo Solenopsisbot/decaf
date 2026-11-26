@@ -33,7 +33,10 @@
 //! longer where vanilla's would be, so every later draw from it, in this lend
 //! and every later one of that open of the level, is still answered but
 //! counted ([`LEVEL_STREAM_UNKNOWN`]), as `level_sound.rs` does for the sound
-//! seed streams. Only `Object`'s `equals`, `hashCode`, `getClass` and
+//! seed streams. A fork drawn from such a stream (or after a deferred effect)
+//! takes its seed from a position that may not be vanilla's, so the child, and
+//! every source it hands out, is answered from its own seed but counted the
+//! same way (`random_source.rs`). Only `Object`'s `equals`, `hashCode`, `getClass` and
 //! `toString` are known not to move it. A new open of the level (a new
 //! world) is a new stream, known again: the mark is kept by `instance`.
 //!
@@ -363,10 +366,10 @@ impl StdHost {
                 }
             },
         };
-        if self
+        let position_unknown = self
             .level_random_unknown
-            .contains(&stream_key(dimension, instance))
-        {
+            .contains(&stream_key(dimension, instance));
+        if position_unknown {
             *self
                 .unknown_host_calls
                 .entry(LEVEL_STREAM_UNKNOWN.to_owned())
@@ -378,7 +381,10 @@ impl StdHost {
                 .entry(DRAW_AFTER_DEFERRED_EFFECT.to_owned())
                 .or_default() += 1;
         }
-        Some(Ok(match answered {
+        // A fork whose draw this counted takes its seed from a position that may not be
+        // vanilla's: the child (and what it hands out) counts too (`random_source.rs`).
+        let derived_unknown = position_unknown || lend.effect_pending;
+        let value = match answered {
             Answer::Value(value) => {
                 if draw.opens_bit_scope() {
                     self.random_bit_scope = Some(r.clone());
@@ -399,7 +405,11 @@ impl StdHost {
                     None => return Some(Err(numbers_exhausted())),
                 }
             }
-        }))
+        };
+        if derived_unknown && matches!(draw, Draw::Fork | Draw::ForkPositional) {
+            self.mark_random_derived_unknown(&value);
+        }
+        Some(Ok(value))
     }
 }
 

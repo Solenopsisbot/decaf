@@ -466,3 +466,85 @@ fn a_refused_reseed_forgets_the_old_level_random_copy() {
         "the old seed no longer answers"
     );
 }
+
+/// A fork of a level stream whose position is known is exact: its child draws from a seed the
+/// stream drew at vanilla's position, uncounted.
+#[test]
+fn forks_of_a_known_level_stream_are_exact() {
+    let mut host = StdHost::new();
+    let mut stream = Legacy::new(SEED);
+    let mut oracle = Legacy::new(SEED);
+    let forked = lent(&mut host, &mut stream, "forkDraw", &format!("({LEVEL})I"));
+    assert_eq!(
+        forked.ok(),
+        Some(Value::Int(Legacy::new(oracle.next_long()).next_int()))
+    );
+    let positional = lent(
+        &mut host,
+        &mut stream,
+        "forkPositionalDraw",
+        &format!("({LEVEL})I"),
+    );
+    assert!(positional.is_ok(), "{positional:?}");
+    assert!(
+        host.unknown_host_calls().is_empty(),
+        "{:?}",
+        host.unknown_host_calls()
+    );
+}
+
+/// A fork of a level stream whose position is unknown (`setSeed` marked it) takes its seed from
+/// an out-of-step position: the fork's draw counts, and so does every call on the child and on
+/// what the child hands out (`forkPositional().at(..)`), each still answered from its own seed.
+#[test]
+fn forks_of_an_unknown_level_stream_count_all_the_way_down() {
+    let mut host = StdHost::new();
+    let mut stream = Legacy::new(SEED);
+    let reseeded = lent(&mut host, &mut stream, "reseed", &format!("({LEVEL})I"));
+    assert!(reseeded.is_ok(), "{reseeded:?}");
+    let unknown = |host: &StdHost| {
+        host.unknown_host_calls()
+            .into_iter()
+            .find(|(key, _)| key == LEVEL_STREAM_UNKNOWN)
+            .map_or(0, |(_, count)| count)
+    };
+    assert_eq!(unknown(&host), 1, "the reseed's own draw");
+    // `fork()`: its `nextLong` (counted), then the child's `nextInt` (counted).
+    let mut oracle = Legacy::new(SEED);
+    oracle.next_int();
+    let forked = lent(&mut host, &mut stream, "forkDraw", &format!("({LEVEL})I"));
+    assert_eq!(
+        forked.ok(),
+        Some(Value::Int(Legacy::new(oracle.next_long()).next_int()))
+    );
+    assert_eq!(unknown(&host), 3);
+    // `forkPositional()` (counted), `at(..)` on it (counted), `nextInt` on that (counted).
+    let positional = lent(
+        &mut host,
+        &mut stream,
+        "forkPositionalDraw",
+        &format!("({LEVEL})I"),
+    );
+    assert!(positional.is_ok(), "{positional:?}");
+    assert_eq!(unknown(&host), 6);
+}
+
+/// A fork drawn after a deferred effect that may draw the stream (`DRAW_AFTER_DEFERRED_EFFECT`)
+/// is out of order too: its child counts.
+#[test]
+fn a_fork_after_a_deferred_effect_counts_its_child() {
+    let mut host = StdHost::new();
+    let mut stream = Legacy::new(SEED);
+    let forked = host.with_lent_level_random(OVERWORLD, WORLD, &mut stream, |host| {
+        host.note_deferred_effect(false);
+        call(host, "forkDraw", &format!("({LEVEL})I"))
+    });
+    assert!(forked.is_ok(), "{forked:?}");
+    assert_eq!(
+        host.unknown_host_calls(),
+        vec![
+            (DRAW_AFTER_DEFERRED_EFFECT.into(), 1),
+            (LEVEL_STREAM_UNKNOWN.into(), 1),
+        ]
+    );
+}
