@@ -20,9 +20,9 @@ loads it as an ordinary content mod; the mod's runtime declaration for that name
   ``<game-dir>/sunrise-mods/``, turned on in ``sunrise-mods.txt``, declarations in
   ``data/<ns>/sunrise/{block,item}/*.json``. Its output is byte for byte what the bake wrote before
   the horizon target existed (``tests/data/bake_sunrise_golden.json``) for a probe that names no
-  loaded mods. When the probe names them (``content.mods``: the jar's own mod and the nested jars
-  the runtime loaded), the packages are exactly those mods, a nested one included even with no
-  file of its own, and every other namespace of the jar rides in the jar's own package's manifest
+  loaded mods. When the probe names them (``content.mods``: the jar's own mod, the nested jars
+  the runtime loaded and their ``provides`` aliases), the packages are exactly those ids, a nested
+  mod or an alias included even with no file of its own, and every other namespace of the jar rides in the jar's own package's manifest
   ``namespaces``. Sunrise answers ``mod_loaded`` from package ids, so it then agrees with what the
   jar's code was told (``_mod_packages``, BUGS-3d34-round2 #3).
 * ``horizon`` (the official horizon-rust/horizon build ``0a875da9``, content API ``0.2``):
@@ -979,7 +979,7 @@ def probe_declarations(
         if malformed is None:
             # `mods` (Sunrise only): the Fabric/NeoForge mods the runtime loaded from this jar,
             # the jar's own first, then each nested jar it selected (`fabric.mod.json` `jars`,
-            # JarJar), each id once. They are exactly the ids it answered `isModLoaded` true
+            # JarJar) and every `provides` alias, each id once. They are exactly the ids it answered `isModLoaded` true
             # for, so the bake makes one package for each and no other (`_mod_packages`): a
             # `mod_loaded` load condition then reads the same on Sunrise as in the jar's code.
             # A probe that names none (an older runtime, the golden test's stand-in) leaves the
@@ -2123,11 +2123,14 @@ def _mod_packages(
     keeps one package per namespace (no mods named, or the jar's own id cannot be a package id).
 
     Sunrise answers a `mod_loaded` load condition from the ids of the enabled packages
-    (sunrise-items `recipe_sources`: `EnabledMods::server_ids`), and Fabric Loader 0.20.1 from its
-    mod map, which holds the jar's mod and every nested jar it loaded (`fabric.mod.json` `jars`).
-    So the package ids must be exactly those mods:
+    (sunrise-items `recipe_sources`: `EnabledMods::server_ids`, against the condition's `modid`),
+    and Fabric Loader 0.20.1 from its mod map, which holds the jar's mod, every nested jar it
+    loaded (`fabric.mod.json` `jars`) and each one's `provides` aliases. So the package ids must
+    be exactly those ids:
     - a nested mod is a package even when it brings no file (Runes' nested `bundleapi`: a
       manifest only), so `mod_loaded bundleapi` holds as it does for the jar's code;
+    - so is a `provides` alias: a Sunrise manifest has no aliases, and only an enabled package of
+      that id makes `mod_loaded <alias>` true;
     - a namespace that is no mod's (a tag file another mod reads, such as Runes'
       `data/spell_engine/tags/`) is listed in the jar's own package's manifest `namespaces`
       instead of being a package, so `mod_loaded spell_engine` stays false as on Fabric.

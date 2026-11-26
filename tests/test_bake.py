@@ -241,6 +241,17 @@ class BakeTests(unittest.TestCase):
         skipped = {entry["reason"]: entry["paths"] for entry in report["jars"][0]["skipped"]}
         self.assertEqual(skipped["item components (not established, left out)"], ["ruby_mod:ruby"])
 
+    def test_a_provides_alias_the_runtime_loaded_is_a_manifest_only_package(self):
+        """#668 review: Fabric's `isModLoaded` finds a `provides` alias, and Sunrise's `mod_loaded`
+        reads package ids only, so the alias the probe names gets a package of its own."""
+        self.loaded_mods_probe(["ruby_mod", "ruby_compat"])
+        make_jar(self.mods / "ruby_mod.jar", ruby_jar())
+        report = self.bake()
+        self.assertEqual(report["enabled"], ["ruby_mod", "ruby_compat"])
+        with zipfile.ZipFile(self.game / "sunrise-mods" / "ruby_compat.smod") as archive:
+            self.assertEqual(archive.namelist(), ["sunrise-mod.toml"])
+            self.assertIn('id = "ruby_compat"\n', archive.read("sunrise-mod.toml").decode())
+
     def test_a_loaded_mod_that_cannot_be_a_package_is_named(self):
         """A Fabric id may hold `-`; a Sunrise package id may not, so that mod can't be loaded
         there, and the report says so. The jar's other mods still get their packages."""

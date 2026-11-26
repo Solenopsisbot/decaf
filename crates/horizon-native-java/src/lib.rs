@@ -7475,6 +7475,9 @@ impl StdHost {
         if declaration.is_some() {
             self.inferred_declarations.insert(key);
         }
+        if registry == "minecraft:item" {
+            self.count_unencoded_lore(&value, declaration.as_ref());
+        }
         self.registrations.push(RegistryEntry {
             registry: registry.to_owned(),
             id: id.clone(),
@@ -7761,6 +7764,33 @@ impl StdHost {
             .map(|line| self.component_json(line))
             .collect::<Option<Vec<_>>>()?;
         Some(format!("[{}]", encoded.join(",")))
+    }
+
+    /// Counts a registered item whose builder set a lore its declaration does not carry: the
+    /// value was not an `ItemLore` the host built, the lore's list fell through its constructor
+    /// model (opaque, or over 256 lines), or a line holds content `ComponentSerialization.CODEC`
+    /// is not modelled for ([`Self::recorded_lore_json`] answered `None`). The declaration then
+    /// has no `minecraft:lore`, so the run must not read as clean (#668 review).
+    /// Only an item declared from its builder is asked: one with no inferred declaration (an
+    /// id the jar's metadata adapts, or one the host could not name) declares no components.
+    fn count_unencoded_lore(&mut self, item: &Value, declaration: Option<&RegistryDeclaration>) {
+        let Some(RegistryDeclaration::Item { properties, .. }) = declaration else {
+            return;
+        };
+        let Some(builder) =
+            expect_ref(item).and_then(|marker| self.item_property_builders.get(marker))
+        else {
+            return;
+        };
+        if builder.get(LORE_SETTING).is_none_or(String::is_empty) {
+            return;
+        }
+        if !properties.contains_key(LORE_SETTING) {
+            *self
+                .unknown_host_calls
+                .entry(LORE_UNENCODED.to_owned())
+                .or_default() += 1;
+        }
     }
 
     fn property_builder_call(
@@ -17574,6 +17604,11 @@ fn builder_number(descriptor: &str, value: &Value) -> Option<String> {
 const ITEM_LORE_CLASS: &str = "net/minecraft/world/item/component/ItemLore";
 /// The builder setting holding the `ItemLore` object `component(LORE, ..)` was given.
 const LORE_SETTING: &str = "component:minecraft:lore";
+/// [`LORE_SETTING`]'s value for a lore the host did not build (no object key can spell it).
+const LORE_UNKNOWN: &str = "?";
+/// The unknown-call key of a lore the declaration cannot carry exactly: the item's
+/// `minecraft:lore` is what `ItemLore.CODEC` would write, and the host could not write it.
+const LORE_UNENCODED: &str = "net/minecraft/world/item/component/ItemLore#CODEC";
 
 /// The settings one `Item.Properties` method records, under the builder's own
 /// marker. An unknown method records nothing; the caller still answers with
@@ -17612,24 +17647,24 @@ fn item_builder_settings(
             }),
         ),
         // `component(DataComponents.LORE, lore)`: the lore object, whose lines are encoded when
-        // the item is registered (`StdHost::recorded_lore_json`). Any other value (a `null`,
-        // which removes the component, or one the host did not build) records an empty marker,
-        // so an earlier lore is not kept for it and none is declared.
+        // the item is registered (`StdHost::recorded_lore_json`). A `null` removes the component
+        // (`DataComponentMap.Builder.set`): an empty marker, nothing declared, nothing counted.
+        // Any other value is one the host did not build: [`LORE_UNKNOWN`], counted when the item
+        // is registered (`StdHost::count_unencoded_lore`).
         "component"
             if first
                 .and_then(game_object::handle_key)
                 .is_some_and(|key| key == "game/data-component-type/minecraft:lore") =>
         {
-            (
-                LORE_SETTING,
-                Some(
-                    args.get(1)
-                        .and_then(jar_object::instance_key)
-                        .filter(|key| jar_object::key_class(key) == Some(ITEM_LORE_CLASS))
-                        .unwrap_or_default()
-                        .to_owned(),
-                ),
-            )
+            let lore = match args.get(1) {
+                Some(Value::Ref(None)) => String::new(),
+                Some(value) => jar_object::instance_key(value)
+                    .filter(|key| jar_object::key_class(key) == Some(ITEM_LORE_CLASS))
+                    .unwrap_or(LORE_UNKNOWN)
+                    .to_owned(),
+                None => LORE_UNKNOWN.to_owned(),
+            };
+            (LORE_SETTING, Some(lore))
         }
         "component"
             if first

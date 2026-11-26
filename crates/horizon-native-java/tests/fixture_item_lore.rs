@@ -134,6 +134,70 @@ fn item_files(host: &StdHost) -> BTreeMap<String, Json> {
         .collect()
 }
 
+/// A demo mod whose one lore line holds a translation argument the component codec model does
+/// not encode (a `Character`; `ComponentSerialization.CODEC`'s argument codec is modelled for
+/// numbers, booleans, strings and components only), beside an item whose lore it does encode.
+const DEMO_UNSUPPORTED: &str = r#"package demo;
+import java.util.List;
+import net.fabricmc.api.ModInitializer;
+import net.minecraft.core.Registry;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.component.ItemLore;
+
+public final class Probe implements ModInitializer {
+  static void item(String path, Item.Properties properties) {
+    Identifier id = Identifier.fromNamespaceAndPath("fixture", path);
+    Registry.register(BuiltInRegistries.ITEM, id,
+        new Item(properties.setId(ResourceKey.create(Registries.ITEM, id))));
+  }
+
+  @Override
+  public void onInitialize() {
+    item("odd", new Item.Properties().component(DataComponents.LORE,
+        new ItemLore(List.of(Component.literal("fine"), Component.translatable("item.fixture.odd", 'x')))));
+    item("rod", new Item.Properties().component(DataComponents.LORE,
+        new ItemLore(List.of(Component.literal("First"), Component.literal("Second")))));
+  }
+}
+"#;
+
+/// #668 review: a lore the host cannot encode exactly is not declared, and the run counts it
+/// (`ItemLore#CODEC`) instead of reading as clean with the item's lore silently gone. The other
+/// item's lore is unaffected.
+#[test]
+fn a_lore_line_the_codec_model_cannot_encode_is_counted_not_dropped_silently() {
+    let mut sources = STUBS.to_vec();
+    sources.push(("demo/Probe.java", DEMO_UNSUPPORTED));
+    let fixture = javac_fixture::Fixture::build("item_lore_unsupported", &sources);
+    let entry = fixture.jar.discover_entrypoint("main").unwrap();
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    fixture
+        .jar
+        .execute(&entry.class, entry.method.as_deref(), "main", &mut host)
+        .unwrap();
+    let files = item_files(&host);
+    assert!(files["odd"].get("components").is_none(), "{}", files["odd"]);
+    assert_eq!(
+        files["rod"]["components"],
+        serde_json::json!({ "minecraft:lore": java25()["rod"] })
+    );
+    let unknown = host.unknown_host_calls();
+    assert_eq!(
+        unknown
+            .iter()
+            .find(|(key, _)| key == "net/minecraft/world/item/component/ItemLore#CODEC")
+            .map(|(_, count)| *count),
+        Some(1),
+        "{unknown:?}"
+    );
+}
+
 #[test]
 fn an_items_lore_is_its_declarations_component_patch_as_the_game_encodes_it() {
     let mut sources = STUBS.to_vec();
