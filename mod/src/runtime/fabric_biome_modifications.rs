@@ -70,7 +70,9 @@ pub(crate) fn static_call(
     }
     let [id] = args else { return None };
     state.next += 1;
-    let key = format!("bm#{}", state.next);
+    // `/`, not `#`: a handle of its own kind, numbered by this model; `<text>#<digits>` spells a jar
+    // object's allocation key, whose number the collector reads as the heap's (#669 review).
+    let key = format!("bm/{}", state.next);
     state.modifications.insert(
         key.clone(),
         Modification {

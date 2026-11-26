@@ -95,7 +95,10 @@ pub(crate) fn static_call(
             }
             let text = host_ids::identifier_key(id)?.to_owned();
             state.next += 1;
-            let key = format!("rct#{}", state.next);
+            // `/`, not `#`: a handle of its own kind, numbered by this model; `<text>#<digits>`
+            // spells a jar object's allocation key, whose number the collector reads as the
+            // heap's (#669 review).
+            let key = format!("rct/{}", state.next);
             state
                 .types
                 .insert(key.clone(), (text, id.clone(), codec.clone()));

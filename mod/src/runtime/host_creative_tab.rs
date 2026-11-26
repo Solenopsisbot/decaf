@@ -947,7 +947,10 @@ pub(crate) fn static_call(
         && r.descriptor == "()Lnet/minecraft/world/item/CreativeModeTab$Builder;"
     {
         state.next += 1;
-        let k = format!("b#{}", state.next);
+        // `/`, not `#`: a handle of its own kind, numbered by this model; `<text>#<digits>`
+        // spells a jar object's allocation key, whose number the collector reads as the heap's
+        // (#669 review).
+        let k = format!("b/{}", state.next);
         state.builders.insert(k.clone(), Builder::default());
         return Some(Ok(Value::Host(HostRef::new(
             HostKind::CreativeModeTabBuilder,
@@ -987,7 +990,8 @@ pub(crate) fn instance_call(
                     aligned_right: builder.aligned_right,
                 };
                 state.next += 1;
-                let k = format!("t#{}", state.next);
+                // `/`: see the builder's key.
+                let k = format!("t/{}", state.next);
                 state.tabs.insert(k.clone(), tab);
                 return Some(Ok(Value::Host(HostRef::new(HostKind::CreativeModeTab, k))));
             }

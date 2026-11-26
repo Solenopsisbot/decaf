@@ -415,3 +415,55 @@ fn a_tool_material_constant_never_shares_a_new_records_key() {
         "the new record's durability() must be counted: {answer:?} {counted:?}"
     );
 }
+
+/// The other host models that number handles of their own kinds (a biome modification, a
+/// creative tab builder, a resource condition type) key them in a family the collector cannot
+/// read as a heap number (#669 review: they were `bm#<n>`, `b#<n>`, `rct#<n>`).
+#[test]
+fn own_kind_model_keys_are_no_allocation_keys() {
+    let method = |owner: &str, name: &str, descriptor: &str| crate::MethodRef {
+        owner: owner.into(),
+        name: name.into(),
+        descriptor: descriptor.into(),
+    };
+    let modification = crate::fabric_biome_modifications::static_call(
+        &mut Default::default(),
+        &method(
+            "net/fabricmc/fabric/api/biome/v1/BiomeModifications",
+            "create",
+            "(Lnet/minecraft/resources/Identifier;)Lnet/fabricmc/fabric/api/biome/v1/BiomeModification;",
+        ),
+        &[crate::host_ids::identifier("demo", "biomes")],
+    );
+    let builder = crate::host_creative_tab::static_call(
+        &mut Default::default(),
+        &method(
+            "net/fabricmc/fabric/api/creativetab/v1/FabricCreativeModeTab",
+            "builder",
+            "()Lnet/minecraft/world/item/CreativeModeTab$Builder;",
+        ),
+        &[],
+    );
+    let condition = crate::fabric_resource_conditions::static_call(
+        &mut Default::default(),
+        &method(
+            "net/fabricmc/fabric/api/resource/conditions/v1/ResourceConditionType",
+            "create",
+            "(Lnet/minecraft/resources/Identifier;Lcom/mojang/serialization/MapCodec;)Lnet/fabricmc/fabric/api/resource/conditions/v1/ResourceConditionType;",
+        ),
+        &[
+            crate::host_ids::identifier("demo", "condition"),
+            Value::Ref(Some("codec".into())),
+        ],
+    );
+    for made in [modification, builder, condition] {
+        let Some(Ok(Value::Host(handle))) = &made else {
+            panic!("{made:?}");
+        };
+        assert!(
+            !crate::jar_object::spells_key_text(handle.key()),
+            "{} spells an allocation key",
+            handle.key()
+        );
+    }
+}
