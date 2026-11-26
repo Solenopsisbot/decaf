@@ -22,3 +22,8 @@ capabilities = ["registries"]
 game = "26.3"
 sunrise = "3d34bbe63d71bb24c098c1e4021ef866be12fe2d"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+# The content packages `tools/bake.py` writes for a jar whose data component types this mod
+# registers name it in `served_by`, so the game's namespace authority gives those namespaces to
+# this mod (`Hooks::component_types`, and the jar's item parts). Sunrise accepts `served_by` only
+# for a host that opts in here (sunrise-mod-package `dependencies::validate_served_by`).
+serves_content = true

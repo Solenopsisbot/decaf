@@ -786,6 +786,14 @@ fn execution_json(
             // The mods `isModLoaded` finds from this jar: its own, then the nested jars it
             // loaded. The bake makes exactly these its packages (`_mod_packages`).
             "mods": host.loaded_jar_mods(jar.fabric_id.as_deref().or(jar.neoforge_id.as_deref())),
+            // The data component types the jar built and registered with a persistent codec:
+            // Sunrise's NBT component types, which the items' `components` may name.
+            "component_types": host
+                .jar_component_types()
+                .into_iter()
+                .filter(|kind| kind.persistent)
+                .map(|kind| kind.id)
+                .collect::<Vec<_>>(),
         },
         "listeners": host.listener_registrations().count(),
         "events": host.posted_events().len(),
@@ -1004,9 +1012,15 @@ fn main() -> ExitCode {
     // drop an entrypoint the jar ships. The verdict is the game's own.
     let mut calls = 0;
     let mut ran = 0;
-    let mut failures = Vec::new();
     let mut failed_classes = Vec::new();
-    for (index, entry) in entrypoints.iter().enumerate() {
+    // The Mixin callbacks a real server runs as it bootstraps game classes, before any
+    // entrypoint (`bootstrap_mixins.rs`). One that throws stops the game: no entrypoint runs.
+    let mut failures = jar.run_bootstrap_static_injectors(
+        &mut host,
+        &horizon_native_java::ExecutionBudget::UNBOUNDED,
+    );
+    let booted = failures.is_empty();
+    for (index, entry) in entrypoints.iter().enumerate().filter(|_| booted) {
         let stage = entry_stages.get(index).unwrap_or(&kind);
         if let Some(adapter) = entry.adapter.as_deref() {
             failures.push(format!(
@@ -1038,6 +1052,8 @@ fn main() -> ExitCode {
             failures.extend(jar.run_deferred_work(&mut host, &budget));
         }
         jar.populate_block_shapes(&mut host, &budget);
+        // The items' default components of the jar's own types, once those are registered.
+        jar.declare_jar_component_defaults(&mut host);
     }
     let error = (ran == 0).then(|| failures.join("; "));
     match error {

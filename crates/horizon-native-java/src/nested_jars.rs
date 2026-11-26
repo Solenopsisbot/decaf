@@ -1407,7 +1407,10 @@ pub fn select_checked(jar: &NativeJar) -> Result<Vec<NestedCandidate>, String> {
     select_checked_for_side(jar, "SERVER")
 }
 
-fn select_checked_for_side(jar: &NativeJar, side: &str) -> Result<Vec<NestedCandidate>, String> {
+pub(crate) fn select_checked_for_side(
+    jar: &NativeJar,
+    side: &str,
+) -> Result<Vec<NestedCandidate>, String> {
     let all = candidates_for_side(jar, side);
     let mut neoforge_groups: std::collections::BTreeMap<String, Vec<NestedCandidate>> =
         Default::default();

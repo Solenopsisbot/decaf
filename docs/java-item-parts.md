@@ -56,10 +56,26 @@ methods, and nothing in it names a mod.
    bake writes `served_by = "horizon_java"` into the packages of the namespaces those types are in,
    so the SDK's `NamespaceAuthority` lets `horizon_java` register them. Values are stored as the
    NBT the jar's own codec encodes, run through the DFU models (#623 added encode).
+   *Built:* the runtime keeps each type's persistent codec (`declarations_content.rs`), encodes
+   with `NbtOps` semantics (`dfu_codec::encode_value_nbt`, checked against JDK 25 in
+   `fixture_jar_component_types.rs`) and lists the registered types
+   (`StdHost::jar_component_types`, the probe's `content.component_types`); the mod registers
+   them in `Hooks::component_types` (`mod/src/content.rs`), and `mod/sunrise-mod.toml` sets
+   `[native] serves_content = true` so Sunrise accepts the bake's `served_by`. A Mixin
+   `@Inject(method = "<clinit>", at = @At("TAIL"))` into a game class (Bundle API's
+   `DataComponentTypesMixin`) runs before the first entrypoint, for the jar's own mods and its
+   nested ones, in the order the server's bootstrap finishes those classes
+   (`bootstrap_mixins.rs`, `bootstrap_clinit_order_26_3.txt` from
+   `tools/trace_bootstrap_clinit_order.py`); any other shape that would apply is counted.
 2. **Default components.** The bake writes the item's component patch for jar types too (here
    `{"bundleapi:custom_bundle_contents": {"content": [], "size_multiplier": 4}}`). That has to
    wait for step 1, because Sunrise refuses an item declaration with an unregistered component
    type, and with it the whole package.
+   *Built:* `NativeJar::declare_jar_component_defaults` adds `component:<type>` to each item's
+   declaration in the JSON Sunrise's `json_to_tag` reads back as exactly that NBT
+   (`jar_components::content_json`); a default it can't carry exactly is counted
+   (`DataComponentType#codec`) and left out, and the bake drops (with a reason) any item
+   component whose type is neither vanilla nor one the runtime registered.
 3. **One `ItemPart` per jar item whose class overrides a hook**, attached the way
    `JavaBlockUsePart` is attached to jar blocks (`mod/src/content.rs`
    `attachable_registrations`):

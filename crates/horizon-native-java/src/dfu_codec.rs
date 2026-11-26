@@ -2669,14 +2669,134 @@ pub(crate) fn decode_value_json<H: Host>(
     Ok(res)
 }
 
-/// Encode a runtime value into JSON using a modelled DFU `Codec` node built by jar bytecode.
-pub(crate) fn encode_value_json<H: Host>(
+/// The `DynamicOps` an encode writes with. The codec graph is walked the same way for both; they
+/// differ only in what a primitive becomes (`Encoded::into_json`, `Encoded::into_nbt`) and in what
+/// each refuses: `JsonOps` has no non-finite number, and the text components a
+/// `DataComponentPatch` holds are written here only as JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EncodeOps {
+    /// DFU's `JsonOps.INSTANCE`.
+    Json,
+    /// Minecraft 26.3's `NbtOps.INSTANCE`.
+    Nbt,
+}
+
+/// One encoded value before it is JSON or NBT: the primitive the codec handed its ops, with its
+/// Java type kept, so the NBT side can write the tag `NbtOps` does (`createBoolean` is a
+/// `ByteTag`, `createFloat` a `FloatTag`, ...). Floats and doubles keep their bits.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Encoded {
+    Bool(bool),
+    Byte(i8),
+    Short(i16),
+    Int(i32),
+    Long(i64),
+    Float(u32),
+    Double(u64),
+    String(String),
+    List(Vec<Encoded>),
+    Map(EncodedMap),
+    /// JSON only `JsonOps` writes here (a `DataComponentPatch` text component); the NBT walk
+    /// never makes one (it answers unmodelled at that leaf instead).
+    Json(serde_json::Value),
+}
+
+/// A record or map being encoded, in insertion order: `RecordBuilder.add` on a key already
+/// present replaces its value where it stands, as JSON's (insertion-ordered) object does. NBT's
+/// `CompoundTag` has no order, so only the JSON side reads it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct EncodedMap(Vec<(String, Encoded)>);
+
+impl EncodedMap {
+    pub(crate) fn insert(&mut self, key: String, value: Encoded) {
+        match self.0.iter_mut().find(|(existing, _)| *existing == key) {
+            Some(slot) => slot.1 = value,
+            None => self.0.push((key, value)),
+        }
+    }
+}
+
+impl From<i32> for Encoded {
+    fn from(value: i32) -> Self {
+        Self::Int(value)
+    }
+}
+
+impl Encoded {
+    /// What `JsonOps` built. The encode walk refused every non-finite float and double in JSON
+    /// mode, so each number has a JSON spelling.
+    fn into_json(self) -> serde_json::Value {
+        use serde_json::Value as J;
+        let number = |value: f64| serde_json::Number::from_f64(value).map_or(J::Null, J::Number);
+        match self {
+            Self::Bool(value) => J::Bool(value),
+            Self::Byte(value) => J::from(value),
+            Self::Short(value) => J::from(value),
+            Self::Int(value) => J::from(value),
+            Self::Long(value) => J::from(value),
+            Self::Float(bits) => number(f64::from(f32::from_bits(bits))),
+            Self::Double(bits) => number(f64::from_bits(bits)),
+            Self::String(value) => J::String(value),
+            Self::List(values) => J::Array(values.into_iter().map(Self::into_json).collect()),
+            Self::Map(map) => J::Object(
+                map.0
+                    .into_iter()
+                    .map(|(key, value)| (key, value.into_json()))
+                    .collect(),
+            ),
+            Self::Json(value) => value,
+        }
+    }
+
+    /// What `NbtOps` built (26.3 `javap -c -p net.minecraft.nbt.NbtOps`): a boolean is a
+    /// `ByteTag` of 1 or 0 (`createBoolean`), each number its own tag, a list a `ListTag` of the
+    /// elements as they are (a `ListCodec` merges into `ops.empty()`, an `EndTag`, whose
+    /// collector is `GenericListCollector`: it never packs ints into an `IntArrayTag`), and a map
+    /// or record a `CompoundTag`. `createFloat`/`createDouble` go through `FloatTag.valueOf`/
+    /// `DoubleTag.valueOf`, which answer their shared `ZERO` (`+0.0`) for any value `== 0.0`, so
+    /// `-0.0` is written as `+0.0`; a NaN keeps its bits. `None` for JSON only `JsonOps` writes.
+    fn into_nbt(self) -> Option<crate::java_nbt::Nbt> {
+        use crate::java_nbt::Nbt;
+        Some(match self {
+            Self::Bool(value) => Nbt::Byte(i8::from(value)),
+            Self::Byte(value) => Nbt::Byte(value),
+            Self::Short(value) => Nbt::Short(value),
+            Self::Int(value) => Nbt::Int(value),
+            Self::Long(value) => Nbt::Long(value),
+            Self::Float(bits) if f32::from_bits(bits) == 0.0 => Nbt::Float(0),
+            Self::Float(bits) => Nbt::Float(bits),
+            Self::Double(bits) if f64::from_bits(bits) == 0.0 => Nbt::Double(0),
+            Self::Double(bits) => Nbt::Double(bits),
+            Self::String(value) => Nbt::String(value),
+            Self::List(values) => Nbt::List(
+                values
+                    .into_iter()
+                    .map(Self::into_nbt)
+                    .collect::<Option<_>>()?,
+            ),
+            Self::Map(map) => Nbt::Compound(
+                map.0
+                    .into_iter()
+                    .map(|(key, value)| Some((key, value.into_nbt()?)))
+                    .collect::<Option<_>>()?,
+            ),
+            Self::Json(_) => return None,
+        })
+    }
+}
+
+/// Encode a runtime value with a modelled DFU `Codec` node built by jar bytecode, as `ops` would.
+/// A counted unknown call inside the walk (a getter or `xmap` callback the runtime does not
+/// model) makes the whole result unmodelled, and an unmodelled result is counted once as the
+/// `Codec.encodeStart` it stands for.
+fn encode_value<H: Host>(
     runtime: &mut Runtime<'_, H>,
     codec: &Value,
     value: &Value,
-) -> Result<DfuCodecResult<serde_json::Value>, NativeError> {
+    ops: EncodeOps,
+) -> Result<DfuCodecResult<Encoded>, NativeError> {
     let before = runtime.host.counted_unknown_calls();
-    let res = encode_value_json_depth(runtime, codec, value, 0)?;
+    let res = encode_value_depth(runtime, codec, value, ops, 0)?;
     if runtime.host.counted_unknown_calls() != before {
         return Ok(DfuCodecResult::Unmodelled(
             "counted unknown call during DFU encode".into(),
@@ -2691,6 +2811,54 @@ pub(crate) fn encode_value_json<H: Host>(
         })?;
     }
     Ok(out)
+}
+
+/// Encode a runtime value into JSON using a modelled DFU `Codec` node built by jar bytecode.
+pub(crate) fn encode_value_json<H: Host>(
+    runtime: &mut Runtime<'_, H>,
+    codec: &Value,
+    value: &Value,
+) -> Result<DfuCodecResult<serde_json::Value>, NativeError> {
+    Ok(
+        match encode_value(runtime, codec, value, EncodeOps::Json)? {
+            DfuCodecResult::Ok(encoded) => DfuCodecResult::Ok(encoded.into_json()),
+            DfuCodecResult::Error { message, .. } => DfuCodecResult::Error {
+                message,
+                partial: None,
+            },
+            DfuCodecResult::Unmodelled(reason) => DfuCodecResult::Unmodelled(reason),
+        },
+    )
+}
+
+/// Encode a runtime value into the NBT `codec.encodeStart(NbtOps.INSTANCE, value)` gives, using a
+/// modelled DFU `Codec` node built by jar bytecode: the value a data component of that codec is
+/// saved as.
+pub(crate) fn encode_value_nbt<H: Host>(
+    runtime: &mut Runtime<'_, H>,
+    codec: &Value,
+    value: &Value,
+) -> Result<DfuCodecResult<crate::java_nbt::Nbt>, NativeError> {
+    Ok(match encode_value(runtime, codec, value, EncodeOps::Nbt)? {
+        DfuCodecResult::Ok(encoded) => match encoded.into_nbt() {
+            Some(nbt) => DfuCodecResult::Ok(nbt),
+            // Unreachable by construction (the NBT walk makes no JSON leaf), and still counted
+            // rather than answered if it ever were.
+            None => {
+                runtime.host.unknown_operand_call(&MethodRef {
+                    owner: CODEC.into(),
+                    name: "encodeStart".into(),
+                    descriptor: "(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;".into(),
+                })?;
+                DfuCodecResult::Unmodelled("JSON-only value in an NBT encode".into())
+            }
+        },
+        DfuCodecResult::Error { message, .. } => DfuCodecResult::Error {
+            message,
+            partial: None,
+        },
+        DfuCodecResult::Unmodelled(reason) => DfuCodecResult::Unmodelled(reason),
+    })
 }
 
 fn objects_equals_exact<H: Host>(
@@ -2743,11 +2911,12 @@ fn objects_equals_exact<H: Host>(
     }
 }
 
-fn encode_map_json_depth<H: Host>(
+fn encode_map_depth<H: Host>(
     runtime: &mut Runtime<'_, H>,
     codec: &Value,
     value: &Value,
-    map: &mut serde_json::Map<String, serde_json::Value>,
+    map: &mut EncodedMap,
+    ops: EncodeOps,
     depth: usize,
 ) -> Result<Result<(), crate::recipe_models::DecodeError>, NativeError> {
     use crate::recipe_models::DecodeError;
@@ -2771,9 +2940,9 @@ fn encode_map_json_depth<H: Host>(
                     "RecordCodecBuilder map node missing App".into(),
                 )));
             };
-            encode_app_json(runtime, app, value, map, depth + 1)
+            encode_app(runtime, app, value, map, ops, depth + 1)
         }
-        APPLIED | POINT => encode_app_json(runtime, codec, value, map, depth + 1),
+        APPLIED | POINT => encode_app(runtime, codec, value, map, ops, depth + 1),
         GETTER => {
             let (Some(inner), Some(getter_cb)) = (values.get(2), values.get(3)) else {
                 return Ok(Err(DecodeError::Unmodelled(
@@ -2789,7 +2958,7 @@ fn encode_map_json_depth<H: Host>(
                 Ok(v) => v,
                 Err(err) => return Ok(Err(err)),
             };
-            encode_map_json_depth(runtime, inner, &field_val, map, depth + 1)
+            encode_map_depth(runtime, inner, &field_val, map, ops, depth + 1)
         }
         FIELD => {
             let (Some(inner), Some(Value::Ref(Some(name)))) = (values.get(2), values.get(3)) else {
@@ -2797,7 +2966,7 @@ fn encode_map_json_depth<H: Host>(
                     "fieldOf node missing inner codec or field name".into(),
                 )));
             };
-            let encoded = match encode_value_json_depth(runtime, inner, value, depth + 1)? {
+            let encoded = match encode_value_depth(runtime, inner, value, ops, depth + 1)? {
                 Ok(v) => v,
                 Err(err) => return Ok(Err(err)),
             };
@@ -2817,7 +2986,7 @@ fn encode_map_json_depth<H: Host>(
                     Ok(true) => Ok(Ok(())),
                     Ok(false) => {
                         let encoded =
-                            match encode_value_json_depth(runtime, inner, value, depth + 1)? {
+                            match encode_value_depth(runtime, inner, value, ops, depth + 1)? {
                                 Ok(v) => v,
                                 Err(err) => return Ok(Err(err)),
                             };
@@ -2834,7 +3003,7 @@ fn encode_map_json_depth<H: Host>(
                 }
                 if let Some(present) = crate::host_optional::optional_present(value) {
                     let encoded =
-                        match encode_value_json_depth(runtime, inner, &present, depth + 1)? {
+                        match encode_value_depth(runtime, inner, &present, ops, depth + 1)? {
                             Ok(v) => v,
                             Err(err) => return Ok(Err(err)),
                         };
@@ -2859,7 +3028,7 @@ fn encode_map_json_depth<H: Host>(
                 Ok(v) => v,
                 Err(err) => return Ok(Err(err)),
             };
-            encode_map_json_depth(runtime, inner, &mapped, map, depth + 1)
+            encode_map_depth(runtime, inner, &mapped, map, ops, depth + 1)
         }
         FLAT_XMAP => {
             let (Some(inner), Some(from_cb)) = (values.get(2), values.get(4)) else {
@@ -2874,7 +3043,7 @@ fn encode_map_json_depth<H: Host>(
                 }
                 DfuCodecResult::Unmodelled(u) => return Ok(Err(DecodeError::Unmodelled(u))),
             };
-            encode_map_json_depth(runtime, inner, &mapped, map, depth + 1)
+            encode_map_depth(runtime, inner, &mapped, map, ops, depth + 1)
         }
         COMAP_FLAT_MAP => {
             let (Some(inner), Some(from_cb)) = (values.get(2), values.get(4)) else {
@@ -2891,7 +3060,7 @@ fn encode_map_json_depth<H: Host>(
                 Ok(v) => v,
                 Err(err) => return Ok(Err(err)),
             };
-            encode_map_json_depth(runtime, inner, &mapped, map, depth + 1)
+            encode_map_depth(runtime, inner, &mapped, map, ops, depth + 1)
         }
         CONSTANT => {
             let (Some(Value::Ref(Some(owner))), Some(Value::Ref(Some(name)))) =
@@ -2908,7 +3077,7 @@ fn encode_map_json_depth<H: Host>(
             };
             match (owner.as_str(), name.as_str()) {
                 ("net/minecraft/world/item/ItemStackTemplate", "MAP_CODEC") => {
-                    Ok(encode_item_stack_template_map(std_host, value, map))
+                    Ok(encode_item_stack_template_map(std_host, value, map, ops))
                 }
                 ("net/minecraft/world/item/crafting/Recipe$CommonInfo", "MAP_CODEC") => {
                     let Value::Host(handle) = value else {
@@ -2923,10 +3092,7 @@ fn encode_map_json_depth<H: Host>(
                         )));
                     };
                     if !show_notification {
-                        map.insert(
-                            "show_notification".to_owned(),
-                            serde_json::Value::Bool(false),
-                        );
+                        map.insert("show_notification".to_owned(), Encoded::Bool(false));
                     }
                     Ok(Ok(()))
                 }
@@ -2941,11 +3107,12 @@ fn encode_map_json_depth<H: Host>(
     }
 }
 
-fn encode_app_json<H: Host>(
+fn encode_app<H: Host>(
     runtime: &mut Runtime<'_, H>,
     app: &Value,
     value: &Value,
-    map: &mut serde_json::Map<String, serde_json::Value>,
+    map: &mut EncodedMap,
+    ops: EncodeOps,
     depth: usize,
 ) -> Result<Result<(), crate::recipe_models::DecodeError>, NativeError> {
     use crate::recipe_models::DecodeError;
@@ -2967,7 +3134,7 @@ fn encode_app_json<H: Host>(
     };
     match kind.as_str() {
         POINT => Ok(Ok(())),
-        GETTER => encode_map_json_depth(runtime, app, value, map, depth + 1),
+        GETTER => encode_map_depth(runtime, app, value, map, ops, depth + 1),
         APPLIED => {
             let Some(product) = values.get(2) else {
                 return Ok(Err(DecodeError::Unmodelled(
@@ -2982,7 +3149,7 @@ fn encode_app_json<H: Host>(
             let mut invalid_errors = Vec::new();
             let mut first_unmodelled: Option<String> = None;
             for part in &parts {
-                match encode_app_json(runtime, part, value, map, depth + 1)? {
+                match encode_app(runtime, part, value, map, ops, depth + 1)? {
                     Ok(()) => {}
                     Err(DecodeError::Invalid(msg)) => invalid_errors.push(msg),
                     Err(DecodeError::Unmodelled(msg)) => {
@@ -3000,22 +3167,23 @@ fn encode_app_json<H: Host>(
             }
             Ok(Ok(()))
         }
-        _ => encode_map_json_depth(runtime, app, value, map, depth + 1),
+        _ => encode_map_depth(runtime, app, value, map, ops, depth + 1),
     }
 }
 
-fn encode_component_patch_json(
+/// A `DataComponentPatch` as `DataComponentPatch.CODEC` writes it: the int components, removals
+/// (`!<type>`: an empty map, `Codec.unit`) and, in JSON only, the text names. Every other type,
+/// and a text name under NBT, is unmodelled.
+fn encode_component_patch(
     patch: &crate::recipe_models::ComponentPatch,
-) -> Result<serde_json::Value, crate::recipe_models::DecodeError> {
+    ops: EncodeOps,
+) -> Result<Encoded, crate::recipe_models::DecodeError> {
     use crate::Boxed;
     use crate::recipe_models::DecodeError;
-    let mut obj = serde_json::Map::new();
+    let mut obj = EncodedMap::default();
     for (id, entry) in &patch.entries {
         let Some(val) = entry else {
-            obj.insert(
-                format!("!{id}"),
-                serde_json::Value::Object(serde_json::Map::new()),
-            );
+            obj.insert(format!("!{id}"), Encoded::Map(EncodedMap::default()));
             continue;
         };
         let encoded = match id.as_str() {
@@ -3026,7 +3194,7 @@ fn encode_component_patch_json(
                             "Value must be within range [1;99]: {n}"
                         )));
                     }
-                    serde_json::Value::from(*n)
+                    Encoded::Int(*n)
                 }
                 _ => return Err(DecodeError::Invalid(format!("Not an int for {id}"))),
             },
@@ -3037,7 +3205,7 @@ fn encode_component_patch_json(
                             "Value must be positive for {id}: {n}"
                         )));
                     }
-                    serde_json::Value::from(*n)
+                    Encoded::Int(*n)
                 }
                 _ => return Err(DecodeError::Invalid(format!("Not an int for {id}"))),
             },
@@ -3048,20 +3216,20 @@ fn encode_component_patch_json(
                             "Value must be non-negative for {id}: {n}"
                         )));
                     }
-                    serde_json::Value::from(*n)
+                    Encoded::Int(*n)
                 }
                 _ => return Err(DecodeError::Invalid(format!("Not an int for {id}"))),
             },
-            "minecraft:custom_name" | "minecraft:item_name" => {
+            "minecraft:custom_name" | "minecraft:item_name" if ops == EncodeOps::Json => {
                 let Some(json) = crate::host_component::json_in(val, None, &|_| None) else {
                     return Err(DecodeError::Unmodelled(format!(
                         "unmodelled component value for {id}"
                     )));
                 };
                 if let Some(lit) = crate::host_component::bare_literal(&json) {
-                    serde_json::Value::String(lit)
+                    Encoded::String(lit)
                 } else {
-                    json
+                    Encoded::Json(json)
                 }
             }
             _ => {
@@ -3072,13 +3240,14 @@ fn encode_component_patch_json(
         };
         obj.insert(id.clone(), encoded);
     }
-    Ok(serde_json::Value::Object(obj))
+    Ok(Encoded::Map(obj))
 }
 
 fn encode_item_stack_template_map(
     host: &crate::StdHost,
     value: &Value,
-    map: &mut serde_json::Map<String, serde_json::Value>,
+    map: &mut EncodedMap,
+    ops: EncodeOps,
 ) -> Result<(), crate::recipe_models::DecodeError> {
     use crate::recipe_models::DecodeError;
     let Value::Host(handle) = value else {
@@ -3103,17 +3272,14 @@ fn encode_item_stack_template_map(
             tpl.count
         )));
     }
-    map.insert(
-        "id".to_owned(),
-        serde_json::Value::String(tpl.item_id.clone()),
-    );
+    map.insert("id".to_owned(), Encoded::String(tpl.item_id.clone()));
     if tpl.count != 1 {
-        map.insert("count".to_owned(), serde_json::Value::from(tpl.count));
+        map.insert("count".to_owned(), Encoded::Int(tpl.count));
     }
     if !tpl.patch.is_empty() {
         map.insert(
             "components".to_owned(),
-            encode_component_patch_json(&tpl.patch)?,
+            encode_component_patch(&tpl.patch, ops)?,
         );
     }
     Ok(())
@@ -3195,12 +3361,13 @@ fn read_list_elements_exact<H: Host>(
     Ok(Ok(elements))
 }
 
-fn encode_value_json_depth<H: Host>(
+fn encode_value_depth<H: Host>(
     runtime: &mut Runtime<'_, H>,
     codec: &Value,
     value: &Value,
+    ops: EncodeOps,
     depth: usize,
-) -> Result<Result<serde_json::Value, crate::recipe_models::DecodeError>, NativeError> {
+) -> Result<Result<Encoded, crate::recipe_models::DecodeError>, NativeError> {
     use crate::Boxed;
     use crate::recipe_models::DecodeError;
     if depth > MAX_NODE_DEPTH {
@@ -3225,9 +3392,9 @@ fn encode_value_json_depth<H: Host>(
                     "RecordCodecBuilder.create node missing App".into(),
                 )));
             };
-            let mut map = serde_json::Map::new();
-            match encode_app_json(runtime, app, value, &mut map, depth + 1)? {
-                Ok(()) => Ok(Ok(serde_json::Value::Object(map))),
+            let mut map = EncodedMap::default();
+            match encode_app(runtime, app, value, &mut map, ops, depth + 1)? {
+                Ok(()) => Ok(Ok(Encoded::Map(map))),
                 Err(err) => Ok(Err(err)),
             }
         }
@@ -3237,13 +3404,13 @@ fn encode_value_json_depth<H: Host>(
                     "MapCodec.codec() node missing inner MapCodec".into(),
                 )));
             };
-            let mut map = serde_json::Map::new();
-            match encode_map_json_depth(runtime, inner, value, &mut map, depth + 1)? {
-                Ok(()) => Ok(Ok(serde_json::Value::Object(map))),
+            let mut map = EncodedMap::default();
+            match encode_map_depth(runtime, inner, value, &mut map, ops, depth + 1)? {
+                Ok(()) => Ok(Ok(Encoded::Map(map))),
                 Err(err) => Ok(Err(err)),
             }
         }
-        UNIT_CODEC => Ok(Ok(serde_json::Value::Object(serde_json::Map::new()))),
+        UNIT_CODEC => Ok(Ok(Encoded::Map(EncodedMap::default()))),
         INT_RANGE => {
             let (Some(Value::Int(min)), Some(Value::Int(max))) = (values.get(2), values.get(3))
             else {
@@ -3264,7 +3431,7 @@ fn encode_value_json_depth<H: Host>(
                     "Value must be within range [{min};{max}]: {n}"
                 ))));
             }
-            Ok(Ok(serde_json::Value::from(n)))
+            Ok(Ok(Encoded::Int(n)))
         }
         LIST => {
             let Some(inner) = values.get(2) else {
@@ -3293,7 +3460,7 @@ fn encode_value_json_depth<H: Host>(
             let mut invalid_errors = Vec::new();
             let mut first_unmodelled: Option<String> = None;
             for elem in &elements {
-                match encode_value_json_depth(runtime, inner, elem, depth + 1)? {
+                match encode_value_depth(runtime, inner, elem, ops, depth + 1)? {
                     Ok(v) => encoded.push(v),
                     Err(DecodeError::Invalid(msg)) => invalid_errors.push(msg),
                     Err(DecodeError::Unmodelled(msg)) => {
@@ -3309,7 +3476,7 @@ fn encode_value_json_depth<H: Host>(
             if !invalid_errors.is_empty() {
                 return Ok(Err(DecodeError::Invalid(invalid_errors.join("; "))));
             }
-            Ok(Ok(serde_json::Value::Array(encoded)))
+            Ok(Ok(Encoded::List(encoded)))
         }
         XMAP => {
             let (Some(inner), Some(from_cb)) = (values.get(2), values.get(4)) else {
@@ -3326,7 +3493,7 @@ fn encode_value_json_depth<H: Host>(
                 Ok(v) => v,
                 Err(err) => return Ok(Err(err)),
             };
-            encode_value_json_depth(runtime, inner, &mapped, depth + 1)
+            encode_value_depth(runtime, inner, &mapped, ops, depth + 1)
         }
         FLAT_XMAP => {
             let (Some(inner), Some(from_cb)) = (values.get(2), values.get(4)) else {
@@ -3341,7 +3508,7 @@ fn encode_value_json_depth<H: Host>(
                 }
                 DfuCodecResult::Unmodelled(u) => return Ok(Err(DecodeError::Unmodelled(u))),
             };
-            encode_value_json_depth(runtime, inner, &mapped, depth + 1)
+            encode_value_depth(runtime, inner, &mapped, ops, depth + 1)
         }
         COMAP_FLAT_MAP => {
             let (Some(inner), Some(from_cb)) = (values.get(2), values.get(4)) else {
@@ -3358,7 +3525,7 @@ fn encode_value_json_depth<H: Host>(
                 Ok(v) => v,
                 Err(err) => return Ok(Err(err)),
             };
-            encode_value_json_depth(runtime, inner, &mapped, depth + 1)
+            encode_value_depth(runtime, inner, &mapped, ops, depth + 1)
         }
         CONSTANT => {
             let (Some(Value::Ref(Some(owner))), Some(Value::Ref(Some(name)))) =
@@ -3370,53 +3537,53 @@ fn encode_value_json_depth<H: Host>(
             };
             match (owner.as_str(), name.as_str()) {
                 (CODEC, "BOOL") => match value {
-                    Value::Boxed(Boxed::Boolean(b)) => Ok(Ok(serde_json::Value::Bool(*b))),
-                    Value::Int(n) => Ok(Ok(serde_json::Value::Bool(*n != 0))),
+                    Value::Boxed(Boxed::Boolean(b)) => Ok(Ok(Encoded::Bool(*b))),
+                    Value::Int(n) => Ok(Ok(Encoded::Bool(*n != 0))),
                     _ => Ok(Err(DecodeError::Invalid("Not a Boolean".into()))),
                 },
                 (CODEC, "BYTE") => match value {
-                    Value::Boxed(Boxed::Byte(b)) => Ok(Ok(serde_json::Value::from(*b))),
-                    Value::Int(n) => Ok(Ok(serde_json::Value::from(*n as i8))),
+                    Value::Boxed(Boxed::Byte(b)) => Ok(Ok(Encoded::Byte(*b))),
+                    Value::Int(n) => Ok(Ok(Encoded::Byte(*n as i8))),
                     _ => Ok(Err(DecodeError::Invalid("Not a Byte".into()))),
                 },
                 (CODEC, "SHORT") => match value {
-                    Value::Boxed(Boxed::Short(s)) => Ok(Ok(serde_json::Value::from(*s))),
-                    Value::Int(n) => Ok(Ok(serde_json::Value::from(*n as i16))),
+                    Value::Boxed(Boxed::Short(s)) => Ok(Ok(Encoded::Short(*s))),
+                    Value::Int(n) => Ok(Ok(Encoded::Short(*n as i16))),
                     _ => Ok(Err(DecodeError::Invalid("Not a Short".into()))),
                 },
                 (CODEC, "INT") => match value {
-                    Value::Boxed(Boxed::Integer(n)) | Value::Int(n) => {
-                        Ok(Ok(serde_json::Value::from(*n)))
-                    }
+                    Value::Boxed(Boxed::Integer(n)) | Value::Int(n) => Ok(Ok(Encoded::Int(*n))),
                     _ => Ok(Err(DecodeError::Invalid("Not an Integer".into()))),
                 },
                 (CODEC, "LONG") => match value {
-                    Value::Long(n) => Ok(Ok(serde_json::Value::from(*n))),
+                    Value::Long(n) => Ok(Ok(Encoded::Long(*n))),
                     _ => Ok(Err(DecodeError::Invalid("Not a Long".into()))),
                 },
                 (CODEC, "FLOAT") => {
-                    let f = match value {
-                        Value::Boxed(Boxed::Float(bits)) => f64::from(f32::from_bits(*bits)),
-                        Value::Float(v) => f64::from(*v as f32),
+                    let bits = match value {
+                        Value::Boxed(Boxed::Float(bits)) => *bits,
+                        Value::Float(v) => (*v as f32).to_bits(),
                         _ => return Ok(Err(DecodeError::Invalid("Not a Float".into()))),
                     };
-                    match serde_json::Number::from_f64(f) {
-                        Some(num) => Ok(Ok(serde_json::Value::Number(num))),
-                        None => Ok(Err(DecodeError::Invalid(format!(
+                    let f = f64::from(f32::from_bits(bits));
+                    // `NbtOps.createFloat` takes any float; only JSON has no NaN or infinity.
+                    if ops == EncodeOps::Json && !f.is_finite() {
+                        return Ok(Err(DecodeError::Invalid(format!(
                             "Non-finite float for JSON: {f}"
-                        )))),
+                        ))));
                     }
+                    Ok(Ok(Encoded::Float(bits)))
                 }
                 (CODEC, "DOUBLE") => {
                     let Value::Float(d) = value else {
                         return Ok(Err(DecodeError::Invalid("Not a Double".into())));
                     };
-                    match serde_json::Number::from_f64(*d) {
-                        Some(num) => Ok(Ok(serde_json::Value::Number(num))),
-                        None => Ok(Err(DecodeError::Invalid(format!(
+                    if ops == EncodeOps::Json && !d.is_finite() {
+                        return Ok(Err(DecodeError::Invalid(format!(
                             "Non-finite double for JSON: {d}"
-                        )))),
+                        ))));
                     }
+                    Ok(Ok(Encoded::Double(d.to_bits())))
                 }
                 ("net/minecraft/util/ExtraCodecs", "POSITIVE_INT") => {
                     let n = match value {
@@ -3428,7 +3595,7 @@ fn encode_value_json_depth<H: Host>(
                             "Value must be positive: {n}"
                         ))));
                     }
-                    Ok(Ok(serde_json::Value::from(n)))
+                    Ok(Ok(Encoded::Int(n)))
                 }
                 ("net/minecraft/util/ExtraCodecs", "NON_NEGATIVE_INT") => {
                     let n = match value {
@@ -3440,17 +3607,17 @@ fn encode_value_json_depth<H: Host>(
                             "Value must be non-negative: {n}"
                         ))));
                     }
-                    Ok(Ok(serde_json::Value::from(n)))
+                    Ok(Ok(Encoded::Int(n)))
                 }
                 (CODEC, "STRING") => match value {
                     Value::Ref(Some(s)) if crate::value_class::is_plain_string(s) => {
-                        Ok(Ok(serde_json::Value::String(s.clone())))
+                        Ok(Ok(Encoded::String(s.clone())))
                     }
                     _ => Ok(Err(DecodeError::Invalid("Not a String".into()))),
                 },
                 ("net/minecraft/resources/Identifier", "CODEC") => {
                     match crate::host_ids::identifier_key(value) {
-                        Some(id) => Ok(Ok(serde_json::Value::String(id.to_owned()))),
+                        Some(id) => Ok(Ok(Encoded::String(id.to_owned()))),
                         None => Ok(Err(DecodeError::Invalid("Not an Identifier".into()))),
                     }
                 }
@@ -3470,7 +3637,7 @@ fn encode_value_json_depth<H: Host>(
                             "Item must not be minecraft:air".into(),
                         )));
                     }
-                    Ok(Ok(serde_json::Value::String(id)))
+                    Ok(Ok(Encoded::String(id)))
                 }
                 ("net/minecraft/world/item/ItemStackTemplate", "CODEC") => {
                     let Some(std_host) = runtime.host.as_std_host() else {
@@ -3478,9 +3645,9 @@ fn encode_value_json_depth<H: Host>(
                             "host does not support ItemStackTemplate encoding".into(),
                         )));
                     };
-                    let mut map = serde_json::Map::new();
-                    match encode_item_stack_template_map(std_host, value, &mut map) {
-                        Ok(()) => Ok(Ok(serde_json::Value::Object(map))),
+                    let mut map = EncodedMap::default();
+                    match encode_item_stack_template_map(std_host, value, &mut map, ops) {
+                        Ok(()) => Ok(Ok(Encoded::Map(map))),
                         Err(err) => Ok(Err(err)),
                     }
                 }
@@ -3495,7 +3662,7 @@ fn encode_value_json_depth<H: Host>(
                             "unmodelled DataComponentPatch handle".into(),
                         )));
                     };
-                    Ok(encode_component_patch_json(patch))
+                    Ok(encode_component_patch(patch, ops))
                 }
                 _ => Ok(Err(DecodeError::Unmodelled(format!(
                     "constant Codec {owner}.{name}"

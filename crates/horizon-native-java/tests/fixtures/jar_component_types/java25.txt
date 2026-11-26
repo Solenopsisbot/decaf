@@ -1,0 +1,9 @@
+pouch_default_multiplier=compound{content:list[]}
+pouch_multiplier_4=compound{content:list[],size_multiplier:int(4)}
+pouch_items=compound{content:list[string(a),string(b)],size_multiplier:int(12)}
+gauge=compound{big:long(5000000000),flags:byte(7),level:short(-3),ratio:double(3fe0000000000000),sealed:byte(1),weight:float(3fa00000)}
+gauge_nan_and_negative_zero=compound{big:long(1),flags:byte(0),level:short(0),ratio:double(0000000000000000),sealed:byte(0),weight:float(7fc00000)}
+int_list=list[int(1),int(2),int(3)]
+bool=byte(1)
+bounded_list_too_long=ERROR|List is too long: 2, expected range [0-1]
+string=string(text)

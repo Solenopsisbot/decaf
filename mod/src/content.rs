@@ -23,7 +23,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use mod_api::{BlocksEvent, ItemsEvent, PackageKind, Registrar, RegistrationContext};
+use mod_api::{
+    BlocksEvent, ComponentTypesEvent, ItemsEvent, PackageKind, Registrar, RegistrationContext,
+};
 
 use crate::runtime;
 use crate::{JARS, JarRow, LOG, LoadedJar, State, jar_id, load_jar};
@@ -287,6 +289,11 @@ impl State {
         for jar in &mut self.jars {
             jar.finish_loading();
         }
+        // The items' default components of the jars' own types, encoded with each type's codec
+        // now that every stage has registered what it will (`runtime::jar_components`).
+        for jar in &mut self.jars {
+            jar.jar.declare_jar_component_defaults(&mut jar.host);
+        }
         for jar in &mut self.jars {
             let declarations = runtime::content::declarations(jar.host.registrations());
             jar.row.content_skipped = unowned_counts(
@@ -377,6 +384,74 @@ fn unowned_counts<'a>(
         }
     }
     counts
+}
+
+/// Registers, as Sunrise NBT component types, the data component types the jars built and
+/// registered into `minecraft:data_component_type` with a persistent codec
+/// (`StdHost::jar_component_types`), each id once. A type is this mod's to register when its
+/// namespace is one this mod owns ([`owned_namespaces`]) or one a content package serves through it
+/// ([`served_namespace`]: the bake writes `served_by = "horizon_java"` into a jar's packages for
+/// that). A transient type (no codec) is no NBT type and is left out; Sunrise refuses a repeated
+/// id at start, so a second jar's registration of an id is logged and left out.
+pub(crate) fn declare_component_types(
+    state: &mut State,
+    context: &RegistrationContext,
+    event: &mut ComponentTypesEvent<'_>,
+) {
+    state.ensure_loaded(context, registration_game_version(context));
+    let owned = owned_namespaces(context);
+    let mut declared = BTreeSet::new();
+    for jar in &state.jars {
+        for kind in jar.host.jar_component_types() {
+            if !kind.persistent {
+                continue;
+            }
+            if !usable_id(&kind.id) {
+                log::warn!(
+                    "{LOG}: {}: component type {} is not an id this mod can register; left out",
+                    jar.row.id,
+                    kind.id
+                );
+                continue;
+            }
+            if !owns(&owned, &kind.id) && !served_namespace(context, &kind.id) {
+                log::info!(
+                    "{LOG}: {}: component type {} not registered: its namespace is neither owned \
+                     nor served by {MOD_ID}; run tools/bake.py",
+                    jar.row.id,
+                    kind.id
+                );
+                continue;
+            }
+            if !declared.insert(kind.id.clone()) {
+                log::warn!(
+                    "{LOG}: {}: component type {} is registered by another jar too; only the \
+                     first is used",
+                    jar.row.id,
+                    kind.id
+                );
+                continue;
+            }
+            event.register(kind.id);
+        }
+    }
+    if !declared.is_empty() {
+        log::info!("{LOG}: content: {} component type(s)", declared.len());
+    }
+}
+
+/// Whether an installed content package that names this mod in `served_by` owns the id's
+/// namespace: the game's namespace authority then gives it to this mod
+/// (`sunrise-mod-vocab/src/parts/owned_namespaces.rs` `NamespaceAuthority::from_packages`).
+fn served_namespace(context: &RegistrationContext, id: &str) -> bool {
+    let Some((namespace, _)) = id.split_once(':') else {
+        return false;
+    };
+    context.mods().iter().any(|package| {
+        package.kind() == PackageKind::Content
+            && package.served_by() == Some(MOD_ID)
+            && package.namespaces().any(|owned| owned == namespace)
+    })
 }
 
 /// Pushes one `content::Block` per typed block declaration. A block keeps the runtime's inferred
@@ -797,6 +872,151 @@ impl LoadedJar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A jar built by `javac` from `sources` with `main` as its Fabric `main` entrypoint, its
+    /// `demo/` classes packed. The game classes stay stubs, so every call reaches the runtime.
+    fn javac_jar(test: &str, sources: &[(&str, &str)], main: &str) -> runtime::NativeJar {
+        use std::io::Write;
+        use std::path::PathBuf;
+        let root = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("horizon-java-mod-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, classes) = (root.join("src"), root.join("classes"));
+        let mut paths = Vec::new();
+        for (path, body) in sources {
+            let file = src.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, body).unwrap();
+            paths.push(file);
+        }
+        std::fs::create_dir_all(&classes).unwrap();
+        let javac = std::env::var_os("JAVA_HOME")
+            .map(|home| PathBuf::from(home).join("bin/javac"))
+            .unwrap_or_else(|| "javac".into());
+        let status = std::process::Command::new(javac)
+            .args(["--release", "17", "-nowarn", "-d"])
+            .arg(&classes)
+            .args(&paths)
+            .status()
+            .expect("javac runs");
+        assert!(status.success(), "javac failed");
+        let mut bytes = Vec::new();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("fabric.mod.json", options).unwrap();
+        zip.write_all(
+            format!(r#"{{"id":"typesdemo","version":"1","entrypoints":{{"main":["{main}"]}}}}"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        for entry in std::fs::read_dir(classes.join("demo")).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            zip.start_file(format!("demo/{name}"), options).unwrap();
+            zip.write_all(&std::fs::read(&path).unwrap()).unwrap();
+        }
+        zip.finish().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        runtime::NativeJar::from_bytes(&bytes).unwrap()
+    }
+
+    /// docs/java-item-parts.md step 1: `Hooks::component_types` registers every data component
+    /// type the jars registered with a persistent codec, when its namespace is this mod's own or
+    /// one a content package serves through it (`served_by = "horizon_java"`, as the bake writes
+    /// it). A transient type, a type of a namespace a package owns without naming this mod, and a
+    /// repeated id are left out (Sunrise stops at a repeated or unowned one).
+    #[test]
+    fn component_types_registers_the_jars_persistent_types_in_owned_and_served_namespaces() {
+        use mod_api::{ModEntry, PackageInfo, Side};
+        let sources: &[(&str, &str)] = &[
+            (
+                "com/mojang/serialization/Codec.java",
+                "package com.mojang.serialization; public interface Codec<A> { Codec<Integer> INT = null; }",
+            ),
+            (
+                "net/minecraft/resources/Identifier.java",
+                "package net.minecraft.resources; public final class Identifier { public static Identifier fromNamespaceAndPath(String n, String p) { return null; } }",
+            ),
+            (
+                "net/minecraft/core/Registry.java",
+                "package net.minecraft.core; import net.minecraft.resources.Identifier; public interface Registry<T> { static <V, T extends V> T register(Registry<V> r, Identifier id, T v) { return v; } }",
+            ),
+            (
+                "net/minecraft/core/registries/BuiltInRegistries.java",
+                "package net.minecraft.core.registries; import net.minecraft.core.Registry; import net.minecraft.core.component.DataComponentType; public final class BuiltInRegistries { public static final Registry<DataComponentType<?>> DATA_COMPONENT_TYPE = null; }",
+            ),
+            (
+                "net/minecraft/core/component/DataComponentType.java",
+                "package net.minecraft.core.component; import com.mojang.serialization.Codec; public interface DataComponentType<T> { static <T> Builder<T> builder() { return null; } class Builder<T> { public Builder<T> persistent(Codec<T> codec) { return this; } public DataComponentType<T> build() { return null; } } }",
+            ),
+            (
+                "demo/Main.java",
+                r#"package demo;
+import com.mojang.serialization.Codec;
+import net.minecraft.core.Registry;
+import net.minecraft.core.component.DataComponentType;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+public final class Main {
+  static void type(String namespace, String path, boolean persistent) {
+    DataComponentType.Builder<Integer> builder = DataComponentType.<Integer>builder();
+    if (persistent) builder = builder.persistent(Codec.INT);
+    Registry.register(BuiltInRegistries.DATA_COMPONENT_TYPE,
+        Identifier.fromNamespaceAndPath(namespace, path), builder.build());
+  }
+  public void onInitialize() {
+    type("served_api", "pouch", true);
+    type("horizon_java", "own", true);
+    type("served_api", "charge", false);
+    type("plain_api", "thing", true);
+    type("minecraft", "stolen", true);
+  }
+}
+"#,
+            ),
+        ];
+        let jar = javac_jar("component-types", sources, "demo.Main");
+        let imc = runtime::neoforge_imc::ImcBus::new();
+        let loaded = crate::load_jar("types.jar".into(), Arc::new(jar), &[], &imc, None)
+            .unwrap_or_else(|row| panic!("{row}"));
+        let package = |id: &str, kind: PackageKind, served_by: Option<&str>| {
+            PackageInfo::new(
+                id.to_owned(),
+                "1".to_owned(),
+                kind,
+                Side::Both,
+                vec![id.to_owned()],
+                vec![],
+            )
+            .with_served_by(served_by.map(str::to_owned))
+        };
+        let java = crate::HorizonJava::default();
+        {
+            let mut guard = java.state.lock().unwrap();
+            guard.jars = vec![loaded];
+            // The jars ran at the content phase already; the hook reads no folder.
+            guard.loaded = true;
+        }
+        let mods: mod_api::Mods = vec![ModEntry::new(MOD_ID, Box::new(java))].into();
+        let types = mod_api::__private::with_test_package_inventory(
+            vec![
+                package(MOD_ID, PackageKind::Code, None),
+                package("served_api", PackageKind::Content, Some(MOD_ID)),
+                package("plain_api", PackageKind::Content, None),
+            ],
+            || {
+                mod_api::testing::with_mods(mods.clone(), || {
+                    use mod_api::__private::game::RegistrationContextNew;
+                    let mut types = Vec::new();
+                    mod_api::dispatch_component_types(&RegistrationContext::new(), &mut types);
+                    types
+                })
+            },
+        );
+        assert_eq!(types, ["served_api:pouch", "horizon_java:own"]);
+    }
 
     /// The game asks for blocks and items in two hook calls. Each jar's entrypoints must run once:
     /// a second run would register every listener and command twice and load the jar's classes

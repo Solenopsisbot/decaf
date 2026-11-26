@@ -806,6 +806,7 @@ def _manifest(
     target: Target = SUNRISE,
     mod_ids: frozenset[str] | None = None,
     namespaces: list[str] | None = None,
+    served: bool = False,
 ) -> str:
     if target is HORIZON:
         # The minimal accepted manifest of 1.3, every key one the game reads. The description
@@ -825,6 +826,11 @@ def _manifest(
             'side = "both"\n'
             'capabilities = ["registries"]\n'
         )
+    # A package with a namespace a jar registered a data component type in names the mod as the
+    # native runtime that serves it, so the game's namespace authority gives the mod that
+    # namespace (`NamespaceAuthority::from_packages`), and the mod registers the type
+    # (`Hooks::component_types`; docs/java-item-parts.md step 1).
+    serving = f"served_by = {_toml_string(SERVING_MOD)}\n" if served else ""
     if namespaces is not None:
         # A package per loaded mod (`_mod_packages`): its id is the mod's, and the jar's other
         # namespaces are listed so the package may carry their files (`content::check_namespace`).
@@ -845,6 +851,7 @@ def _manifest(
             'side = "both"\n'
             'capabilities = ["registries"]\n'
             f"{listed}"
+            f"{serving}"
         )
     return (
         f'id = "{namespace}"\n'
@@ -855,6 +862,7 @@ def _manifest(
         'api = "0.2"\n'
         'side = "both"\n'
         'capabilities = ["registries"]\n'
+        f"{serving}"
     )
 
 
@@ -988,6 +996,14 @@ def probe_declarations(
             for mod_id in mods if isinstance(mods, list) else []:
                 if isinstance(mod_id, str):
                     declarations.append(("mod", mod_id, {}))
+            # `component_types` (Sunrise only): the data component types the jar built and
+            # registered with a persistent codec, which the mod registers as Sunrise's NBT
+            # component types (docs/java-item-parts.md step 1). They come back as
+            # `component-type` rows; an item's `components` may name only these and vanilla's.
+            kinds = content.get("component_types", [])
+            for kind in kinds if isinstance(kinds, list) else []:
+                if isinstance(kind, str):
+                    declarations.append(("component-type", kind, {}))
         return declarations
     raise ProbeError(f"no server entrypoint ran ({ran or last})")
 
@@ -1025,12 +1041,13 @@ def write_package(
     target: Target = SUNRISE,
     mod_ids: frozenset[str] | None = None,
     namespaces: list[str] | None = None,
+    served: bool = False,
 ) -> int:
     """Writes a deterministic package (a zip: the manifest then the sorted files)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
-        manifest = _manifest(namespace, jar, target, mod_ids, namespaces)
+        manifest = _manifest(namespace, jar, target, mod_ids, namespaces, served)
         info = zipfile.ZipInfo(target.manifest, ZIP_TIME)
         info.external_attr = ZIP_MODE
         info.compress_type = zipfile.ZIP_DEFLATED
@@ -1042,6 +1059,57 @@ def write_package(
             archive.writestr(info, data)
     os.replace(temporary, path)
     return path.stat().st_size
+
+
+# The native runtime mod that serves a jar's packages (`mod/sunrise-mod.toml` `id`, with
+# `[native] serves_content = true`).
+SERVING_MOD = "horizon_java"
+
+
+def _registered_components(
+    file: dict, component_types: set[str], declaration_id: str, bake: JarBake
+) -> dict:
+    """An item file whose `components` name only vanilla's types and the jar's registered ones
+    (`component_types`). Sunrise refuses an item that names a type no one registered ("not a known
+    component type"), and with it the whole package (`mod_content::validate_components`), so such
+    a component is left out with a reason and the item is kept."""
+    components = file.get("components")
+    if not isinstance(components, dict):
+        return file
+    kept = {}
+    for key, value in components.items():
+        kind = key[1:] if key.startswith("!") else key
+        if kind in component_types:
+            registered = _servable_component_type(kind)
+        else:
+            registered = kind.startswith("minecraft:")
+        if registered:
+            kept[key] = value
+        else:
+            bake.skip(
+                f"item component {kind}: no registered component type of that id",
+                declaration_id,
+            )
+    if len(kept) == len(components):
+        return file
+    file = {key: value for key, value in file.items() if key != "components"}
+    if kept:
+        file["components"] = kept
+    return file
+
+
+def _servable_component_type(kind: str) -> bool:
+    """Whether the mod can register a jar's component type `kind` with Sunrise: a namespaced id
+    whose namespace can be a package's (`[a-z0-9_]`, not a device name) and is not reserved
+    (Sunrise refuses `minecraft` component types at start, `sunrise_protocol::item::custom`)."""
+    namespace, _, path = kind.partition(":")
+    return (
+        re.fullmatch(r"[a-z0-9_./-]+", path) is not None
+        and PACKAGE_ID.match(namespace) is not None
+        and namespace not in RESERVED_IDS
+        and namespace not in SUNRISE_RESERVED_NAMESPACES
+        and namespace != SERVING_MOD
+    )
 
 
 def _declaration_bytes(file: dict) -> bytes:
@@ -2019,8 +2087,9 @@ def bake_jar(
     }
     declared = set()
     loaded_mods = list(dict.fromkeys(i for kind, i, _ in declarations if kind == "mod"))
+    component_types = {i for kind, i, _ in declarations if kind == "component-type"}
     for kind, declaration_id, file in declarations:
-        if kind == "mod":
+        if kind in ("mod", "component-type"):
             continue
         if kind == "menu-refused":
             # The live-menu bridge opens a jar's menu only as a declared Sunrise menu type; a
@@ -2055,15 +2124,30 @@ def bake_jar(
             bake.skip("declared more than once in the jar", declaration_id)
             continue
         declared.add(declared_key)
+        if kind == "item":
+            file = _registered_components(file, component_types, declaration_id, bake)
         declaration_path = f"data/{namespace}/sunrise/{kind}/{path}.json"
         by_namespace.setdefault(namespace, []).append(
             (declaration_path, _declaration_bytes(file))
         )
 
+    # The namespaces of the jar's component types: each must be in a package that names the mod
+    # in `served_by`, even with no file of its own (then the package is a manifest, or the
+    # namespace rides in the jar's own package's `namespaces`), or the mod does not register the
+    # type and Sunrise refuses every item that names it.
+    served = {
+        kind.split(":", 1)[0]
+        for kind in component_types
+        if _servable_component_type(kind)
+    }
+    for namespace in sorted(served):
+        by_namespace.setdefault(namespace, [])
     bake.namespaces = sorted(by_namespace)
     grouped = _mod_packages(loaded_mods, by_namespace, bake)
     if grouped is not None:
-        return _write_mod_packages(jar, out, claimed, target, bake, grouped, by_namespace, shared)
+        return _write_mod_packages(
+            jar, out, claimed, target, bake, grouped, by_namespace, shared, served
+        )
     if not bake.namespaces:
         if shared:
             bake.skip(
@@ -2091,7 +2175,9 @@ def bake_jar(
         if namespace == bake.namespaces[0]:
             files = files + shared
         package_path = out / f"{namespace}{target.extension}"
-        size = write_package(package_path, namespace, jar.name, files, target)
+        size = write_package(
+            package_path, namespace, jar.name, files, target, served=namespace in served
+        )
         prefix = f"data/{namespace}/{target.declarations}/"
         package = Package(
             id=namespace,
@@ -2180,10 +2266,13 @@ def _write_mod_packages(
     grouped: list[tuple[str, list[str]]],
     by_namespace: dict[str, list[tuple[str, bytes]]],
     shared: list[tuple[str, bytes]],
+    served: set[str] | None = None,
 ) -> JarBake:
     """Writes `_mod_packages`' packages: each mod's own namespace and the namespaces it carries,
     the vanilla and `c` tag additions in the jar's own package. A namespace another jar of the
-    run already baked refuses the package that would carry it, as one per namespace did."""
+    run already baked refuses the package that would carry it, as one per namespace did. A
+    package that owns a namespace of `served` (the jar's component types') names the mod in
+    `served_by`."""
     for index, (mod_id, extra) in enumerate(grouped):
         owned = [mod_id, *extra]
         taken = next((namespace for namespace in owned if namespace in claimed), None)
@@ -2197,7 +2286,15 @@ def _write_mod_packages(
         if index == 0:
             files = files + shared
         package_path = out / f"{mod_id}{target.extension}"
-        size = write_package(package_path, mod_id, jar.name, files, target, namespaces=extra)
+        size = write_package(
+            package_path,
+            mod_id,
+            jar.name,
+            files,
+            target,
+            namespaces=extra,
+            served=any(namespace in (served or ()) for namespace in owned),
+        )
         prefixes = [f"data/{namespace}/{target.declarations}/" for namespace in owned]
 
         def declared(kind: str) -> int:

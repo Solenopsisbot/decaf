@@ -226,6 +226,82 @@ class BakeTests(unittest.TestCase):
             item = json.loads(archive.read("data/ruby_mod/sunrise/item/ruby.json"))
         self.assertEqual(item["components"], lore)
 
+    def test_a_jars_component_types_are_served_and_its_items_name_only_registered_ones(self):
+        """docs/java-item-parts.md steps 1 and 2: the probe's `component_types` are the jar's own
+        NBT component types, which the mod registers through `Hooks::component_types`. The package
+        owning each one's namespace names the mod in `served_by` (a manifest-only nested mod's
+        included), and an item keeps its default for such a type; a component of a type no one
+        registered is left out with a reason, since Sunrise would refuse the whole package."""
+        pouch = {"content": [], "size_multiplier": 4}
+        lore = [{"translate": "item.ruby_mod.pouch.hint", "color": "gray"}]
+        report_text = json.loads(
+            declarations(
+                items=[
+                    {
+                        "id": "ruby_mod:pouch",
+                        "file": {
+                            **ITEM,
+                            "components": {
+                                "gem_api:pouch_contents": pouch,
+                                "minecraft:lore": lore,
+                                "other_api:missing": {"x": 1},
+                            },
+                        },
+                    }
+                ]
+            )
+        )
+        report_text["content"]["mods"] = ["ruby_mod", "gem_api"]
+        report_text["content"]["component_types"] = ["gem_api:pouch_contents"]
+        self.probe = fake_probe(self.root, json.dumps(report_text))
+        make_jar(self.mods / "ruby_mod.jar", ruby_jar())
+        report = self.bake()
+
+        mods_dir = self.game / "sunrise-mods"
+        with zipfile.ZipFile(mods_dir / "gem_api.smod") as archive:
+            self.assertEqual(archive.namelist(), ["sunrise-mod.toml"])
+            nested = tomllib.loads(archive.read("sunrise-mod.toml").decode())
+        self.assertEqual(nested["served_by"], "horizon_java")
+        with zipfile.ZipFile(mods_dir / "ruby_mod.smod") as archive:
+            own = tomllib.loads(archive.read("sunrise-mod.toml").decode())
+            item = json.loads(archive.read("data/ruby_mod/sunrise/item/pouch.json"))
+        self.assertNotIn("served_by", own)
+        self.assertEqual(
+            item["components"], {"gem_api:pouch_contents": pouch, "minecraft:lore": lore}
+        )
+        skipped = {entry["reason"]: entry["paths"] for entry in report["jars"][0]["skipped"]}
+        self.assertEqual(
+            skipped["item component other_api:missing: no registered component type of that id"],
+            ["ruby_mod:pouch"],
+        )
+
+    def test_a_component_types_namespace_without_files_still_gets_a_served_package(self):
+        """Without the probe's `mods` (one package per namespace), a component type's namespace
+        that holds no file of the jar's is still a package, so the mod is told to serve it."""
+        report_text = json.loads(
+            declarations(
+                items=[
+                    {
+                        "id": "ruby_mod:pouch",
+                        "file": {**ITEM, "components": {"gem_api:pouch_contents": {"content": []}}},
+                    }
+                ]
+            )
+        )
+        report_text["content"]["component_types"] = ["gem_api:pouch_contents", "minecraft:bad"]
+        self.probe = fake_probe(self.root, json.dumps(report_text))
+        make_jar(self.mods / "ruby_mod.jar", ruby_jar())
+        self.bake()
+        mods_dir = self.game / "sunrise-mods"
+        self.assertEqual(
+            sorted(path.name for path in mods_dir.iterdir()), ["gem_api.smod", "ruby_mod.smod"]
+        )
+        with zipfile.ZipFile(mods_dir / "gem_api.smod") as archive:
+            manifest = tomllib.loads(archive.read("sunrise-mod.toml").decode())
+        self.assertEqual(manifest["served_by"], "horizon_java")
+        with zipfile.ZipFile(mods_dir / "ruby_mod.smod") as archive:
+            self.assertNotIn("served_by", tomllib.loads(archive.read("sunrise-mod.toml").decode()))
+
     def test_the_horizon_target_keeps_an_item_without_its_component_patch(self):
         lore = {"minecraft:lore": ["Ruby"]}
         self.probe = fake_probe(

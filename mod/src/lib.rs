@@ -85,18 +85,19 @@ use mod_api::{
     AttackEntityEvent, Authority, BlockState, BlocksEvent, BreakBlockEvent, ClientHost,
     ClientLevelLoadEvent, ClientLevelUnloadEvent, ClientPlayerCloneEvent,
     ClientPlayerLoggingOutEvent, ClientSetupContext, ClientSetupEvent, ClientStoppingEvent,
-    Command, CommandArgumentValue, CommandInvocation, CommandSource, ConfigFileError, ConfigPath,
-    DamageContainerView, DimensionKey, EntityInteractEvent, EntityJoinLevelEvent,
-    EntityLeaveLevelEvent, EntityRef, Flow, GameRuleChangedEvent, Hand, HitHost, Hooks, Host,
-    HostSide, HurtSource, InteractionResult, ItemsEvent, LeftClickBlockEvent, LevelDimension,
-    LevelLoadEvent, LevelRef, LevelSide, LevelTickPostEvent, LevelTickPreEvent, LevelUnloadEvent,
-    LivingDamagePostEvent, LivingDeathEvent, LivingDeathPostEvent, LivingIncomingDamageEvent,
-    PlayerChangedDimensionEvent, PlayerCloneEvent, PlayerDestroyedBlockEvent, PlayerDiedEvent,
-    PlayerLoggedInEvent, PlayerLoggedOutEvent, PlayerRef, PlayerRespawnedEvent,
-    PlayerTickPostEvent, PlayerTickPreEvent, RegisterCommandsEvent, Registrar, RegistrationContext,
-    RightClickBlockEvent, RightClickItemEvent, ServerAboutToStartEvent, ServerHost,
-    ServerStartedEvent, ServerStartingEvent, ServerStoppedEvent, ServerStoppingEvent,
-    ServerTickEvent, ServerTickPhase, StateForPlacementEvent, Text,
+    Command, CommandArgumentValue, CommandInvocation, CommandSource, ComponentTypesEvent,
+    ConfigFileError, ConfigPath, DamageContainerView, DimensionKey, EntityInteractEvent,
+    EntityJoinLevelEvent, EntityLeaveLevelEvent, EntityRef, Flow, GameRuleChangedEvent, Hand,
+    HitHost, Hooks, Host, HostSide, HurtSource, InteractionResult, ItemsEvent, LeftClickBlockEvent,
+    LevelDimension, LevelLoadEvent, LevelRef, LevelSide, LevelTickPostEvent, LevelTickPreEvent,
+    LevelUnloadEvent, LivingDamagePostEvent, LivingDeathEvent, LivingDeathPostEvent,
+    LivingIncomingDamageEvent, PlayerChangedDimensionEvent, PlayerCloneEvent,
+    PlayerDestroyedBlockEvent, PlayerDiedEvent, PlayerLoggedInEvent, PlayerLoggedOutEvent,
+    PlayerRef, PlayerRespawnedEvent, PlayerTickPostEvent, PlayerTickPreEvent,
+    RegisterCommandsEvent, Registrar, RegistrationContext, RightClickBlockEvent,
+    RightClickItemEvent, ServerAboutToStartEvent, ServerHost, ServerStartedEvent,
+    ServerStartingEvent, ServerStoppedEvent, ServerStoppingEvent, ServerTickEvent, ServerTickPhase,
+    StateForPlacementEvent, Text,
 };
 use runtime::brigadier::{
     self, ArgumentKind, CommandInvocation as RuntimeInvocation, CommandMessage, CommandOutcome,
@@ -702,6 +703,16 @@ impl Hooks for HorizonJava {
     fn blocks(&self, context: &RegistrationContext, event: &mut BlocksEvent<'_>) {
         let mut state = self.lock();
         content::declare_blocks(&mut state, context, event);
+        drop(state);
+        self.refresh_game_hook_plan_bits();
+    }
+
+    /// The data component types the jars built and registered with a persistent codec, as
+    /// Sunrise's NBT component types (`content::declare_component_types`). Asked once before
+    /// content loads, so a baked package's item may name one in its default `components`.
+    fn component_types(&self, context: &RegistrationContext, event: &mut ComponentTypesEvent<'_>) {
+        let mut state = self.lock();
+        content::declare_component_types(&mut state, context, event);
         drop(state);
         self.refresh_game_hook_plan_bits();
     }
@@ -3673,9 +3684,18 @@ fn load_jar(
     }
     let mut calls = 0;
     let mut ran = 0;
-    let mut failures = Vec::new();
     let mut failed_classes = Vec::new();
-    for (kind, entry) in &entrypoints {
+    // The Mixin callbacks a real server runs as the game bootstraps its classes, before any
+    // entrypoint (`runtime::bootstrap_mixins`). One that throws is the game not starting: no
+    // entrypoint runs, and the jar is refused below.
+    let mut failures = match caught(&format!("{id} bootstrap Mixin callbacks"), || {
+        jar.run_bootstrap_static_injectors(&mut host, &runtime::ExecutionBudget::within(JAR_BUDGET))
+    }) {
+        Ok(failures) => failures,
+        Err(panic) => vec![format!("bootstrap Mixin callbacks panicked: {panic}")],
+    };
+    let booted = failures.is_empty();
+    for (kind, entry) in entrypoints.iter().filter(|_| booted) {
         if let Some(adapter) = entry.adapter.as_deref() {
             failures.push(format!(
                 "{}: entrypoint adapter {adapter} is not supported by the native path",
