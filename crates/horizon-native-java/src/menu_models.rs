@@ -563,6 +563,28 @@ pub(crate) fn allocate_inventory(states: &mut States, next_id: &mut u64, player:
     marker(key)
 }
 
+/// A vanilla `Slot(container, index, 0, 0)` with no menu: the clicked slot an item part's
+/// click override reads (`item_parts.rs`). `live_menu.rs` runs its 26.3 bodies.
+pub(crate) fn allocate_plain_slot(
+    states: &mut States,
+    next_id: &mut u64,
+    container: Value,
+    index: i32,
+) -> Value {
+    let slot = marker(next_key(next_id, SLOT));
+    register_slot(
+        states,
+        &slot,
+        container,
+        index,
+        0,
+        0,
+        None,
+        ScreenSlotKind::PlayerInventory,
+    );
+    slot
+}
+
 pub(crate) fn simple_menu_provider_constructor(states: &States, provider: &Value) -> Option<Value> {
     let key = expect_ref(provider)?;
     match states.get(key) {
