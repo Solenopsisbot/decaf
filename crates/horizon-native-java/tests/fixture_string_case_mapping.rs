@@ -143,7 +143,11 @@ fn expected(method: &str) -> &'static str {
 }
 
 struct Run {
+    /// The text the row answered, if it answered text.
     text: Option<String>,
+    /// A non-text result: the counted `String` a counted call leaves (a
+    /// `String#n` jar-object marker), never a value Java could return here.
+    marker: Option<Value>,
     unknown: Vec<(String, usize)>,
     error: Option<NativeError>,
 }
@@ -160,17 +164,29 @@ fn run(fixture: &javac_fixture::Fixture, method: &str) -> Run {
         &[],
         &mut host,
     );
-    let text = match &result {
-        Ok(Value::Ref(Some(text))) => Some(text.clone()),
-        Ok(other) => panic!("{method} did not return a string: {other:?}"),
-        Err(_) => None,
+    let (text, marker) = match &result {
+        Ok(Value::Ref(Some(text))) => (Some(text.clone()), None),
+        Ok(marker @ Value::Host(_)) => (None, Some(marker.clone())),
+        Ok(other) => panic!("{method} returned neither a string nor a marker: {other:?}"),
+        Err(_) => (None, None),
     };
     Run {
         text,
+        marker,
         unknown: host.unknown_host_calls(),
         error: result.err(),
     }
 }
+
+/// The rows whose receiver is a `String` constant over a lone surrogate:
+/// loading it is counted (`String#ldc`, #447/#658) and yields a counted
+/// `String`, so the case mapping and `row` see a counted marker, not text.
+const LONE_SURROGATE: &[&str] = &[
+    "loneLowSurrogateUpper",
+    "loneLowSurrogateLower",
+    "loneHighSurrogateUpper",
+    "loneHighSurrogateLower",
+];
 
 /// The unknown-host-call key one row's case method is counted under.
 fn counted_key(method: &str) -> String {
@@ -207,16 +223,47 @@ fn answered_case_mappings_match_java_25_with_nothing_counted() {
     }
 }
 
+/// A counted row never answers text. How the run then ends depends on what
+/// the counted call left behind, and neither ending is Java's (every row
+/// prints normally on Java 25, `java25.txt`):
+///
+/// - A text receiver (`"É".toUpperCase()`): the host's neutral result is
+///   `null`, so `row` stops at `text.length()` and the run fails.
+/// - A lone-surrogate constant (`"\uDC00".toUpperCase()`): the load itself is
+///   counted and yields a counted `String` (#658), the case mapping of it is
+///   counted, and `row` of a counted `String` is counted in turn (#423), so
+///   the run ends with that counted marker. It must be the marker, never text.
 #[test]
 fn counted_case_mappings_are_never_answered() {
     let fixture = javac_fixture::Fixture::build("string-case-mapping", SOURCES);
     for method in COUNTED {
         let run = run(&fixture, method);
         assert!(
-            run.error.is_some(),
+            run.text.is_none(),
             "{method}: answered {:?} although it must stay counted",
             run.text
         );
+        let lone = LONE_SURROGATE.contains(method);
+        if lone {
+            assert!(
+                run.marker.is_some(),
+                "{method}: a counted String's case mapping must leave its counted marker, got {:?}",
+                run.error
+            );
+            assert!(
+                run.unknown
+                    .iter()
+                    .any(|(key, _)| key == "java/lang/String#ldc()Ljava/lang/String;"),
+                "{method}: the lone-surrogate constant's load must be counted, got {:#?}",
+                run.unknown
+            );
+        } else {
+            assert!(
+                run.error.is_some(),
+                "{method}: returned {:?} instead of failing on the counted call's null",
+                run.marker
+            );
+        }
         assert!(
             !run.unknown.is_empty(),
             "{method}: no unknown host calls although it must stay counted"
