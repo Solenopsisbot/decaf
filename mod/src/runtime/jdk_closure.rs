@@ -221,8 +221,15 @@ mod tests {
         );
     }
 
-    /// Rerun the generator when the JDK at hand is the one the table records (OpenJDK 25.0.5):
-    /// its output must be the committed file, byte for byte.
+    /// Rerun the generator when the JDK at hand is the release the table records (OpenJDK
+    /// 25.0.5) or a vendor respin of it: its output must be the committed file, byte for byte,
+    /// except that a respin's header names the respin.
+    ///
+    /// A respin is `java.version` with a fourth number: Temurin 25.0.5.1+2 reports `25.0.5.1`
+    /// for the same OpenJDK 25.0.5 update. Hosted runners carry either 25.0.5+8 or 25.0.5.1+2
+    /// for `java-version: 25`, and both print the same rows (checked 2026-11-26); before this
+    /// the guard let a respin run but compared its header too, so main failed on whichever
+    /// runner had the respin (351849f0d, 68d2d80b6) and passed on the next.
     #[test]
     fn the_table_is_the_generators_output() {
         let java = std::env::var_os("JAVA_HOME")
@@ -234,12 +241,30 @@ mod tests {
         let Ok(version) = version else {
             return;
         };
-        let recorded = DATA.lines().next().unwrap_or_default();
-        let here = String::from_utf8_lossy(&version.stderr);
-        if !here.contains("java.version = 25.0.5") || !recorded.contains("Java 25.0.5") {
-            eprintln!("skipped: the table records {recorded:?}, this JDK is not 25.0.5");
+        let header = DATA.lines().next().unwrap_or_default();
+        let recorded = header
+            .strip_prefix("# Java ")
+            .and_then(|rest| rest.split(' ').next())
+            .expect("the table's first line is `# Java <java.version> ...`");
+        let settings = String::from_utf8_lossy(&version.stderr);
+        let here = settings
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("java.version = "))
+            .unwrap_or_default();
+        let respin = here
+            .strip_prefix(recorded)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if here != recorded && !respin {
+            eprintln!("skipped: the table records Java {recorded}, this JDK is {here:?}");
             return;
         }
+        // The generator prints `java.version` in its header; every other line is the JDK's.
+        let expected = DATA.replacen(
+            &format!("# Java {recorded} "),
+            &format!("# Java {here} "),
+            1,
+        );
         let source = [
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("tests/fixtures/jdk_supertypes/JdkSupertypes.java"),
@@ -255,6 +280,6 @@ mod tests {
             .output()
             .expect("java runs the generator");
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), DATA);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
     }
 }
