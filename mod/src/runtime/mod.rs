@@ -4111,7 +4111,8 @@ pub struct StdHost {
     /// (`collection_store.rs`).
     mutable_collections: collection_store::CollectionStore,
     /// Opaque `Consumer<Component>` sinks while an item's own `appendHoverText`
-    /// runs, keyed by `HostKind::TooltipConsumer` handle key.
+    /// runs, keyed by `HostKind::TooltipConsumer` handle key (`tooltip-consumer/<n>`:
+    /// never an allocation key, see [`Self::tooltip_sink`]).
     tooltip_sinks: BTreeMap<String, Vec<Value>>,
     guava_tables: guava_table::Store,
     pub(crate) recipes: recipe_models::RecipeState,
@@ -4138,6 +4139,9 @@ pub struct StdHost {
     shared_empties: BTreeMap<&'static str, String>,
     /// Explicitly seeded Minecraft RandomSource state, keyed by its host handle.
     random_sources: BTreeMap<String, random_source::State>,
+    /// The next random source's number (`random_source.rs`): only ever grows, so a source
+    /// made after another was collected or forgotten never takes a live one's key.
+    next_random_source: u64,
     random_seed_uniquifier: u64,
     random_time_origin: std::time::Instant,
     /// The collections Java hands out as the same object on every call (a
@@ -4551,6 +4555,7 @@ impl StdHost {
             component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             random_sources: BTreeMap::new(),
+            next_random_source: 0,
             random_seed_uniquifier: 8_682_522_807_148_012,
             random_time_origin: std::time::Instant::now(),
             empty_collections: std::collections::BTreeSet::new(),
@@ -4726,11 +4731,14 @@ impl StdHost {
         self.recipe_sync_serializers.keys().cloned().collect()
     }
 
-    /// Count a bridge-level refusal that has no Java MethodRef to pass through the normal host path.
+    /// Count a bridge-level refusal that has no Java MethodRef to pass through the normal host
+    /// path, under `bridge: <tag>`. Every embedder bridge counts its own tags here (a menu
+    /// screen Sunrise cannot draw, a tooltip line it refuses, a game hook re-entered during a
+    /// dispatch): the tag says which, the prefix only that a bridge counted it.
     pub fn note_unknown_game_hook(&mut self, method: &str) {
         *self
             .unknown_host_calls
-            .entry(format!("game-hook re-entry: {method}"))
+            .entry(format!("bridge: {method}"))
             .or_default() += 1;
     }
 
@@ -5154,7 +5162,13 @@ impl StdHost {
         static NEXT_TOOLTIP_SINK: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(0);
         let serial = NEXT_TOOLTIP_SINK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let key = format!("tooltip-consumer#{serial}");
+        // `/`, not `#`: a `<text>#<digits>` key reads as a jar object's allocation key, and
+        // the collector took this counter's number (one per tooltip frame, nothing to do with
+        // the heap's) as the heap's limit, freeing the numbers the heap was about to hand out:
+        // after enough hovers every new object read as "collected while still reachable"
+        // (#609, Runes round 2 bug 1). The sink is no collectable object; while it is in
+        // `tooltip_sinks` (only during its `appendHoverText`) the lines it holds are roots.
+        let key = format!("tooltip-consumer/{serial}");
         self.tooltip_sinks.insert(key.clone(), Vec::new());
         Value::Host(HostRef::new(HostKind::TooltipConsumer, key))
     }

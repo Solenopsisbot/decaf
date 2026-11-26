@@ -174,15 +174,25 @@ impl StdHost {
     }
 
     fn random_handle(&mut self, state: State) -> Value {
-        let key = format!("{}#{}", state.class(), self.random_sources.len());
+        let key = self.next_random_key(state.class());
         self.random_sources.insert(key.clone(), state);
         Value::Host(HostRef::new(HostKind::RandomSource, key))
     }
 
     fn java_random_handle(&mut self, state: State) -> Value {
-        let key = format!("{JAVA_RANDOM}#{}", self.random_sources.len());
+        let key = self.next_random_key(JAVA_RANDOM);
         self.random_sources.insert(key.clone(), state);
         crate::jar_object::handle(key)
+    }
+
+    /// A new source's key, `<class>#<n>` from a counter that only grows. Numbering by the
+    /// table's size reused a live source's key once another was collected or forgotten
+    /// (`#0`, `#1`; `#0` goes; the next is `#1` again): the new source overwrote the live
+    /// one's state, and two Java objects drew from one sequence.
+    fn next_random_key(&mut self, class: &str) -> String {
+        let number = self.next_random_source;
+        self.next_random_source = number.saturating_add(1);
+        format!("{class}#{number}")
     }
 
     fn random_key(value: &Value) -> Option<String> {
@@ -773,6 +783,32 @@ mod tests {
             host.unknown_host_calls(),
             vec![("java/lang/Double#doubleToRawLongBits(D)J".into(), 1),]
         );
+    }
+
+    /// A source made after another was forgotten never takes a live source's key: numbered by
+    /// the table's size, the third source here was `#1` again and overwrote the second's state.
+    #[test]
+    fn a_new_source_never_reuses_a_live_sources_key() {
+        let mut host = StdHost::new();
+        let key = |value: &Value| match value {
+            Value::Host(handle) => handle.key().to_owned(),
+            other => panic!("not a host handle: {other:?}"),
+        };
+        let first = host.random_seeded(LEGACY, 1).unwrap();
+        let second = host.random_seeded(LEGACY, 2).unwrap();
+        let before = host.draw_random_handle_long(&second);
+        host.forget_random_state(&first);
+        let third = host.random_seeded(LEGACY, 3).unwrap();
+        assert_ne!(key(&third), key(&second));
+        // The second source keeps its own sequence: a fresh `LegacyRandomSource(2)`'s next.
+        let mut fresh = StdHost::new();
+        let replay = fresh.random_seeded(LEGACY, 2).unwrap();
+        fresh.draw_random_handle_long(&replay);
+        assert_eq!(
+            host.draw_random_handle_long(&second),
+            fresh.draw_random_handle_long(&replay)
+        );
+        assert!(before.is_some());
     }
 
     #[test]

@@ -67,7 +67,7 @@ file and that the folder holds only `.rs` and `.toml` files.
 
 The Sunrise build plays the level sounds a hook records through its `sound.rs`. That module is not
 ported here, so a recorded level sound is never played on the official Horizon: it is counted as an
-unknown host call (`game-hook re-entry: level sound has no bridge on the official Horizon`) on the
+unknown host call (`bridge: level sound has no bridge on the official Horizon`) on the
 jar's host, never dropped silently.
 
 ## In-game proof (official launcher 0.2.95, Nightly 2026-11-20 at the pin)

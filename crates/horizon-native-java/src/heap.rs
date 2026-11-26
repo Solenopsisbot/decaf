@@ -1338,6 +1338,13 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
         }
     }
     host.freed_objects.rebuild(limit, live);
+    // Every number below `limit` is now freed or live, so the heap's next object starts at
+    // `limit` at the earliest: a number this collection freed is never handed out again,
+    // whatever named it. A host key that spells an allocation key (`<text>#<n>`) with a number
+    // of its own counter raises `limit` past the heap's next object; without this, each object
+    // the heap then allocated read as collected on its first unwritten field (#609, Runes
+    // round 2 bug 1). Numbers are no answer Java sees (`identityHashCode` is counted).
+    heap.next_object = heap.next_object.max(limit);
     host.freed_menu_objects
         .rebuild(host.next_menu_object as usize, live_menu);
     // What the host keeps for an object with no row of its own (a
@@ -1774,6 +1781,61 @@ mod tests {
         assert_eq!(freed.ranges(), 2);
     }
 
+    /// A collectable key numbered past the heap's next object (a host key that spells an
+    /// allocation key with a counter of its own) raises the collection's limit; the heap's next
+    /// object follows it, so a number the collection freed is never handed out again (#609,
+    /// Runes round 2 bug 1: every object built after it read as collected).
+    #[test]
+    fn the_next_object_never_starts_inside_the_freed_numbers() {
+        let mut host = StdHost::new();
+        let mut heap = JavaHeap {
+            next_object: 3,
+            ..Default::default()
+        };
+        heap.fields.insert(field("demo/Item#1", "x"), Value::Int(1));
+        host.persistent_static_fields
+            .insert("demo/Mod#ITEMLdemo/Item;".into(), text("demo/Item#1"));
+        // Unreached, numbered by something other than this heap.
+        heap.fields
+            .insert(field("demo/Elsewhere#50", "x"), Value::Int(2));
+        collect(&mut heap, &mut host, &[]);
+        assert!(host.freed_objects.holds_key("demo/Elsewhere#50"));
+        assert!(!host.freed_objects.holds_key("demo/Item#1"));
+        assert_eq!(heap.next_object, 51);
+        let next = format!("demo/Screen#{}", heap.next_object);
+        assert!(!host.freed_objects.holds_key(&next), "{next} is born freed");
+    }
+
+    /// A tooltip sink is no allocation key: live during its `appendHoverText`'s store, its
+    /// serial (one per tooltip frame, process-wide) never moves the heap's limit, and the lines
+    /// it holds are roots.
+    #[test]
+    fn a_live_tooltip_sink_neither_moves_the_limit_nor_loses_its_lines() {
+        let (mut host, mut heap) = graph("demo/Node#1");
+        heap.next_object = 5;
+        // A line object the sink holds and nothing else reaches.
+        heap.fields
+            .insert(field("demo/Line#4", "text"), text("hint"));
+        let sink = host.tooltip_sink();
+        let Value::Host(handle) = &sink else {
+            panic!("{sink:?}")
+        };
+        assert!(
+            crate::jar_object::parse_key(handle.key()).is_none(),
+            "{} spells an allocation key",
+            handle.key()
+        );
+        host.tooltip_sinks
+            .get_mut(handle.key())
+            .unwrap()
+            .push(crate::jar_object::handle("demo/Line#4".into()));
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(heap.next_object, 5);
+        assert!(!host.freed_objects.holds_key("demo/Line#4"));
+        assert!(heap.fields.contains_key(&field("demo/Line#4", "text")));
+        assert_eq!(host.take_tooltip_sink(&sink).len(), 1);
+    }
+
     /// Every `#<digits>` a text holds, embedded keys included.
     #[test]
     fn numbers_are_read_from_every_key_a_text_names() {
@@ -2135,6 +2197,7 @@ mod tests {
             "next_voxel_shape",
             "next_shape_extraction",
             "next_menu_object",
+            "next_random_source",
             "next_placement_handle",
             "properties",
             "environment",
