@@ -92,6 +92,13 @@ public final class LevelRandoms {
     return kept == level.getRandom();
   }
 
+  /** `consumeCount(count)`, then one draw. */
+  public static int consume(Level level, int count) {
+    RandomSource random = level.getRandom();
+    random.consumeCount(count);
+    return random.nextInt();
+  }
+
   /** The level's stream can't be reseeded: `setSeed` is counted, and the next draw goes on. */
   public static int reseed(Level level) {
     RandomSource random = level.getRandom();

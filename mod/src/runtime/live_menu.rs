@@ -2443,24 +2443,31 @@ fn record(rt: &mut Runtime<'_, impl Host>, effect: LiveMenuEffect) -> R<()> {
 }
 
 /// The allow-list of recorded effects whose carrying out draws no level's
-/// `Level.random`: packets, criteria, stats and notices. A `Player.drop`
-/// builds an `ItemEntity` (`new ItemEntity(level, x, y, z, stack)` draws
-/// `level.random.nextDouble()` twice) and is not on it. A new effect must
-/// take a side here.
+/// `Level.random`: packets, stats and notices (`level_random.rs`). Not on it:
+/// - `InventoryChangedCriterion`, `RecipeCrafted` and `AwardRecipes`: a
+///   criterion (a recipe unlock fires `RECIPE_UNLOCKED`) can complete an
+///   advancement at once, and `AdvancementRewards.grant` rolls its loot with
+///   `LootContext$Builder.create(Optional.empty())`, which falls back to
+///   `ServerLevel.getRandom()`;
+/// - `Drop`: in 26.3 a drop draws only entity randoms (`ItemEntity`'s own and
+///   the player's, javap), but the embedder's drop path isn't verified to
+///   leave the level stream alone.
+///
+/// A new effect must take a side here.
 fn draws_no_level_random(effect: &LiveMenuEffect) -> bool {
     match effect {
         LiveMenuEffect::InitialData { .. }
         | LiveMenuEffect::SlotChanged { .. }
         | LiveMenuEffect::CarriedChanged { .. }
         | LiveMenuEffect::DataChanged { .. }
-        | LiveMenuEffect::InventoryChangedCriterion { .. }
         | LiveMenuEffect::AwardStat { .. }
-        | LiveMenuEffect::RecipeCrafted { .. }
-        | LiveMenuEffect::AwardRecipes { .. }
         | LiveMenuEffect::InventorySlotSent { .. }
         | LiveMenuEffect::Closed { .. }
         | LiveMenuEffect::SlotTaken { .. } => true,
-        LiveMenuEffect::Drop { .. } => false,
+        LiveMenuEffect::InventoryChangedCriterion { .. }
+        | LiveMenuEffect::RecipeCrafted { .. }
+        | LiveMenuEffect::AwardRecipes { .. }
+        | LiveMenuEffect::Drop { .. } => false,
     }
 }
 
@@ -5942,6 +5949,7 @@ impl NativeJar {
             facts: Some(facts.clone()),
             live_effects: Vec::new(),
             wrapped_click_cause: None,
+            inventory_start: host.inventory_baseline(Some(facts)),
         });
         if closing {
             // The window is gone; the menu stays installed until `doCloseContainer` offset 19.
@@ -6256,6 +6264,7 @@ impl NativeJar {
             facts: None,
             live_effects: Vec::new(),
             wrapped_click_cause: None,
+            inventory_start: None,
         });
         let roots = [menu_type.clone(), level, player, inventory.clone()];
         let mut refusal = None;

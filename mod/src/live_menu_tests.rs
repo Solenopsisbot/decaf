@@ -2378,22 +2378,20 @@ fn a_disconnect_drops_the_inputs_in_slot_order() {
     });
 }
 
-/// The End's return replaces the player (`PlayerList.respawn` removes the old one with
-/// `CHANGED_DIMENSION` first): the Java menu closes as that old player, removed but for a
-/// dimension change, so what it held goes back into the inventory the new player kept, and
-/// nothing drops.
-/// A Java `removed` that draws `level.getRandom()` after vanilla's `clearContainer` has dropped
-/// the inputs (a disconnect: `dropOrPlaceInInventory` drops for a player that left). Vanilla's
-/// drop builds its `ItemEntity` there, drawing `level.random` twice, before Java's draw;
-/// Sunrise spawns the stack after the call returns, so its draws come after Java's. The draw
-/// is still Sunrise's live stream, but its order isn't vanilla's: counted. A live close puts
-/// the inputs back instead (no drop), and the same draw is exact.
+/// A Java `removed` that draws `level.getRandom()` after vanilla's `removed` has handed the
+/// inputs on (`clearContainer`, `dropOrPlaceInInventory`). Decaf leaves both to Sunrise after
+/// the call: on a disconnect a drop (an effect whose Sunrise path isn't verified to leave the
+/// level stream alone), on a live close a write of the player's inventory (whose
+/// `inventory_changed` can complete an advancement whose reward loot draws `level.random`).
+/// Either way vanilla's order of the two isn't claimed: the draw is still Sunrise's live stream,
+/// but counted. With nothing in the inputs, `removed` hands nothing on and the same draw is
+/// exact.
 #[test]
-fn a_level_random_draw_after_a_deferred_drop_is_counted() {
+fn a_level_random_draw_after_deferred_work_is_counted() {
     use mod_api::RandomSource as _;
     on_a_big_stack("live-menu-draw-after-drop", || {
         let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
-        for how in ["close", "disconnect"] {
+        for how in ["empty", "close", "disconnect"] {
             let java = java_with(Arc::clone(&jar));
             with_bridge(&java, BENCH_MENUS, || {
                 let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
@@ -2409,10 +2407,12 @@ fn a_level_random_draw_after_a_deferred_drop_is_counted() {
                     ),
                     Some(InteractionResult::Consume)
                 );
-                // One cobblestone into the base; the other four put back.
-                assert!(host.click(hotbar(3, 0), 0, 0));
-                assert!(host.click(0, 1, 0));
-                assert!(host.click(hotbar(3, 0), 0, 0));
+                if how != "empty" {
+                    // One cobblestone into the base; the other four put back.
+                    assert!(host.click(hotbar(3, 0), 0, 0));
+                    assert!(host.click(0, 1, 0));
+                    assert!(host.click(hotbar(3, 0), 0, 0));
+                }
                 host.tick();
                 assert_eq!(counted(&java), [], "{how}");
                 if how == "disconnect" {
@@ -2432,30 +2432,42 @@ fn a_level_random_draw_after_a_deferred_drop_is_counted() {
                 );
                 let counted = counted(&java);
                 eprintln!("{how} counted: {counted:?}");
-                if how == "disconnect" {
-                    assert_eq!(host.world.spawned.len(), 1, "{how}");
-                    assert_eq!(
-                        counted,
-                        [
-                            ("game-hook re-entry: sunrise#live_menu:drop".to_owned(), 1),
-                            (
-                                "game-hook re-entry: sunrise#live_menu:drop_without_player_throw"
-                                    .to_owned(),
-                                1
-                            ),
-                            (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1),
-                        ]
-                    );
-                } else {
-                    assert!(host.world.spawned.is_empty());
-                    assert_eq!(host.held(), ["5 minecraft:cobblestone"]);
-                    assert_eq!(counted, []);
+                let after = (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1);
+                match how {
+                    "disconnect" => {
+                        assert_eq!(host.world.spawned.len(), 1);
+                        assert_eq!(
+                            counted,
+                            [
+                                ("game-hook re-entry: sunrise#live_menu:drop".to_owned(), 1),
+                                (
+                                    "game-hook re-entry: sunrise#live_menu:drop_without_player_throw"
+                                        .to_owned(),
+                                    1
+                                ),
+                                after,
+                            ]
+                        );
+                    }
+                    "close" => {
+                        assert!(host.world.spawned.is_empty());
+                        assert_eq!(host.held(), ["5 minecraft:cobblestone"]);
+                        assert_eq!(counted, [after]);
+                    }
+                    _ => {
+                        assert_eq!(host.held(), ["5 minecraft:cobblestone"]);
+                        assert_eq!(counted, []);
+                    }
                 }
             });
         }
     });
 }
 
+/// The End's return replaces the player (`PlayerList.respawn` removes the old one with
+/// `CHANGED_DIMENSION` first): the Java menu closes as that old player, removed but for a
+/// dimension change, so what it held goes back into the inventory the new player kept, and
+/// nothing drops.
 #[test]
 fn the_ends_return_places_back_as_the_old_player() {
     on_a_big_stack("live-menu-end-return", || {
@@ -2676,8 +2688,13 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             // `RECIPE_CRAFTED` trigger has no Sunrise call (vanilla triggers aren't lent), and
             // the take's `menu_slot_take` is the engine's to raise: both counted.
             //
+            //
             // With `getRandom()` answered, `onTake` runs to its end (no `NullPointerException` at
             // +89, no `ReportedException`): the sound plays and `onPlayedRuneCraftingSound` runs.
+            // Its draw comes after `awardUsedRecipes` in `onTake` (+18 against +86), and Sunrise
+            // carries the recipe unlock out after the call: in vanilla an unlock can complete an
+            // advancement whose reward loot draws `level.random` first, so the draw's order
+            // isn't claimed (`DRAW_AFTER_DEFERRED_EFFECT`, `runtime/level_random.rs`).
             assert_eq!(take_failures(&java), []);
             assert_eq!(
                 taken,
@@ -2687,6 +2704,7 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
                         "game-hook re-entry: sunrise#live_menu:recipe_crafted_trigger".to_owned(),
                         1
                     ),
+                    (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1),
                 ]
             );
             // The sound went out on Sunrise once, seeded from the server's sound-seed stream,
@@ -2738,12 +2756,13 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             // on (BUGS-3d34 #3: they read `ran-clean`, 0 unknown host calls).
             stop_server(&mut host);
             let row = report_row(&java);
-            assert_eq!(row["summary"], "ran-clean, 2 counted calls since start");
+            assert_eq!(row["summary"], "ran-clean, 3 counted calls since start");
             assert_eq!(
                 row["counted"]["since_start"],
                 serde_json::json!({
                     SLOT_TAKE: 1,
                     "game-hook re-entry: sunrise#live_menu:recipe_crafted_trigger": 1,
+                    crate::runtime::DRAW_AFTER_DEFERRED_EFFECT: 1,
                 })
             );
         });

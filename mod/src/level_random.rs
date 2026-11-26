@@ -59,9 +59,12 @@ pub(crate) fn run_with_level_random<R>(
 ) -> R {
     let mut run = Some(run);
     if let Some(level) = level.filter(|level| level.dimension_id() == dimension) {
+        // Which open of the level this is: a handle Java kept from another world, or from an
+        // earlier open of a runtime level, never draws this one's stream.
+        let instance = format!("{}/{}", level.epoch().get(), level.generation());
         let lent = level.with_random(host, |random| {
             let run = run.take().expect("Sunrise runs the draw once");
-            jar_host.with_lent_level_random(dimension, &mut Lent(random), run)
+            jar_host.with_lent_level_random(dimension, &instance, &mut Lent(random), run)
         });
         if let Some(result) = lent {
             return result;

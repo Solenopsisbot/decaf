@@ -2131,6 +2131,8 @@ mod tests {
         const HOLDS_NO_OBJECT: &[&str] = &[
             // A dimension name and a lend id (`level_random.rs`).
             "level_random_lend",
+            // A key counter (`random_source.rs`).
+            "next_random_source",
             "next_unmodifiable_collection",
             "next_reversed_view",
             "next_ranged_attribute",

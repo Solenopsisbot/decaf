@@ -4146,6 +4146,8 @@ pub struct StdHost {
     shared_empties: BTreeMap<&'static str, String>,
     /// Explicitly seeded Minecraft RandomSource state, keyed by its host handle.
     random_sources: BTreeMap<String, random_source::State>,
+    /// The number the next random source handle's key takes (`random_source.rs`).
+    next_random_source: u64,
     random_seed_uniquifier: u64,
     random_time_origin: std::time::Instant,
     /// The collections Java hands out as the same object on every call (a
@@ -4562,6 +4564,7 @@ impl StdHost {
             component_states: BTreeMap::new(),
             unmodifiable_collections: BTreeMap::new(),
             random_sources: BTreeMap::new(),
+            next_random_source: 0,
             random_seed_uniquifier: 8_682_522_807_148_012,
             random_time_origin: std::time::Instant::now(),
             empty_collections: std::collections::BTreeSet::new(),
@@ -8776,7 +8779,15 @@ impl Host for StdHost {
     }
 
     fn counted_unknown_calls(&self) -> usize {
+        // A lent draw out of vanilla's order (`level_random.rs`) is counted, but it answered
+        // with the real stream's value, no placeholder: what a step built on it is still exact,
+        // so it doesn't fail the `exact` regions that read this.
         self.unknown_host_call_count()
+            - self
+                .unknown_host_calls
+                .get(level_random::DRAW_AFTER_DEFERRED_EFFECT)
+                .copied()
+                .unwrap_or(0)
     }
 
     fn supports_recipe_sync(&self) -> bool {

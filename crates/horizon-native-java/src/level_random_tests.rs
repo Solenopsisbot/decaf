@@ -14,6 +14,8 @@ use crate::{DRAW_AFTER_DEFERRED_EFFECT, LevelRandomStream, NativeJar, StdHost, V
 /// The oracle's seed (`java25.txt`).
 const SEED: i64 = 6_301_295_841;
 const OVERWORLD: &str = "minecraft:overworld";
+/// The open of the level each lend names (Sunrise: world epoch / level generation).
+const WORLD: &str = "1/0";
 const LEVEL: &str = "Lnet/minecraft/world/level/Level;";
 
 /// `new LegacyRandomSource(seed)`: `java.util.Random`'s LCG, and `MarsagliaPolarGaussian`'s
@@ -170,7 +172,9 @@ fn lent(
     method: &str,
     descriptor: &str,
 ) -> Result<Value, crate::NativeError> {
-    host.with_lent_level_random(OVERWORLD, stream, |host| call(host, method, descriptor))
+    host.with_lent_level_random(OVERWORLD, WORLD, stream, |host| {
+        call(host, method, descriptor)
+    })
 }
 
 #[test]
@@ -222,7 +226,7 @@ fn without_a_lend_get_random_stays_counted() {
     // A lend of another level answers nothing for this one either.
     let mut host = StdHost::new();
     let mut stream = Legacy::new(SEED);
-    let answer = host.with_lent_level_random("minecraft:the_nether", &mut stream, |host| {
+    let answer = host.with_lent_level_random("minecraft:the_nether", WORLD, &mut stream, |host| {
         call(host, "keep", &format!("({LEVEL})I"))
     });
     assert!(answer.is_err(), "{answer:?}");
@@ -263,7 +267,7 @@ fn a_kept_handle_draws_only_inside_a_lend_and_stays_the_same_object() {
         &format!("({LEVEL})Z"),
     );
     assert_eq!(same.ok(), Some(Value::Int(1)));
-    let again = host.with_lent_level_random(OVERWORLD, &mut stream, |host| {
+    let again = host.with_lent_level_random(OVERWORLD, WORLD, &mut stream, |host| {
         jar().invoke_method_with_args("demo/LevelRandoms", "drawKept", "()I", None, &[], host)
     });
     assert_eq!(again.ok(), Some(Value::Int(oracle.next_int())));
@@ -296,7 +300,7 @@ fn a_draw_after_a_deferred_effect_that_may_draw_the_stream_is_counted() {
     let mut host = StdHost::new();
     let mut stream = Legacy::new(SEED);
     let mut oracle = Legacy::new(SEED);
-    let values = host.with_lent_level_random(OVERWORLD, &mut stream, |host| {
+    let values = host.with_lent_level_random(OVERWORLD, WORLD, &mut stream, |host| {
         let before = call(host, "keep", &format!("({LEVEL})I"));
         host.note_deferred_effect(true);
         let quiet =
@@ -316,7 +320,7 @@ fn a_draw_after_a_deferred_effect_that_may_draw_the_stream_is_counted() {
         vec![(DRAW_AFTER_DEFERRED_EFFECT.into(), 1)]
     );
     // The mark belonged to that lend: the next one starts exact.
-    let next = host.with_lent_level_random(OVERWORLD, &mut stream, |host| {
+    let next = host.with_lent_level_random(OVERWORLD, WORLD, &mut stream, |host| {
         jar().invoke_method_with_args("demo/LevelRandoms", "drawKept", "()I", None, &[], host)
     });
     assert_eq!(next.ok(), Some(Value::Int(oracle.next_int())));
@@ -329,14 +333,79 @@ fn an_unwinding_inner_lend_restores_the_outer_one() {
     let mut host = StdHost::new();
     let mut outer = Legacy::new(SEED);
     let mut oracle = Legacy::new(SEED);
-    let value = host.with_lent_level_random(OVERWORLD, &mut outer, |host| {
+    let value = host.with_lent_level_random(OVERWORLD, WORLD, &mut outer, |host| {
         let mut inner = Legacy::new(7);
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            host.with_lent_level_random(OVERWORLD, &mut inner, |_| panic!("inner call panicked"))
+            host.with_lent_level_random(OVERWORLD, WORLD, &mut inner, |_| {
+                panic!("inner call panicked")
+            })
         }));
         assert!(unwound.is_err());
         call(host, "keep", &format!("({LEVEL})I"))
     });
     assert_eq!(value.ok(), Some(Value::Int(oracle.next_int())));
     assert!(host.unknown_host_calls().is_empty());
+}
+
+/// A handle kept in a static from one world (single player keeps the jars, and their statics,
+/// across worlds) is not the next world's `getRandom()`, and never draws its stream.
+#[test]
+fn a_handle_kept_from_another_world_never_draws_this_worlds_stream() {
+    let mut host = StdHost::new();
+    let mut first = Legacy::new(SEED);
+    let kept = lent(&mut host, &mut first, "keep", &format!("({LEVEL})I"));
+    assert_eq!(kept.ok(), Some(Value::Int(Legacy::new(SEED).next_int())));
+    // The next world: a new stream, a new open of the overworld.
+    let mut second = Legacy::new(7);
+    let (same, drawn) = host.with_lent_level_random(OVERWORLD, "2/0", &mut second, |host| {
+        let same = call(host, "keptIsCurrent", &format!("({LEVEL})Z"));
+        let drawn =
+            jar().invoke_method_with_args("demo/LevelRandoms", "drawKept", "()I", None, &[], host);
+        (same, drawn)
+    });
+    assert_eq!(
+        same.ok(),
+        Some(Value::Int(0)),
+        "the old world's handle is another object"
+    );
+    assert_eq!(
+        drawn.ok(),
+        Some(Value::Int(0)),
+        "counted, answering the neutral 0"
+    );
+    assert_eq!(
+        host.unknown_host_calls(),
+        vec![("net/minecraft/util/RandomSource#nextInt()I".into(), 1)]
+    );
+    assert_eq!(
+        second.next_long(),
+        Legacy::new(7).next_long(),
+        "world 2's stream never moved"
+    );
+}
+
+/// `consumeCount(n)` past `CONSUME_LIMIT` draws nothing and is counted: a host call can't
+/// charge the interpreter's budget, and `Integer.MAX_VALUE` draws would stall the tick.
+#[test]
+fn a_huge_consume_count_is_counted_instead_of_drawn() {
+    let mut host = StdHost::new();
+    let mut stream = Legacy::new(SEED);
+    let answer = host.with_lent_level_random(OVERWORLD, WORLD, &mut stream, |host| {
+        jar().invoke_method_with_args(
+            "demo/LevelRandoms",
+            "consume",
+            &format!("({LEVEL}I)I"),
+            None,
+            &[
+                StdHost::server_level_handle(OVERWORLD),
+                Value::Int(crate::level_random::CONSUME_LIMIT + 1),
+            ],
+            host,
+        )
+    });
+    assert_eq!(answer.ok(), Some(Value::Int(Legacy::new(SEED).next_int())));
+    assert_eq!(
+        host.unknown_host_calls(),
+        vec![("net/minecraft/util/RandomSource#consumeCount(I)V".into(), 1)]
+    );
 }

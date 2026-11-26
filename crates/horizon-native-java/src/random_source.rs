@@ -127,6 +127,7 @@ pub(crate) enum State {
     /// holds no state for it: outside a lend its draws are counted.
     LevelLent {
         dimension: String,
+        instance: String,
     },
 }
 
@@ -206,14 +207,24 @@ impl StdHost {
         Value::Host(HostRef::new(HostKind::RandomSource, key))
     }
 
+    /// A fresh number for a handle key. Never the table's length: after
+    /// `forget_random_state` or a heap prune shrinks the table, the length
+    /// names a key a live handle still holds, and its state would be
+    /// overwritten.
+    fn next_random_number(&mut self) -> u64 {
+        let number = self.next_random_source;
+        self.next_random_source += 1;
+        number
+    }
+
     fn random_handle(&mut self, state: State) -> Value {
-        let key = format!("{}#{}", state.class(), self.random_sources.len());
+        let key = format!("{}#{}", state.class(), self.next_random_number());
         self.random_sources.insert(key.clone(), state);
         Value::Host(HostRef::new(HostKind::RandomSource, key))
     }
 
     fn java_random_handle(&mut self, state: State) -> Value {
-        let key = format!("{JAVA_RANDOM}#{}", self.random_sources.len());
+        let key = format!("{JAVA_RANDOM}#{}", self.next_random_number());
         self.random_sources.insert(key.clone(), state);
         crate::jar_object::handle(key)
     }
@@ -295,9 +306,13 @@ impl StdHost {
         // A direct constructor is reached on a JarObject before any state row
         // exists; random_new allocated the row at the new opcode.
         let (key, mut state) = self.random_state_mut(receiver)?;
-        if let State::LevelLent { dimension } = &state {
+        if let State::LevelLent {
+            dimension,
+            instance,
+        } = &state
+        {
             // The live level stream, while it is lent; counted otherwise.
-            return self.lent_random_call(dimension, r, args);
+            return self.lent_random_call(dimension, instance, r, args);
         }
         if r.name == "<init>" && r.descriptor == "(JJ)V" {
             let (lo, hi) = match args {

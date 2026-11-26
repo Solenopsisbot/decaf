@@ -698,9 +698,11 @@ pub(crate) fn prepare(
         }
     };
     let Some(outcome) = outcome else {
-        // Nothing of the call is carried out, its sounds included: counted, and the seeds they
-        // drew leave Sunrise's stream unknown.
-        crate::sound::count_undelivered_sounds(
+        // Nothing of the call is carried out, its sounds included: each is counted, but the
+        // seeds Java drew for them are drawn from Sunrise all the same, in call order, so the
+        // stream stays in step (#661's rule, as a failed game hook's are).
+        crate::sound::replay_unplayed_server_sounds(
+            host,
             &sounds,
             &mut sound_streams,
             |reason| jar.host.note_unknown_game_hook(reason),
@@ -1030,8 +1032,11 @@ pub(crate) fn apply(host: &mut dyn ServerHost, prepared: &Prepared) -> Applied {
             .counted
             .push("sunrise#live_menu:transaction_refused"),
     }
-    // Vanilla sends a sound at the call; Sunrise's seeds come from their own stream, which
-    // nothing above draws, so playing them after the writes keeps every seed where Java's was.
+    // Vanilla sends a sound at the call; Sunrise's seeds come from their own stream, which no
+    // write above draws directly, and each Java sound takes its seed here in Java's order. Not
+    // claimed: a write above may make Sunrise play a sound of its own (an advancement reward's,
+    // a level-up's) that takes its seed at the transaction's commit, before these, where
+    // vanilla may have played it after one of them.
     let mut sound_streams = prepared.sound_streams.clone();
     crate::sound::apply_server_sounds(host, &prepared.sounds, &mut sound_streams, |reason| {
         applied.sounds_counted.push(reason.to_owned())

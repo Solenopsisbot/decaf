@@ -14,6 +14,12 @@
 //!   Java draws, so Java sees exactly the value vanilla's stream would give it
 //!   and the stream moves in Java's order.
 //!
+//! A handle names one *open* of a level, not just its dimension: the embedder
+//! gives each lend an `instance` (Sunrise: the world's epoch and the level's
+//! generation). A handle Java kept in a static from an earlier world (single
+//! player keeps the jars across worlds) is a different object from this
+//! world's `getRandom()` and never draws this world's stream: counted.
+//!
 //! Outside a lend (no lend at all, a lend of another dimension, or an
 //! embedder that declined to lend), `getRandom()` stays counted, and a draw on
 //! a handle Java stored earlier is counted too: nothing answers it.
@@ -38,7 +44,9 @@
 //!   check of its own: `max < min` throws from `nextInt(I)`.
 //! - `triangle(D, D)` / `triangle(F, F)`: `mean + spread * (a - b)`, `a` drawn
 //!   first.
-//! - `consumeCount(n)`: `n` times `nextInt()`.
+//! - `consumeCount(n)`: `n` times `nextInt()`, up to [`CONSUME_LIMIT`]. A host
+//!   call has no access to the interpreter's execution budget, so a larger
+//!   count draws nothing and is counted rather than stalling the tick.
 //! - `fork()`: one `nextLong()`, then a seeded `LegacyRandomSource` Decaf
 //!   keeps itself; `forkPositional()`: one `nextLong()`, then a
 //!   `LegacyPositionalRandomFactory` of it.
@@ -47,21 +55,35 @@
 //!
 //! # Effects applied after the call
 //!
-//! Decaf carries some of a call's effects out after the Java call returns. If
-//! the embedder's handling of one draws this same stream (a `Player.drop`
-//! builds an `ItemEntity`, whose constructor draws `level.random` twice), and
-//! Java recorded it *before* a later draw of the lent stream, vanilla would
-//! draw for the effect first and Decaf draws for Java first: the two swap.
-//! Every effect a call records goes through one choke point
-//! ([`StdHost::note_deferred_effect`]); an effect not on the allow-list of
-//! effects known to draw nothing marks the lend, and every lent draw after
-//! that mark is still answered (the stream is the real one) but counted
-//! ([`DRAW_AFTER_DEFERRED_EFFECT`]), so the call never claims an exact order
-//! it doesn't have.
+//! Decaf carries some of a call's work out after the Java call returns. If the
+//! embedder's handling of it may draw this same stream, and Java produced it
+//! *before* a later draw of the lent stream, vanilla would draw for it first
+//! and Decaf draws for Java first: the two swap. That work is of two kinds,
+//! and a lent draw is counted ([`DRAW_AFTER_DEFERRED_EFFECT`]) after either:
+//!
+//! - a recorded effect not on the allow-list of effects known to draw nothing
+//!   ([`StdHost::note_deferred_effect`], `live_menu::draws_no_level_random`).
+//!   Criteria and recipe unlocks are not on it: in vanilla they can complete
+//!   an advancement at once, and `AdvancementRewards.grant` rolls its loot
+//!   with `LootContext$Builder.create(Optional.empty())`, which falls back to
+//!   `ServerLevel.getRandom()`. Neither is a drop, which in 26.3 draws only
+//!   entity randoms (`ItemEntity.<init>(Level,DDD,ItemStack)` its own
+//!   `Entity.random`, `createItemStackToDrop` the player's): a drop stays off
+//!   the list only because the embedder's drop path isn't verified to leave
+//!   the level stream alone;
+//! - a write to the player's inventory, which is no effect but state the
+//!   embedder writes back after the call, and whose `inventory_changed`
+//!   criterion can reward the same way ([`StdHost::inventory_baseline`]).
+//!
+//! The draw is still answered (the stream is the real one), but the call never
+//! claims an exact order it doesn't have.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::runtime::live_menu::MenuPlayerFacts;
 use crate::runtime::random_source::{self, State};
+use crate::runtime::recipe_models::{self, StackComponents};
 use crate::runtime::{MethodRef, NativeError, StdHost, Value};
 
 /// A level's live random stream, lent for one Java call
@@ -92,6 +114,14 @@ pub const DRAW_AFTER_DEFERRED_EFFECT: &str =
 
 const LEGACY: &str = "net/minecraft/world/level/levelgen/LegacyRandomSource";
 
+/// The most `nextInt()` draws one `consumeCount(n)` answers (see the module
+/// docs).
+pub const CONSUME_LIMIT: i32 = 1 << 16;
+
+/// Lend ids, unique across threads: a host is `Clone + Send`, so a lend id
+/// must never repeat on another thread's slot.
+static NEXT_LEND: AtomicU64 = AtomicU64::new(1);
+
 /// The lend the host runs under: which dimension's stream, and whether an
 /// effect that may draw it was recorded during it. Plain data, so `StdHost`
 /// stays `Clone + Send`; the stream itself sits in [`LENT`] for the lend's
@@ -103,6 +133,8 @@ pub(crate) struct Lend {
     /// finds a different id, or none, and draws nothing.
     id: u64,
     dimension: String,
+    /// Which open of the level (the embedder's identity for it).
+    instance: String,
     /// An effect that may draw this stream was recorded: later lent draws
     /// are out of vanilla's order.
     effect_pending: bool,
@@ -118,7 +150,6 @@ struct Slot {
 
 thread_local! {
     static LENT: Cell<Option<Slot>> = const { Cell::new(None) };
-    static NEXT_LEND: Cell<u64> = const { Cell::new(1) };
 }
 
 /// Puts the previous [`LENT`] slot back when the lend's frame ends, on return
@@ -153,28 +184,28 @@ fn with_slot<T>(id: u64, draw: impl FnOnce(&mut dyn LevelRandomStream) -> T) -> 
     Some(draw(&mut **stream))
 }
 
-/// The handle key of `dimension`'s lent level stream. Its class part makes it
-/// a `LegacyRandomSource` (`instanceof`, `getClass`), as `Level.random` is.
-pub(crate) fn lent_key(dimension: &str) -> String {
-    format!("{LEGACY}#level-random/{dimension}")
+/// The handle key of the lent stream of `dimension`'s open `instance`. Its
+/// class part makes it a `LegacyRandomSource` (`instanceof`, `getClass`), as
+/// `Level.random` is.
+pub(crate) fn lent_key(dimension: &str, instance: &str) -> String {
+    format!("{LEGACY}#level-random/{instance}/{dimension}")
 }
 
 impl StdHost {
     /// Run `run` with `dimension`'s live level stream lent: `getRandom()` on
     /// that server level answers a handle whose draws `stream` answers (see
-    /// the module docs). The lend ends when `run` returns or unwinds; a handle
-    /// Java keeps draws nothing after that (counted).
+    /// the module docs). `instance` names this open of the level (a world, a
+    /// reopen), so a handle kept from another one never matches. The lend ends
+    /// when `run` returns or unwinds; a handle Java keeps draws nothing after
+    /// that (counted).
     pub fn with_lent_level_random<R>(
         &mut self,
         dimension: &str,
+        instance: &str,
         stream: &mut dyn LevelRandomStream,
         run: impl FnOnce(&mut StdHost) -> R,
     ) -> R {
-        let id = NEXT_LEND.with(|next| {
-            let id = next.get();
-            next.set(id.wrapping_add(1));
-            id
-        });
+        let id = NEXT_LEND.fetch_add(1, Ordering::Relaxed);
         let mut stream = stream;
         let slot = Slot {
             id,
@@ -185,6 +216,7 @@ impl StdHost {
         let previous = self.level_random_lend.replace(Lend {
             id,
             dimension: dimension.to_owned(),
+            instance: instance.to_owned(),
             effect_pending: false,
         });
         // An unwind out of `run` restores the host's lend too (the slot is
@@ -205,12 +237,64 @@ impl StdHost {
         if lend.dimension != dimension || !slot_live(lend.id) {
             return None;
         }
+        let instance = lend.instance.clone();
         Some(self.keyed_random_handle(
-            lent_key(dimension),
+            lent_key(dimension, &instance),
             State::LevelLent {
                 dimension: dimension.to_owned(),
+                instance,
             },
         ))
+    }
+
+    /// The player's inventory as a call starts, by stack contents, for
+    /// [`Self::inventory_written`]; taken only while a stream is lent (no
+    /// other call needs it). `None` when the facts give no inventory: the
+    /// call then has none to write back.
+    #[inline(never)]
+    pub(crate) fn inventory_baseline(
+        &self,
+        facts: Option<&MenuPlayerFacts>,
+    ) -> Option<Vec<Option<StackComponents>>> {
+        let lend = self.level_random_lend.as_ref()?;
+        if !slot_live(lend.id) {
+            return None;
+        }
+        let inventory = facts?.inventory.as_ref()?;
+        Some(
+            inventory
+                .iter()
+                .map(|stack| recipe_models::extract_stack_components(self, stack))
+                .collect(),
+        )
+    }
+
+    /// Whether the running call has changed the player's inventory: a slot's
+    /// stack differs, by contents, from the one it started with (the runtime
+    /// keeps its own stack objects, so identity says nothing). The embedder
+    /// writes the inventory back after the call, so a later lent draw may be
+    /// out of order (module docs). A stack Decaf can't read, or an inventory it
+    /// can no longer read, counts as changed.
+    #[inline(never)]
+    fn inventory_written(&self) -> bool {
+        let Some(active) = self.block_use.active_use.as_ref() else {
+            return false;
+        };
+        let (Some(start), Some(facts)) = (active.inventory_start.as_ref(), active.facts.as_ref())
+        else {
+            return false;
+        };
+        let Some(now) = crate::runtime::live_menu::inventory_out(self, &active.player_inventory, facts)
+        else {
+            return true;
+        };
+        now.len() != start.len()
+            || now.iter().zip(start).any(|(now, start)| {
+                match (recipe_models::extract_stack_components(self, now), start) {
+                    (Some(now), Some(start)) => now != *start,
+                    _ => true,
+                }
+            })
     }
 
     /// Every effect a call records for the embedder to carry out after it
@@ -232,12 +316,14 @@ impl StdHost {
     pub(crate) fn lent_random_call(
         &mut self,
         dimension: &str,
+        instance: &str,
         r: &MethodRef,
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
         let lend = self.level_random_lend.clone()?;
-        // A handle of another level, or one Java kept past its lend: counted.
-        if lend.dimension != dimension || !slot_live(lend.id) {
+        // A handle of another level, of another open of this one, or one Java
+        // kept past its lend: counted.
+        if lend.dimension != dimension || lend.instance != instance || !slot_live(lend.id) {
             return None;
         }
         let draw = parse_draw(r, args)?;
@@ -255,9 +341,10 @@ impl StdHost {
             Draw::Between { min, max } if max.wrapping_sub(min).wrapping_add(1) <= 0 => {
                 return Some(Err(random_source::iae("Bound must be positive")));
             }
+            Draw::Consume(count) if count > CONSUME_LIMIT => return None,
             draw => with_slot(lend.id, |stream| answer(stream, draw))?,
         };
-        if lend.effect_pending {
+        if lend.effect_pending || self.inventory_written() {
             *self
                 .unknown_host_calls
                 .entry(DRAW_AFTER_DEFERRED_EFFECT.to_owned())
