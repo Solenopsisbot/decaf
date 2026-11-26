@@ -38,7 +38,7 @@ pub const GAME_OBJECT_PREFIX: &str = "game/";
 
 /// Jar objects a hook callback builds are numbered from here, so they cannot
 /// collide with the `class#n` markers an entrypoint run handed out before.
-const GAME_HOOK_OBJECT_BASE: usize = 1 << 40;
+pub(crate) const GAME_HOOK_OBJECT_BASE: usize = 1 << 40;
 
 /// Instance fields and arrays one jar's hook callbacks may keep alive between
 /// firings. A callback that would exceed either fails instead of growing

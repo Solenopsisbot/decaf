@@ -94,7 +94,7 @@ impl<H: Host> Runtime<'_, H> {
                 if !self.has_class(&class) {
                     return Ok(None);
                 }
-                let serial = self.config_serial();
+                let serial = self.config_serial(YACL_BUILDER);
                 Some(host_config::of_class(HostKind::YaclBuilder, &class, serial))
             }
             (YACL_BUILDER, "id" | "serializer")
@@ -108,7 +108,7 @@ impl<H: Host> Runtime<'_, H> {
                 else {
                     return Ok(None);
                 };
-                let serial = self.config_serial();
+                let serial = self.config_serial(YACL_HANDLER);
                 Some(host_config::of_class(HostKind::YaclHandler, &class, serial))
             }
             (AUTO_HOLDER | YACL_HANDLER, name) => {
@@ -150,10 +150,10 @@ impl<H: Host> Runtime<'_, H> {
         match (r.owner.as_str(), r.name.as_str(), builder) {
             // A new builder per `new*Config`; its steps return `this`.
             (CONFIGLIB_BUILDERS, name, _) if name.starts_with("new") => {
-                let serial = self.config_serial();
+                let serial = self.config_serial(CONFIGLIB_BUILDER);
                 Some(host_config::handle(
                     HostKind::ConfiglibBuilder,
-                    &[Value::Int(serial)],
+                    &[Value::Long(serial)],
                 ))
             }
             (CONFIGLIB_BUILDER, "define", Some(_)) => {
@@ -206,13 +206,16 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
-    /// A serial no other object of this run has: the runtime's object counter
-    /// (kept with the resident heap, so it only grows), which makes a fresh
-    /// builder's or handler's key name exactly that object.
-    fn config_serial(&mut self) -> i32 {
-        let serial = self.next_object;
-        self.next_object = self.next_object.saturating_add(1);
-        i32::try_from(serial).unwrap_or(i32::MAX)
+    /// A serial no other object of this run has: a number from the heap's allocator
+    /// ([`Runtime::new_object_number`], kept with the resident heap, so it only grows), which
+    /// makes a fresh builder's or handler's key name exactly that object.
+    ///
+    /// The whole number, as a `long`: after a game hook the allocator starts at `1 << 40`,
+    /// and this once squeezed it into an `i32` with `unwrap_or(i32::MAX)`, so every builder
+    /// made after a hook had serial `i32::MAX`, one key, and two of them were `==` (#669).
+    /// `as i64` is one-to-one on the 64-bit numbers, so two numbers stay two serials.
+    fn config_serial(&mut self, class: &str) -> i64 {
+        self.new_object_number(class) as i64
     }
 
     /// The config object of `class`, built from its defaults the first time.

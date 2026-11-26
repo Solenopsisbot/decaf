@@ -277,6 +277,9 @@ pub use parked_threads::ParkedThread;
 #[cfg(test)]
 #[path = "allocation_numbers_tests.rs"]
 mod allocation_numbers_tests;
+#[cfg(test)]
+#[path = "host_minted_keys_tests.rs"]
+mod host_minted_keys_tests;
 mod priority_queue;
 mod pure_helpers;
 mod random_source;
@@ -30155,13 +30158,23 @@ impl<H: Host> Runtime<'_, H> {
     /// ([`Self::refuse_exhausted_allocations`]); a jar `new` is refused before it allocates
     /// ([`Self::allocate_new`]).
     fn new_object_key(&mut self, class: &str) -> String {
+        format!("{class}#{}", self.new_object_number(class))
+    }
+
+    /// A fresh number from the heap's allocator for an object of `class` whose handle is not
+    /// keyed `class#n` (a config builder, a `ServiceLoader`, a `Field` copy): one counter
+    /// numbers every object the jar can see, so no two share a number, and running out is
+    /// counted by name ([`Self::new_object_key`]'s rule) instead of saturating on one number
+    /// for all of them (#669). Never truncate it: after a game hook the numbers start at
+    /// `1 << 40` (`game_hooks.rs`), past every `i32`.
+    pub(crate) fn new_object_number(&mut self, class: &str) -> usize {
         let number = self.next_object;
         if number == usize::MAX {
             self.host.note_allocation_numbers_exhausted(class);
         } else {
             self.next_object = number + 1;
         }
-        format!("{class}#{number}")
+        number
     }
 
     /// The `new` opcode's object: the host's model of `class` or a jar object, refused once
