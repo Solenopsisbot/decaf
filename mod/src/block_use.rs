@@ -493,7 +493,10 @@ impl JavaBlockUsePart {
 
 /// The player's open container as Sunrise reports it: the inventory menu is container 0. A
 /// menu Sunrise has no handle for (crafting tables, merchants, workstations) is unknown.
-fn player_container(host: &dyn ServerHost, player: Option<PlayerRef>) -> PlayerContainer {
+pub(crate) fn player_container(
+    host: &dyn ServerHost,
+    player: Option<PlayerRef>,
+) -> PlayerContainer {
     match player
         .and_then(|player| player.container_menu(host))
         .and_then(|menu| menu.container_id(host))

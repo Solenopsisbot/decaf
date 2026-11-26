@@ -151,7 +151,7 @@ pub(crate) enum Removal {
 
 /// `Inventory`'s slots as `MenuPlayerFacts` and `PlayerRef::with_inventory` number them: 0-35
 /// the items, 36-39 feet to head, 40 the off hand, 41 body, 42 saddle.
-const INVENTORY_SLOTS: u32 = 43;
+pub(crate) const INVENTORY_SLOTS: u32 = 43;
 
 /// `Attributes.BLOCK_INTERACTION_RANGE`, which `Player.blockInteractionRange()` reads.
 const BLOCK_INTERACTION_RANGE: &str = "minecraft:block_interaction_range";
@@ -910,7 +910,7 @@ fn api_from_components(
 }
 
 /// A vanilla `StatType` registry id as Sunrise's [`StatType`].
-fn stat_type_of(id: &str) -> Option<StatType> {
+pub(crate) fn stat_type_of(id: &str) -> Option<StatType> {
     Some(match id {
         "minecraft:mined" => StatType::Mined,
         "minecraft:crafted" => StatType::Crafted,

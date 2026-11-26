@@ -638,6 +638,60 @@ pub(crate) fn register_block_parts(
     }
 }
 
+/// Attaches a generic [`crate::item_parts::JavaItemPart`] to every registered Java mod item
+/// (owned as [`attachable_registrations`] decides) whose class chain declares an override the
+/// part runs: `overrideStackedOnOther`, `overrideOtherStackedOnMe`, `use`, the bar methods or
+/// `onDestroyed`. An item a jar built as a plain `new Item(..)` gets none.
+pub(crate) fn register_item_parts(
+    state: &Arc<Mutex<State>>,
+    registrar: &mut dyn Registrar,
+    context: &RegistrationContext,
+    client: &Arc<Mutex<crate::client::State>>,
+) {
+    use runtime::ItemHook;
+    let mut guard = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.ensure_loaded(context, registration_game_version(context));
+    let items = attachable_registrations(&guard.jars, context, "minecraft:item");
+    let mut attached = 0usize;
+    for id in &items {
+        let overrides = guard.jars.iter().find_map(|jar| {
+            let entry = jar
+                .host
+                .registrations()
+                .iter()
+                .find(|entry| entry.registry == "minecraft:item" && entry.id == *id)?;
+            Some(jar.jar.item_overrides(&entry.value, &jar.host))
+        });
+        let runs_a_hook = overrides.is_some_and(|overrides| {
+            [
+                ItemHook::StackedOnOther,
+                ItemHook::OtherStackedOnMe,
+                ItemHook::Use,
+                ItemHook::BarVisible,
+                ItemHook::BarWidth,
+                ItemHook::BarColor,
+                ItemHook::Destroyed,
+            ]
+            .into_iter()
+            .any(|hook| overrides.overrides(hook))
+        });
+        if !runs_a_hook {
+            continue;
+        }
+        let key = registrar.item_key(id);
+        registrar.item_part(
+            key,
+            crate::item_parts::JavaItemPart::new(Arc::clone(state), Arc::clone(client), id.clone()),
+        );
+        attached += 1;
+    }
+    if attached > 0 {
+        log::info!("{LOG}: attached Java item part(s) to {attached} item(s)");
+    }
+}
+
 /// The ids every jar registered in `registry` (`minecraft:block`, `minecraft:menu`) that this
 /// mod attaches its Sunrise parts to, each once, in jar then registration order. An id qualifies
 /// when it is usable and its namespace is one this mod owns ([`owned_namespaces`]) or one an

@@ -220,6 +220,12 @@ pub use level_random::{
     DRAW_AFTER_DEFERRED_EFFECT, LEVEL_STREAM_UNKNOWN, LevelRandomStream,
     is_counted_level_stream_draw,
 };
+mod item_parts;
+pub use item_parts::{
+    GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick, ItemClickDirection,
+    ItemClickOutcome, ItemDestroyed, ItemDestroyedOutcome, ItemHook, ItemOverrides, ItemUse,
+    ItemUseOutcome,
+};
 pub mod level_sound;
 mod library_dispatch;
 mod linked_resources;
@@ -10013,6 +10019,14 @@ impl Host for StdHost {
             return Ok(value);
         }
         if let Some(value) = recipe_models::static_field(r) {
+            return Ok(value);
+        }
+        // `SoundEvents.<NAME>`, the variable-range vanilla events (`sound_event.rs`).
+        if let Some(value) = sound_event::vanilla_static(r) {
+            return Ok(value);
+        }
+        // `Stats.ITEM_*` (`item_parts.rs`).
+        if let Some(value) = item_parts::static_field(r) {
             return Ok(value);
         }
         if let Some(value) = attachment_codec::codec_static(r) {
@@ -38148,6 +38162,10 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = recipe_models::runtime_recipe_manager_call(self, r, receiver, args)? {
             return Ok(Some(value));
         }
+        // The item-part façades and `ItemStack.set` of a jar component (`item_parts.rs`).
+        if let Some(value) = item_parts::invoke_helper(self, r, receiver, args)? {
+            return Ok(Some(value));
+        }
         if receiver.is_none()
             && let Some(value) = recipe_models::runtime_static_call(self, r, args)?
         {
@@ -60231,3 +60249,5 @@ mod vendored_vanilla_entity_data_subclass_txt;
 mod vendored_vanilla_host_methods_tsv;
 #[path = "vanilla_item_ids_java25.txt.rs"]
 mod vendored_vanilla_item_ids_java25_txt;
+#[path = "vanilla_sound_events_26_3.tsv.rs"]
+mod vendored_vanilla_sound_events_26_3_tsv;

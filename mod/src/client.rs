@@ -620,6 +620,84 @@ impl State {
         self.drain_client_sounds(host);
     }
 
+    /// `isBarVisible` / `getBarWidth` / `getBarColor` of the jar item `item_id` on `stack`, run
+    /// on the client's resident jar (`item_parts.rs`): `bar` arrives holding vanilla's bar and
+    /// takes the item's own answers for the methods it overrides. A call that counted leaves
+    /// vanilla's bar.
+    pub(crate) fn java_item_bar(
+        &mut self,
+        host: &dyn mod_api::ClientHost,
+        item_id: &str,
+        stack: &mod_api::ItemStack,
+        bar: &mut Option<(i32, u32)>,
+    ) {
+        for loaded in &mut self.jars {
+            let Some(entry) = loaded
+                .host
+                .observed_registry_entry("minecraft:item", item_id)
+            else {
+                continue;
+            };
+            let item = entry.value.clone();
+            let overrides = loaded.jar.item_overrides(&item, &loaded.host);
+            let jar_types = loaded.jar.jar_component_types(&mut loaded.host);
+            let Some(value) = crate::item_parts::java_stack(
+                host,
+                &loaded.jar,
+                &mut loaded.host,
+                Some(item.clone()),
+                stack,
+                &jar_types,
+            ) else {
+                loaded
+                    .host
+                    .note_unknown_game_hook("item_bar:stack unreadable");
+                return;
+            };
+            let outcome = loaded.jar.item_bar(
+                &mut loaded.host,
+                &item,
+                &overrides,
+                &value,
+                bar.is_some(),
+                &ExecutionBudget::within(JAR_BUDGET),
+            );
+            let Ok(outcome) = outcome else {
+                loaded.host.note_unknown_game_hook("item_bar:failed");
+                return;
+            };
+            if !outcome.report.exact() {
+                return;
+            }
+            // `GuiGraphicsExtractor.itemDecorations` draws `ARGB.opaque(getBarColor())`: the rgb.
+            let visible = outcome.visible.unwrap_or(bar.is_some());
+            if !visible {
+                *bar = None;
+                return;
+            }
+            let (width, color) = bar.unwrap_or((0, 0));
+            let width = outcome.width.unwrap_or(width);
+            let color = outcome
+                .color
+                .map_or(color, |argb| (argb as u32) & 0x00FF_FFFF);
+            *bar = Some((width, color));
+            return;
+        }
+    }
+
+    /// Count a client-side item-part ask the bridge leaves to vanilla (a click prediction), on
+    /// the resident jar that registered `item_id`.
+    pub(crate) fn note_item_part_unanswered(&mut self, item_id: &str, what: &str) {
+        if let Some(loaded) = self.jars.iter_mut().find(|loaded| {
+            loaded
+                .host
+                .observed_registry_entry("minecraft:item", item_id)
+                .is_some()
+        }) {
+            loaded.host.note_unknown_game_hook(what);
+        }
+    }
+
     /// Drop resident hosts, listeners, and jar heaps at client shutdown. Rows stay available
     /// until the next client setup so the final report can be rewritten after teardown.
     pub(crate) fn teardown(&mut self) -> usize {
@@ -851,6 +929,35 @@ pub(crate) fn runtime_stack_from_api(
     item_override: Option<Value>,
     stack: &mod_api::ItemStack,
 ) -> Option<Value> {
+    let parts = stack_parts(host, stack, &[])?;
+    Some(runtime_host.make_host_item_stack_with_components(
+        item_override,
+        &parts.id,
+        parts.count,
+        parts.patch,
+        parts.opaque_components,
+        parts.opaque_keys,
+    ))
+}
+
+/// A mod API stack as the runtime's stack model takes it.
+pub(crate) struct StackParts {
+    pub(crate) id: String,
+    pub(crate) count: i32,
+    pub(crate) patch: Vec<(String, Option<runtime::RuntimeComponentValue>)>,
+    pub(crate) opaque_components: bool,
+    pub(crate) opaque_keys: Vec<String>,
+}
+
+/// `stack`'s item id, count and component patch, each patch entry as the runtime models it;
+/// a jar data component type in `jar_types` crosses as its NBT
+/// ([`runtime::RuntimeComponentValue::Nbt`], decoded by `NativeJar::make_item_stack`), and any
+/// other value the boundary can't carry is opaque (a Java read of it counts).
+pub(crate) fn stack_parts(
+    host: &dyn mod_api::Host,
+    stack: &mod_api::ItemStack,
+    jar_types: &[String],
+) -> Option<StackParts> {
     // `None` when the host has no name for the item's slot: no Java stack can stand for it, so
     // the caller counts the call instead of handing Java a made-up item.
     let id = stack.item().id(host)?.to_owned();
@@ -883,6 +990,16 @@ pub(crate) fn runtime_stack_from_api(
                 } else {
                     opaque_components = true;
                     opaque_keys.push(removed.to_owned());
+                }
+                continue;
+            }
+            if jar_types.contains(&key) {
+                match crate::attachments::tag_to_runtime(tag, 0) {
+                    Ok(nbt) => patch.push((key, Some(runtime::RuntimeComponentValue::Nbt(nbt)))),
+                    Err(_) => {
+                        opaque_components = true;
+                        opaque_keys.push(key);
+                    }
                 }
                 continue;
             }
@@ -946,14 +1063,13 @@ pub(crate) fn runtime_stack_from_api(
         }
     }
 
-    Some(runtime_host.make_host_item_stack_with_components(
-        item_override,
-        &id,
+    Some(StackParts {
+        id,
         count,
         patch,
         opaque_components,
         opaque_keys,
-    ))
+    })
 }
 
 pub(crate) fn api_stack(
@@ -961,7 +1077,14 @@ pub(crate) fn api_stack(
     runtime_host: &StdHost,
     value: &Value,
 ) -> Option<mod_api::ItemStack> {
-    let extracted = runtime_host.item_stack_components(value)?;
+    api_stack_from_components(host, runtime_host.item_stack_components(value)?)
+}
+
+/// [`api_stack`] of a runtime stack's extracted parts: `None` for one the mod API can't carry.
+pub(crate) fn api_stack_from_components(
+    host: &dyn mod_api::Host,
+    extracted: runtime::StackComponents,
+) -> Option<mod_api::ItemStack> {
     if extracted.opaque_components {
         return None;
     }
@@ -1038,6 +1161,13 @@ pub(crate) fn api_stack(
                     );
                 }
                 nbt.insert(comp_id.as_str().into(), mod_api::Tag::Compound(fields));
+            }
+            // A jar component type's value, as its own codec encodes it (`item_parts.rs`).
+            Some(runtime::RuntimeComponentValue::Nbt(tag)) => {
+                nbt.insert(
+                    comp_id.as_str().into(),
+                    crate::attachments::tag_to_game(&tag),
+                );
             }
             _ => return None,
         }
