@@ -205,6 +205,14 @@ mod jdk_text_oracle;
 mod jvm_dispatch;
 mod kotlin_stdlib;
 mod lambda_boxing;
+mod level_random;
+#[cfg(test)]
+#[path = "level_random_tests.rs"]
+mod level_random_tests;
+pub use level_random::{
+    DRAW_AFTER_DEFERRED_EFFECT, LEVEL_STREAM_UNKNOWN, LevelRandomStream,
+    is_counted_level_stream_draw,
+};
 pub mod level_sound;
 mod library_dispatch;
 mod linked_resources;
@@ -3455,6 +3463,12 @@ pub trait Host {
         None
     }
 
+    /// `Level.getRandom()` of the server level of `dimension` while the
+    /// embedder lends its live stream (`level_random.rs`); `None` otherwise.
+    fn lent_level_random_handle(&mut self, _dimension: &str) -> Option<Value> {
+        None
+    }
+
     /// Draw `Level.soundSeedGenerator.nextLong()` for `level_marker` (or return
     /// [`level_sound::SoundSeed::HostDeferred`] when a live host owns the seed stream and
     /// replays the draw, in call order, from the recorded [`level_sound::SoundRecord`]s).
@@ -4333,6 +4347,15 @@ pub struct StdHost {
     freed_menu_objects: heap::FreedObjects,
     block_use: block_use::BlockUseHostState,
     pub(crate) level_sound: level_sound::LevelSoundState,
+    /// The server level whose live `Level.random` the embedder lent for the
+    /// running call (`level_random.rs`), if any.
+    level_random_lend: Option<level_random::Lend>,
+    /// The level streams whose position is no longer vanilla's, by
+    /// `<instance>/<dimension>` (`level_random.rs`): their draws count.
+    level_random_unknown: BTreeSet<String>,
+    /// Random source handles forked from a level stream whose position wasn't vanilla's, and
+    /// what they handed out (`random_source.rs`): their calls count.
+    random_derived_unknown: BTreeSet<String>,
 }
 
 /// Who placed the block for a [`BlockPlaceContextData`] snapshot.
@@ -4656,6 +4679,9 @@ impl StdHost {
             freed_menu_objects: heap::FreedObjects::default(),
             block_use: block_use::BlockUseHostState::default(),
             level_sound: level_sound::LevelSoundState::default(),
+            level_random_lend: None,
+            level_random_unknown: BTreeSet::new(),
+            random_derived_unknown: BTreeSet::new(),
         }
     }
 
@@ -9789,6 +9815,10 @@ impl Host for StdHost {
 
     fn level_random_handle(&mut self, level_marker: &str) -> Option<Value> {
         self.level_random_handle_impl(level_marker)
+    }
+
+    fn lent_level_random_handle(&mut self, dimension: &str) -> Option<Value> {
+        self.lent_level_random_handle_impl(dimension)
     }
 
     fn draw_level_sound_seed(

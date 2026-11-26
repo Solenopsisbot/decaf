@@ -12,7 +12,7 @@
 //! its click semantics), and the real Runes 1.3.2 altar (`RUNES_JAR`).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::Write;
 use std::num::NonZeroU32;
@@ -41,6 +41,10 @@ use crate::runtime::{NativeJar, StdHost};
 use crate::{HorizonJava, LoadedJar, State};
 
 const UUID: u128 = 0x00c0_ffee_0000_0000_0000_0000_0000_0042;
+/// The seed of the test level's `Level.random` (`MenuTestHost::level_random`).
+const LEVEL_RANDOM_SEED: i64 = 0x5eed_1e7e1;
+/// The seed of the server's sound-seed stream (`MenuTestHost::sound_seeds`).
+const SOUND_SEED_STREAM: i64 = 0x50_5eed;
 const ENTITY_ID: u32 = 9;
 const POS: [i32; 3] = [12, 65, -7];
 /// The menu's own slots come first, then the player's 27 main slots, then the hotbar.
@@ -112,6 +116,15 @@ struct MenuTestHost {
     closes: RefCell<VecDeque<(i32, Vec<Option<ItemStack>>)>>,
     /// Every `open_mod_menu` request the bridge made: (menu, title as JSON, pos).
     opens: Vec<(String, Option<[i32; 3]>)>,
+    /// The level's live `Level.random`, Sunrise's own `LegacyRandomSource`, which
+    /// `LevelRef::with_random` lends; `None` declines every lend, as a level that is not
+    /// resident does.
+    level_random: Option<mod_api::LegacyRandomSource>,
+    /// The server's sound-seed stream (`LevelRef::next_sound_seed`), its own stream as Sunrise's
+    /// is, never the level's `random`.
+    sound_seeds: mod_api::LegacyRandomSource,
+    /// Every level sound Sunrise queued: (sound, position, volume, pitch, seed).
+    sounds: Vec<(String, [f64; 3], f32, f32, i64)>,
 }
 
 impl MenuTestHost {
@@ -146,6 +159,9 @@ impl MenuTestHost {
             eye: [12.5, 66.62, -5.5],
             closes: RefCell::default(),
             opens: Vec::new(),
+            level_random: None,
+            sound_seeds: mod_api::LegacyRandomSource::new(SOUND_SEED_STREAM),
+            sounds: Vec::new(),
         }
     }
 
@@ -467,9 +483,23 @@ impl mod_api::prelude::LivingHost for MenuTestHost {
         (entity.id() == ENTITY_ID).then(|| LivingRef::new(entity))
     }
 }
+impl mod_api::prelude::EntitiesHost for MenuTestHost {
+    fn level(&self, dimension: &str) -> Option<LevelRef> {
+        mod_api::prelude::EntitiesHost::level(&self.fake, dimension)
+    }
+}
 mod_api::impl_host_areas!(
     MenuTestHost,
-    except(block_states, config, items, keys, living, players, text)
+    except(
+        block_states,
+        config,
+        entities,
+        items,
+        keys,
+        living,
+        players,
+        text
+    )
 );
 
 /// The mod's `config/` folder as the server-stop report writes it: written, then read back
@@ -581,7 +611,17 @@ impl mod_api::prelude::ServicesServerHost for MenuTestHost {
         }
     }
 }
-mod_api::impl_server_host_areas!(MenuTestHost, except(services));
+/// Whether a transaction is open, as the sound bridge asks before it draws a seed.
+impl mod_api::prelude::ModStateServerHost for MenuTestHost {
+    fn transaction_lifecycle(&self) -> mod_api::TransactionLifecycle {
+        if self.journal.depth() > 0 {
+            mod_api::TransactionLifecycle::Open
+        } else {
+            mod_api::TransactionLifecycle::None
+        }
+    }
+}
+mod_api::impl_server_host_areas!(MenuTestHost, except(mod_state, services));
 
 impl mod_api::prelude::KeysBackend for MenuTestHost {
     fn item_key_id(&self, key: ItemKey) -> Option<&str> {
@@ -926,11 +966,54 @@ impl mod_api::prelude::LevelEntitiesBackendMut for MenuTestHost {
         Ok(Some(EntityRef::new(WorldEpoch::new(1), 1000)))
     }
 }
+/// `LevelRef::with_random`: the level's live stream, lent for one draw closure.
+impl mod_api::prelude::LevelTickingBackendMut for MenuTestHost {
+    fn level_block_tick(&mut self, _level: LevelRef, _pos: [i32; 3]) -> bool {
+        false
+    }
+    fn level_block_random_tick(&mut self, _level: LevelRef, _pos: [i32; 3]) -> bool {
+        false
+    }
+    fn with_level_random(&mut self, level: LevelRef, draw: mod_api::RandomDraw<'_>) {
+        if level == self.fake.level.level()
+            && let Some(random) = self.level_random.as_mut()
+        {
+            draw.run(random);
+        }
+    }
+}
+/// The sound calls the bridge makes: `next_sound_seed` then `play_seeded_sound`.
+impl mod_api::prelude::LevelEffectsBackendMut for MenuTestHost {
+    fn level_next_sound_seed(&mut self, level: LevelRef) -> Option<i64> {
+        use mod_api::RandomSource as _;
+        (level == self.fake.level.level()).then(|| self.sound_seeds.next_long())
+    }
+    fn level_play_seeded_sound(
+        &mut self,
+        level: LevelRef,
+        sound: &str,
+        at: [f64; 3],
+        _source: mod_api::SoundSource,
+        volume: f32,
+        pitch: f32,
+        _except: Option<PlayerRef>,
+        seed: i64,
+    ) -> bool {
+        if level != self.fake.level.level() {
+            return false;
+        }
+        self.sounds
+            .push((sound.to_owned(), at, volume, pitch, seed));
+        true
+    }
+}
 mod_api::impl_backend_mut_areas!(
     MenuTestHost,
     except(
         items,
+        level_effects,
         level_entities,
+        level_ticking,
         menus,
         player_inventory,
         player_menus,
@@ -1118,6 +1201,7 @@ pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
          public final class Probe implements ModInitializer {\n\
            public static Block BENCH;\n\
            public static Block CHAIN_BENCH;\n\
+           public static Block DRAW_BENCH;\n\
            @Override public void onInitialize() {\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"bench\"), BenchMenu.TYPE);\n\
              BENCH = new Bench(BlockBehaviour.Properties.of());\n\
@@ -1128,6 +1212,8 @@ pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"odd_bench\"), new OddBench(BlockBehaviour.Properties.of()));\n\
              CHAIN_BENCH = new ChainBench(BlockBehaviour.Properties.of());\n\
              Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"chain_bench\"), CHAIN_BENCH);\n\
+             DRAW_BENCH = new DrawBench(BlockBehaviour.Properties.of());\n\
+             Registry.register(BuiltInRegistries.BLOCK, Identifier.fromNamespaceAndPath(\"demo\", \"draw_bench\"), DRAW_BENCH);\n\
            }\n\
          }",
     ),
@@ -1150,6 +1236,51 @@ pub(crate) const DEMO_SOURCES: &[(&str, &str)] = &[
              if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
              player.openMenu(new SimpleMenuProvider((id, inventory, p) -> new BenchMenu(id, inventory, ContainerLevelAccess.create(level, pos)), Component.translatable(\"container.demo.bench\")));\n\
              return InteractionResult.CONSUME;\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/DrawBench.java",
+        "package demo;\n\
+         import net.minecraft.core.BlockPos;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.InteractionResult;\n\
+         import net.minecraft.world.SimpleMenuProvider;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.level.Level;\n\
+         import net.minecraft.world.level.block.Block;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         import net.minecraft.world.phys.BlockHitResult;\n\
+         public class DrawBench extends Block {\n\
+           public DrawBench(Properties properties) { super(properties); }\n\
+           @Override protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hit) {\n\
+             if (level.isClientSide()) return InteractionResult.SUCCESS;\n\
+             player.openMenu(new SimpleMenuProvider((id, inventory, p) -> new DrawBenchMenu(id, inventory, ContainerLevelAccess.create(level, pos), level), Component.translatable(\"container.demo.bench\")));\n\
+             return InteractionResult.CONSUME;\n\
+           }\n\
+         }",
+    ),
+    (
+        // The bench, but its `removed` draws the level's random after vanilla's: on a
+        // disconnect, `clearContainer` has dropped the inputs by then.
+        "demo/DrawBenchMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ContainerLevelAccess;\n\
+         import net.minecraft.world.level.Level;\n\
+         import net.minecraft.world.level.block.state.BlockState;\n\
+         public class DrawBenchMenu extends BenchMenu {\n\
+           private final Level level;\n\
+           public DrawBenchMenu(int id, Inventory inventory, ContainerLevelAccess access, Level level) {\n\
+             super(id, inventory, access);\n\
+             this.level = level;\n\
+           }\n\
+           @Override protected boolean isValidBlock(BlockState state) { return state.is(Probe.DRAW_BENCH); }\n\
+           @Override public void removed(Player player) {\n\
+             super.removed(player);\n\
+             System.out.println(\"mod: removed drew \" + level.getRandom().nextInt());\n\
            }\n\
          }",
     ),
@@ -1566,7 +1697,14 @@ pub(crate) const STUBS: &[(&str, &str)] = &[
     (
         "net/minecraft/world/level/Level.java",
         "package net.minecraft.world.level;\n\
-         public abstract class Level { public boolean isClientSide() { return false; } }",
+         public abstract class Level {\n\
+           public boolean isClientSide() { return false; }\n\
+           public net.minecraft.util.RandomSource getRandom() { return null; }\n\
+         }",
+    ),
+    (
+        "net/minecraft/util/RandomSource.java",
+        "package net.minecraft.util; public interface RandomSource { int nextInt(); }",
     ),
     (
         "net/minecraft/world/inventory/Slot.java",
@@ -1763,6 +1901,8 @@ fn open_bench(java: &HorizonJava, host: &mut MenuTestHost) -> i32 {
         .window
 }
 
+/// The whole click, counted when a step of it counted (`runtime/live_menu.rs`, `run_call`).
+const CONTAINER_CLICK: &str = "net/minecraft/server/network/ServerGamePacketListenerImpl#handleContainerClick(Lnet/minecraft/network/protocol/game/ServerboundContainerClickPacket;)V";
 const SLOT_TAKE: &str = "bridge: sunrise#live_menu:menu_slot_take_not_dispatched";
 
 /// The two-input combiner from end to end through the hooks: a provider whose `createMenu`
@@ -2237,6 +2377,94 @@ fn a_disconnect_drops_the_inputs_in_slot_order() {
     });
 }
 
+/// A Java `removed` that draws `level.getRandom()` after vanilla's `removed` has handed the
+/// inputs on (`clearContainer`, `dropOrPlaceInInventory`). On a disconnect they drop: a drop is
+/// an effect Sunrise carries out after the call, on a path not verified to leave the level
+/// stream alone, so vanilla's order of the two isn't claimed: the draw is still Sunrise's live
+/// stream, but counted. A live close puts them back into the inventory instead, which draws
+/// nothing of the level's before Java's draw in vanilla either (`INVENTORY_CHANGED` waits for
+/// `broadcastChanges`), and the same draw is exact.
+#[test]
+fn a_level_random_draw_after_a_deferred_drop_is_counted() {
+    use mod_api::RandomSource as _;
+    on_a_big_stack("live-menu-draw-after-drop", || {
+        let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
+        for how in ["close", "disconnect"] {
+            let java = java_with(Arc::clone(&jar));
+            with_bridge(&java, BENCH_MENUS, || {
+                let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
+                host.level_random = Some(mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED));
+                host.world.inventory[0] = Some(host.stack("minecraft:cobblestone", 5));
+                host.block = "demo:draw_bench".to_owned();
+                assert_eq!(
+                    bench_part(&java, "demo:draw_bench").dispatch(
+                        &mut host,
+                        test_block_state(),
+                        &right_click(),
+                        false
+                    ),
+                    Some(InteractionResult::Consume)
+                );
+                // One cobblestone into the base; the other four put back.
+                assert!(host.click(hotbar(3, 0), 0, 0));
+                assert!(host.click(0, 1, 0));
+                assert!(host.click(hotbar(3, 0), 0, 0));
+                host.tick();
+                assert_eq!(counted(&java), [], "{how}");
+                if how == "disconnect" {
+                    host.disconnect();
+                } else {
+                    assert!(host.close_window());
+                    host.deliver_closes();
+                }
+                assert_eq!(held_window(&java), None, "{how}");
+                // `removed` drew exactly one `nextInt()` from the live stream.
+                let mut expected = mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED);
+                expected.next_int();
+                assert_eq!(
+                    host.level_random.as_mut().unwrap().next_long(),
+                    expected.next_long(),
+                    "{how}"
+                );
+                let counted = counted(&java);
+                eprintln!("{how} counted: {counted:?}");
+                // A counted level-stream draw is no unmodelled host call (`level_random.rs`).
+                assert_eq!(
+                    java.state.lock().unwrap().jars[0]
+                        .row
+                        .block_use
+                        .unknown_host_calls,
+                    0,
+                    "{how}"
+                );
+                let after = (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1);
+                match how {
+                    "disconnect" => {
+                        assert_eq!(host.world.spawned.len(), 1);
+                        assert_eq!(
+                            counted,
+                            [
+                                ("bridge: sunrise#live_menu:drop".to_owned(), 1),
+                                (
+                                    "bridge: sunrise#live_menu:drop_without_player_throw"
+                                        .to_owned(),
+                                    1
+                                ),
+                                after,
+                            ]
+                        );
+                    }
+                    _ => {
+                        assert!(host.world.spawned.is_empty());
+                        assert_eq!(host.held(), ["5 minecraft:cobblestone"]);
+                        assert_eq!(counted, []);
+                    }
+                }
+            });
+        }
+    });
+}
+
 /// The End's return replaces the player (`PlayerList.respawn` removes the old one with
 /// `CHANGED_DIMENSION` first): the Java menu closes as that old player, removed but for a
 /// dimension change, so what it held goes back into the inventory the new player kept, and
@@ -2402,6 +2630,8 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             host.world.inventory[1] = Some(host.stack("minecraft:ender_pearl", 3));
             host.world.counter = 7;
             host.block = "runes:crafting_altar[facing=north]".to_owned();
+            // The level's live `Level.random`, which Sunrise lends for each Java call.
+            host.level_random = Some(mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED));
 
             let altar =
                 JavaBlockUsePart::new(Arc::clone(&java.state), "runes:crafting_altar".to_owned());
@@ -2450,28 +2680,35 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             let taken = counted(&java);
             eprintln!("taking the arcane stones counted: {taken:?}");
             // Runes' `RuneCrafter` cooldown read the player's `tickCount` and position (Sunrise's
-            // facts, so exact) and went on to its crafting sound: the level's `RandomSource` for
-            // its pitch is unknown, counted. `RecipeCraftingHolder.awardUsedRecipes`'
+            // facts, so exact) and went on to its crafting sound, whose volume is
+            // `0.9f + 0.1f * world.getRandom().nextFloat()` (`onTake` +82..+99): the level's
+            // live stream, lent for the call, answers it. `RecipeCraftingHolder.awardUsedRecipes`'
             // `RECIPE_CRAFTED` trigger has no Sunrise call (vanilla triggers aren't lent), and
             // the take's `menu_slot_take` is the engine's to raise: both counted.
             //
-            // The counted `Level#getRandom()` answers `null`, and `onTake` calls `nextFloat()`
-            // on it for the sound's pitch: a `NullPointerException` at `onTake` +89 that vanilla's
-            // real `RandomSource` never throws, which `clicked` wraps in its `ReportedException`.
-            // The items above moved before it (`onTake` consumed the inputs first), but no
-            // crafting sound plays and `onPlayedRuneCraftingSound` never runs. This is the
-            // counted call's consequence, pinned to it: once the level's random is modelled,
-            // this fails and the take must run clean.
+            //
+            // With `getRandom()` answered, `onTake` runs to its end (no `NullPointerException` at
+            // +89, no `ReportedException`): the sound plays and `onPlayedRuneCraftingSound` runs.
+            // Its draw comes after `awardUsedRecipes` in `onTake` (+18 against +86), and Sunrise
+            // carries the recipe unlock out after the call: in vanilla an unlock can complete an
+            // advancement whose reward loot draws `level.random` first, so the draw's order
+            // isn't claimed (`DRAW_AFTER_DEFERRED_EFFECT`, `runtime/level_random.rs`). A counted
+            // draw counts as any counted call does: the `onTake` override's `vcall` sees it and
+            // the click stops there, counted (`CONTAINER_CLICK`). What that skips: `doClick`'s
+            // trailing `slot.setChanged()` (the result slot's `ResultContainer.setChanged` is
+            // empty in 26.3), and `handleContainerClick`'s `resumeRemoteUpdates` and
+            // `broadcastChanges` (the slot and cursor packets, which Sunrise sends for its own
+            // window; no inventory or data slot changed). The take itself, its stat, the recipe,
+            // the sound and `onPlayedRuneCraftingSound` all ran inside `onTake`, before it.
+            assert_eq!(take_failures(&java), []);
+            // The draw is a counted call, never an unmodelled one: `block_use`'s unmodelled tally
+            // holds only the click it stopped.
             assert_eq!(
-                take_failures(&java),
-                [FailedCall {
-                    failure: format!(
-                        "menu call: uncaught exception net/minecraft/ReportedException: \
-                         Container click; caused by {RUNES_TAKE_NPE}"
-                    ),
-                    counted: BTreeMap::from([(LEVEL_GET_RANDOM.to_owned(), 1)]),
-                    times: 1,
-                }]
+                java.state.lock().unwrap().jars[0]
+                    .row
+                    .block_use
+                    .unknown_host_calls,
+                1
             );
             assert_eq!(
                 taken,
@@ -2481,9 +2718,40 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
                         "bridge: sunrise#live_menu:recipe_crafted_trigger".to_owned(),
                         1
                     ),
-                    (LEVEL_GET_RANDOM.to_owned(), 1),
+                    (CONTAINER_CLICK.to_owned(), 1),
+                    (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1),
                 ]
             );
+            // The sound went out on Sunrise once, seeded from the server's sound-seed stream,
+            // at the player, with the volume drawn from the lent `Level.random` (its first draw:
+            // nothing earlier in this session drew it).
+            let mut level_random = mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED);
+            let mut sound_seeds = mod_api::LegacyRandomSource::new(SOUND_SEED_STREAM);
+            let volume = {
+                use mod_api::RandomSource as _;
+                level_random.next_float() * 0.1 + 0.9
+            };
+            let seed = {
+                use mod_api::RandomSource as _;
+                sound_seeds.next_long()
+            };
+            assert_eq!(host.sounds.len(), 1, "{:?}", host.sounds);
+            let (sound, at, played_volume, pitch, played_seed) = host.sounds[0].clone();
+            eprintln!("the crafting sound: {sound} at {at:?}, volume {played_volume}");
+            assert!(sound.starts_with("runes:"), "{sound}");
+            // `Player.getX/Y/Z()`: the feet (`MenuTestHost::entity_position`).
+            assert_eq!(at, [host.eye[0], host.eye[1] - 1.62, host.eye[2]]);
+            assert_eq!(played_volume.to_bits(), volume.to_bits());
+            assert_eq!(pitch, 1.0);
+            assert_eq!(played_seed, seed);
+            // The live stream moved by exactly that one draw.
+            {
+                use mod_api::RandomSource as _;
+                assert_eq!(
+                    host.level_random.as_mut().unwrap().next_long(),
+                    level_random.next_long()
+                );
+            }
 
             // Close: the stones (Sunrise's cursor return) and the pearls (Runes' `removed`).
             assert!(host.close_window());
@@ -2503,27 +2771,16 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             // on (BUGS-3d34 #3: they read `ran-clean`, 0 unknown host calls).
             stop_server(&mut host);
             let row = report_row(&java);
-            assert_eq!(
-                row["summary"],
-                "ran-clean, 1 block-use/menu failure, 3 counted calls since start"
-            );
+            assert_eq!(row["summary"], "ran-clean, 4 counted calls since start");
             assert_eq!(
                 row["counted"]["since_start"],
                 serde_json::json!({
                     SLOT_TAKE: 1,
                     "bridge: sunrise#live_menu:recipe_crafted_trigger": 1,
-                    LEVEL_GET_RANDOM: 1,
+                    CONTAINER_CLICK: 1,
+                    crate::runtime::DRAW_AFTER_DEFERRED_EFFECT: 1,
                 })
             );
         });
     });
 }
-
-/// `Level#getRandom()`, which Decaf doesn't model for a live menu: counted, answering `null`.
-const LEVEL_GET_RANDOM: &str =
-    "net/minecraft/world/level/Level#getRandom()Lnet/minecraft/util/RandomSource;";
-
-/// What Runes' `onTake` throws on that `null` (Decaf's failure line for it).
-const RUNES_TAKE_NPE: &str = "uncaught exception java/lang/NullPointerException: Cannot invoke \
-     \"net.minecraft.util.RandomSource.nextFloat()\" (at \
-     net/runes/crafting/RuneCraftingScreenHandler#onTake +89)";

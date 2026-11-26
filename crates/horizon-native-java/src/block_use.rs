@@ -1582,6 +1582,24 @@ fn active_level_call(
                 crate::recipe_models::RECIPE_MANAGER_KEY.into(),
             ))
         }
+        // `Level.getRandom()`: the level's live stream while the embedder lends it for this
+        // call (`level_random.rs`); counted otherwise.
+        ("getRandom", "()Lnet/minecraft/util/RandomSource;")
+            if active.side == BlockUseSide::Server =>
+        {
+            match host.lent_level_random_handle_impl(&active.dimension) {
+                Some(handle) => Ok(handle),
+                None => host.unknown_host_call(r),
+            }
+        }
+        // `playSound` and the other level sound calls (`level_sound.rs`), only while the
+        // embedder defers server sound seeds: then it carries the recorded sounds out after the
+        // call. Otherwise they stay counted, as nothing would play them.
+        _ if active.side == BlockUseSide::Server && host.level_sound.host_deferred_server_seeds => {
+            let marker = format!("game/level/{}", active.dimension);
+            crate::level_sound::server_facade_sound_call(host, &marker, r, args)
+                .unwrap_or_else(|| host.unknown_host_call(r))
+        }
         _ => host.unknown_host_call(r),
     }
 }

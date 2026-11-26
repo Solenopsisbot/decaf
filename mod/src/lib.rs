@@ -345,6 +345,7 @@ mod client;
 mod content;
 pub mod game_dispatch;
 mod game_hooks;
+mod level_random;
 mod live_menu;
 #[cfg(test)]
 mod live_menu_tests;

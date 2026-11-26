@@ -2431,10 +2431,44 @@ fn has_infinite_materials(rt: &mut Runtime<'_, impl Host>, player: &Value) -> R<
 }
 
 fn record(rt: &mut Runtime<'_, impl Host>, effect: LiveMenuEffect) -> R<()> {
+    // Carried out after the call returns: one that may draw a lent level
+    // stream puts every later lent draw out of order (`level_random.rs`).
+    let quiet = draws_no_level_random(&effect);
     with_active(rt, |active| {
         active.live_effects.push(effect);
         Ok(())
-    })
+    })?;
+    std_host(rt)?.note_deferred_effect(quiet);
+    Ok(())
+}
+
+/// The allow-list of recorded effects whose carrying out draws no level's
+/// `Level.random`: packets, stats and notices (`level_random.rs`). Not on it:
+/// - `InventoryChangedCriterion`, `RecipeCrafted` and `AwardRecipes`: a
+///   criterion (a recipe unlock fires `RECIPE_UNLOCKED`) can complete an
+///   advancement at once, and `AdvancementRewards.grant` rolls its loot with
+///   `LootContext$Builder.create(Optional.empty())`, which falls back to
+///   `ServerLevel.getRandom()`;
+/// - `Drop`: in 26.3 a drop draws only entity randoms (`ItemEntity`'s own and
+///   the player's, javap), but the embedder's drop path isn't verified to
+///   leave the level stream alone.
+///
+/// A new effect must take a side here.
+fn draws_no_level_random(effect: &LiveMenuEffect) -> bool {
+    match effect {
+        LiveMenuEffect::InitialData { .. }
+        | LiveMenuEffect::SlotChanged { .. }
+        | LiveMenuEffect::CarriedChanged { .. }
+        | LiveMenuEffect::DataChanged { .. }
+        | LiveMenuEffect::AwardStat { .. }
+        | LiveMenuEffect::InventorySlotSent { .. }
+        | LiveMenuEffect::Closed { .. }
+        | LiveMenuEffect::SlotTaken { .. } => true,
+        LiveMenuEffect::InventoryChangedCriterion { .. }
+        | LiveMenuEffect::RecipeCrafted { .. }
+        | LiveMenuEffect::AwardRecipes { .. }
+        | LiveMenuEffect::Drop { .. } => false,
+    }
 }
 
 /// `player.drop(stack, retainOwnership, prediction)` (`ServerPlayer.drop` over
