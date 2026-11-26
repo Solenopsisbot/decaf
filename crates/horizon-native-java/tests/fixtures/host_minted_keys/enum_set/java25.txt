@@ -1,0 +1,1 @@
+[RED, GREEN, BLUE]|3|true|true|121|[]|java.lang.ExceptionInInitializerError:null|java.lang.NoClassDefFoundError:Could not initialize class demo.EnumSetProbe$Broken

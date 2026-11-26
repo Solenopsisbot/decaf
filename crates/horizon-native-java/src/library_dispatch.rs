@@ -81,34 +81,42 @@ impl<H: Host> Runtime<'_, H> {
                     frame: None,
                 });
             }
-            let values = self
-                .invoke(
-                    enum_class,
-                    "values",
-                    &format!("()[L{enum_class};"),
-                    None,
-                    &[],
-                )
-                .ok()
-                .and_then(|array| self.array(&array).ok().map(|values| values.into_owned()))
-                .filter(|values| !values.is_empty())
-                .unwrap_or_else(|| {
-                    file.fields
-                        .iter()
-                        .filter(|field| {
-                            field.is_static() && field.descriptor == format!("L{enum_class};")
-                        })
-                        .enumerate()
-                        .map(|(ordinal, field)| {
-                            self.static_fields
-                                .get(&format!("{enum_class}#{}{}", field.name, field.descriptor))
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    crate::jar_object::handle(format!("{enum_class}#{ordinal}"))
-                                })
-                        })
-                        .collect()
-                });
+            // The universe is what `values()` answers, as on Java 25: `EnumSet.noneOf` asks
+            // `Class.getEnumConstantsShared`, which calls `values()` reflectively. Its order
+            // is the set's (`RegularEnumSet` indexes the array), and an enum with no constants
+            // gives an empty set. Nothing is made up when it fails (#669: this used to swallow
+            // any failure and invent `<enum>#<ordinal>` handles from the class's static fields,
+            // non-constant fields of the enum's type included, under numbers the heap hands
+            // out to other objects).
+            //
+            // The reflective call initializes the class before the `try` that maps a failure
+            // to `null` (javap/JDK 25 run of `tests/fixtures/host_minted_keys/enum_set`), so a
+            // failing static initializer's `ExceptionInInitializerError` comes out of `allOf`
+            // as it is, and `NoClassDefFoundError: Could not initialize class …` on every
+            // later call.
+            self.ensure_initialized(enum_class)?;
+            let universe = match self.invoke(
+                enum_class,
+                "values",
+                &format!("()[L{enum_class};"),
+                None,
+                &[],
+            ) {
+                Ok(array) => array,
+                // A throw from `values()`'s own body (or no `values()` at all) is caught there
+                // and `allOf` throws `ClassCastException`; javac's `values()` never throws, so
+                // no Java 25 run pins that answer: counted.
+                Err(NativeError::UncaughtException { .. } | NativeError::MissingMethod(_)) => {
+                    return self.host.unknown_operand_call(r).map(Some);
+                }
+                // A refusal of the runtime's own (a budget, an unmodelled call) is no Java
+                // event: the call fails with it.
+                Err(error) => return Err(error),
+            };
+            // A `values()` answering `null` or no array: likewise unpinned, counted.
+            let Ok(values) = self.array(&universe).map(|values| values.into_owned()) else {
+                return self.host.unknown_operand_call(r).map(Some);
+            };
             let set = self.host.make_collection("java/util/EnumSet", values);
             if let Some(set) = &set
                 && let Some(marker) = crate::jar_object::object_key(set)

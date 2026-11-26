@@ -169,3 +169,24 @@ fn config_objects_made_after_a_game_hook_are_distinct() {
         assert!(counted.is_empty(), "{method}: {counted:?}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// EnumSet.allOf (`library_dispatch.rs`)
+
+/// `EnumSet.allOf` answers `values()`, in its order, and an empty enum's empty set; a failing
+/// static initializer's `ExceptionInInitializerError` (then `NoClassDefFoundError`) comes out of
+/// it as on Java 25 (`tests/fixtures/host_minted_keys/enum_set/java25.txt`, a JDK 25.0.5 run of
+/// the same class). Before #669 a failing or empty `values()` was swallowed and the set made up
+/// from the enum's static fields: `[null]` for an empty enum with a static field of its own
+/// type, and `<enum>#<ordinal>` handles, numbers the heap hands out to other objects, for a
+/// broken one.
+#[test]
+fn enum_set_all_of_answers_values_or_fails_as_java() {
+    let jar = compile("enum_set", &["host_minted_keys/enum_set"]);
+    let oracle =
+        std::fs::read_to_string(fixture("host_minted_keys/enum_set/java25.txt")).unwrap();
+    let mut host = jar.seed_host(StdHost::new());
+    let (answer, counted) = run(&jar, &mut host, "demo/EnumSetProbe", "run");
+    assert_eq!(answer, oracle.trim_end());
+    assert!(counted.is_empty(), "{counted:?}");
+}
