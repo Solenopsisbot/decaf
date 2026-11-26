@@ -1292,12 +1292,17 @@ fn active_player_call<H: Host>(
             let Some(prediction) = crate::runtime::live_menu::Prediction::from_value(prediction) else {
                 return host.unknown_host_call(r).map(Some);
             };
-            let Some(components) = host.item_stack_components(stack) else {
+            let Some(mut components) = host.item_stack_components(stack) else {
                 return host.unknown_host_call(r).map(Some);
             };
             if components.count <= 0 || components.item_id == "minecraft:air" {
                 return Ok(Some(Value::Ref(None)));
             }
+            // A jar component on the dropped stack crosses as its codec's NBT.
+            encode_jar_entries(rt, stack, &mut components)?;
+            let Some(host) = rt.host.as_std_host_mut() else {
+                return Ok(None);
+            };
             crate::runtime::live_menu::record_effect(
                 host,
                 LiveMenuEffect::Drop {
@@ -1341,6 +1346,39 @@ fn active_player_call<H: Host>(
         }
         _ => Ok(None),
     }
+}
+
+/// Encode each jar component value of `stack` that `components` could only call
+/// [`RuntimeComponentValue::Unsupported`] to its codec's NBT, in place.
+fn encode_jar_entries<H: Host>(
+    rt: &mut Runtime<'_, H>,
+    stack: &Value,
+    components: &mut StackComponents,
+) -> Result<(), NativeError> {
+    let Some(live) = rt
+        .host
+        .as_std_host()
+        .and_then(|host| recipe_models::read_live_stack_opt(host, stack))
+    else {
+        return Ok(());
+    };
+    for (id, entry) in &mut components.patch {
+        if !matches!(entry, Some(RuntimeComponentValue::Unsupported)) {
+            continue;
+        }
+        let (Some(Some(value)), Some(type_value)) = (
+            live.patch.entries.get(id),
+            rt.host
+                .as_std_host()
+                .and_then(|host| component_type_value(host, id)),
+        ) else {
+            continue;
+        };
+        if let Some(nbt) = encode_component(rt, id, &type_value, value)? {
+            *entry = Some(RuntimeComponentValue::Nbt(nbt));
+        }
+    }
+    Ok(())
 }
 
 /// `ItemStack.set(type, value)` of a component whose new or prototype value is a jar object:
