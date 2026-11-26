@@ -9972,7 +9972,7 @@ impl Host for StdHost {
         {
             return Ok(Value::Ref(Some("container-level-access/null".into())));
         }
-        if let Some(value) = tool_material::static_field(&mut self.tool_material, r) {
+        if let Some(value) = tool_material::static_field(&mut self.tool_material, r, None) {
             return value;
         }
         // The constants already made; a first read needs the heap's allocator
@@ -10357,9 +10357,15 @@ impl Host for StdHost {
         next_object: &mut usize,
     ) -> Option<Result<Value, NativeError>> {
         let mut numbers = jar_object::Numbers::new(next_object);
-        let answer = vec2::static_field(&mut self.vec2, r, Some(&mut numbers)).or_else(|| {
-            entity_registration::static_field(&mut self.entity_registration, r, Some(&mut numbers))
-        });
+        let answer = vec2::static_field(&mut self.vec2, r, Some(&mut numbers))
+            .or_else(|| tool_material::static_field(&mut self.tool_material, r, Some(&mut numbers)))
+            .or_else(|| {
+                entity_registration::static_field(
+                    &mut self.entity_registration,
+                    r,
+                    Some(&mut numbers),
+                )
+            });
         if let Some(class) = numbers.take_exhausted() {
             self.note_allocation_numbers_exhausted(&class);
         }

@@ -406,6 +406,7 @@ impl StdHost {
         // Game constants the models made as jar objects (`Vec2.ZERO`, `MobCategory.CREATURE`):
         // static finals, never unreachable, so their heap numbers are never freed (#669).
         self.vec2.root_texts(out);
+        self.tool_material.root_texts(out);
         self.entity_registration.root_texts(out);
         // Seeded `Level.random` handles kept per dimension (`level_sound.rs`).
         for held in self.level_sound.level_random_handles.values() {

@@ -389,3 +389,29 @@ fn model_layer_keys_are_no_allocation_keys() {
         );
     }
 }
+
+/// A jar's own `new ToolMaterial(..)` made after `ToolMaterial.WOOD` is read is another object
+/// (real 26.3 server jar on JDK 25.0.5: `tests/fixtures/host_minted_keys/tool_material/java25.txt`,
+/// `false|false|59|7`). The record's constructor is the game's, so the new object's fields are
+/// unknown: its `durability()` is counted, never answered. Before #669's follow-up the constant
+/// was `ToolMaterial#800000` from a counter of its own: with the heap at 800000 the `new` took
+/// the same key, `made == WOOD` answered `true` and `made.durability()` WOOD's 59, uncounted.
+#[test]
+fn a_tool_material_constant_never_shares_a_new_records_key() {
+    let jar = compile("tool_material", &["host_minted_keys/tool_material"]);
+    let oracle =
+        std::fs::read_to_string(fixture("host_minted_keys/tool_material/java25.txt")).unwrap();
+    let oracle: Vec<&str> = oracle.trim_end().split('|').collect();
+    let mut host = jar.seed_host(StdHost::new());
+    host.heap.next_object = 800_000;
+    let (answer, counted) = run(&jar, &mut host, "demo/ToolKeys", "run");
+    let answer: Vec<&str> = answer.split('|').collect();
+    // `made == wood`, `made == ToolMaterial.WOOD`, `wood.durability()`: exact.
+    assert_eq!(answer[..3], oracle[..3], "{answer:?}");
+    assert!(
+        counted
+            .iter()
+            .any(|(call, _)| call.starts_with("net/minecraft/world/item/ToolMaterial#durability")),
+        "the new record's durability() must be counted: {answer:?} {counted:?}"
+    );
+}

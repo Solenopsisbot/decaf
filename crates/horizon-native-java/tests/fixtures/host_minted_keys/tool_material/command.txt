@@ -1,0 +1,5 @@
+Captured with Java 25.0.5+8 (`openjdk version "25.0.5" 2026-10-20 LTS`) and the real 26.3 server jar
+(the bundled `META-INF/versions/26.3/server-26.3.jar` plus every jar under `META-INF/libraries`):
+CP=<server>/META-INF/versions/26.3/server-26.3.jar:$(find <server>/META-INF/libraries -name '*.jar' | sort | tr '\n' ':')
+javac -cp "$CP" -d out demo/ToolKeys.java
+(cd out && java -cp ".:$CP" demo.ToolKeys 2>&1 | sed -n 's/^\[[^]]*\] \[main\/INFO\]: \[STDOUT\]: ROW //p') > java25.txt
