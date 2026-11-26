@@ -82,6 +82,12 @@ struct Row {
     /// `sunrise#menu_screen:...` tags among them). Read from the host when the report is
     /// written ([`LoadedJar::synced_row`]), so no call site can leave it behind.
     counted: BTreeMap<String, usize>,
+    /// The menu screen's Java calls that failed (`menu_screen.rs`): an open's `MenuType.create`,
+    /// constructor, `init` or slot read, a frame's data sync or draw, a close's `removed()`.
+    menu_screen_failed: usize,
+    /// What those failures said, each with the calls the failed call counted (distinct ones, as
+    /// the server row's `block_use.failures`).
+    menu_screen_failures: Vec<crate::block_use::FailedCall>,
 }
 
 impl Row {
@@ -95,11 +101,34 @@ impl Row {
         }
     }
 
+    /// Count one failed menu-screen call (`failure` names the call and says what it threw or
+    /// why the runtime refused it) with the calls it counted. Answers whether the failure is new
+    /// to the row, so a draw failing every frame is logged once.
+    pub(crate) fn note_menu_screen_failure(
+        &mut self,
+        failure: String,
+        counted: &BTreeMap<String, usize>,
+    ) -> bool {
+        self.menu_screen_failed += 1;
+        crate::block_use::note_failed_call(&mut self.menu_screen_failures, failure, counted)
+    }
+
+    /// The verdict, qualified by the failures since (as the server row's summary is): a jar
+    /// whose screens failed never reads as an unqualified clean run.
+    fn summary(&self) -> String {
+        match self.menu_screen_failed {
+            0 => self.verdict.to_owned(),
+            1 => format!("{}, 1 menu-screen failure", self.verdict),
+            failed => format!("{}, {failed} menu-screen failures", self.verdict),
+        }
+    }
+
     fn json(&self) -> serde_json::Value {
         serde_json::json!({
             "file": self.file,
             "id": self.id,
             "verdict": self.verdict,
+            "summary": self.summary(),
             "host_calls": self.host_calls,
             "unknown_host_call_count": self.unknown_host_calls,
             "counted": self.counted,
@@ -118,8 +147,42 @@ impl Row {
                 "client_listeners": self.listeners,
                 "unfired_registrations": self.unsupported.iter().map(|(source, count)| serde_json::json!({"source": source, "count": count})).collect::<Vec<_>>(),
                 "refused": self.refused_registrations,
+                "menu_screen": {
+                    "failed": self.menu_screen_failed,
+                    "failures": crate::block_use::failed_calls_json(&self.menu_screen_failures),
+                },
             }
         })
+    }
+}
+
+/// The row's log line at client stop: the summary, then each counted call by name and each
+/// failure's text, so the log never shows a jar whose screens failed as a clean run.
+impl std::fmt::Display for Row {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "client {} ({}) {} ({} host calls, {} unknown host calls",
+            self.file,
+            self.id,
+            self.summary(),
+            self.host_calls,
+            self.unknown_host_calls
+        )?;
+        if let Some(reason) = &self.reason {
+            write!(f, ", reason: {reason}")?;
+        }
+        if !self.counted.is_empty() {
+            f.write_str("; counted:")?;
+            for (index, (name, count)) in self.counted.iter().enumerate() {
+                let separator = if index == 0 { " " } else { ", " };
+                write!(f, "{separator}{name} x{count}")?;
+            }
+        }
+        for failure in &self.menu_screen_failures {
+            write!(f, "; failed x{}: {}", failure.times, failure.failure)?;
+        }
+        f.write_str(")")
     }
 }
 
@@ -243,6 +306,17 @@ impl State {
     pub(crate) fn resident(&mut self, index: usize) -> (&NativeJar, &mut StdHost) {
         let loaded = &mut self.jars[index];
         (&*loaded.jar, &mut loaded.host)
+    }
+
+    /// Each row's log line ([`Row`]'s `Display`), as the report has it now.
+    pub(crate) fn row_lines(&self) -> Vec<String> {
+        self.retired
+            .iter()
+            .cloned()
+            .chain(self.jars.iter().map(LoadedJar::synced_row))
+            .chain(self.refused.iter().cloned())
+            .map(|row| row.to_string())
+            .collect()
     }
 
     pub(crate) fn report_rows(&self) -> impl Iterator<Item = serde_json::Value> + '_ {

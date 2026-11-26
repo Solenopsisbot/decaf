@@ -178,7 +178,8 @@ impl State {
     /// `MenuScreens.create` for an opening of `open.menu`: the resident jar whose
     /// `MenuScreens.register` covers that menu type builds and initializes its screen. `None`
     /// when no jar registered one (vanilla logs and opens nothing, and so does Sunrise) or the
-    /// screen could not be built (counted on the jar).
+    /// screen could not be built (a Java failure is kept on the jar's row with its text; a screen
+    /// Sunrise cannot show is counted).
     fn open_menu_screen(
         &mut self,
         host: &dyn ClientHost,
@@ -223,12 +224,28 @@ impl State {
             .host
             .begin_client_frame(screen_frame(size, player), &[]);
         let screen_before = loaded.host.client_active_screen_value();
+        let counted_before = crate::counted_by_name(&loaded.host);
         let built = build_screen(loaded, open, menu_type, title);
         loaded.host.end_client_frame();
         loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
         let (layout, java_layout) = match built {
             Ok(layout) => layout,
-            Err(reason) => {
+            Err(not_built) => {
+                let reason = match not_built {
+                    // A Java call threw or the runtime refused it: a failure of the jar's, kept
+                    // with its text and the calls the open counted, as the server row keeps a
+                    // failed block use.
+                    NotBuilt::Failed(reason) => {
+                        let counted = crate::counted_since(&loaded.host, &counted_before);
+                        loaded.row.note_menu_screen_failure(
+                            format!("open {}: {reason}", open.menu),
+                            &counted,
+                        );
+                        reason
+                    }
+                    // The screen built, but Sunrise's window cannot show it: counted (tagged).
+                    NotBuilt::Refused(reason) => reason,
+                };
                 log::warn!(
                     "{LOG}: client {} menu screen {} not opened: {reason}",
                     loaded.row.id,
@@ -280,17 +297,22 @@ impl State {
             .begin_client_frame(screen_frame(frame.gui_size, player), &[]);
         // The server's data-slot values Sunrise holds, into the client menu before the frame,
         // as vanilla's `ClientboundContainerSetDataPacket` lands before the render.
+        let counted_before = crate::counted_by_name(&loaded.host);
         if let Err(error) = loaded
             .jar
             .sync_client_menu_data(&mut loaded.host, frame.data)
         {
-            log::debug!("{LOG}: client {} menu data: {error}", loaded.row.id);
+            note_failure(loaded, "menu data", &error, &counted_before);
         }
         // Sunrise's frame carries no partial tick: a jar `extractBackground` counts it.
+        let counted_before = crate::counted_by_name(&loaded.host);
         let (ops, result) =
             loaded
                 .jar
                 .draw_active_client_screen(&mut loaded.host, frame.pointer, None);
+        if let Err(error) = &result {
+            note_failure(loaded, "draw", error, &counted_before);
+        }
         // Sunrise draws the in-game backdrop under every mod screen; vanilla draws it only when
         // the screen's `extractBackground` chain reaches `Screen.extractBackground`. Decided
         // whatever the frame's result: a chain stopped by a counted call before `super` never
@@ -335,9 +357,6 @@ impl State {
                 .note_unknown_game_hook("sunrise#menu_screen:gui_paint_refused");
         }
         loaded.host.end_client_frame();
-        if let Err(error) = result {
-            log::debug!("{LOG}: client {} menu screen draw: {error}", loaded.row.id);
-        }
         loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
     }
 
@@ -398,11 +417,31 @@ fn close_on(loaded: &mut LoadedJar) {
     loaded
         .host
         .begin_client_frame(screen_frame(size, None), &[]);
+    let counted_before = crate::counted_by_name(&loaded.host);
     if let Err(error) = loaded.jar.close_active_client_screen(&mut loaded.host) {
-        log::debug!("{LOG}: client {} menu screen close: {error}", loaded.row.id);
+        note_failure(loaded, "close", &error, &counted_before);
     }
     loaded.host.end_client_frame();
     loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
+}
+
+/// Keep a failed Java call of the open screen (`call`: `menu data`, `draw`, `close`) on the jar's
+/// row with what it threw and the calls it counted since `counted_before`, and log it the first
+/// time: a draw runs every frame, and its failure is one row with a count.
+fn note_failure(
+    loaded: &mut LoadedJar,
+    call: &str,
+    error: &runtime::NativeError,
+    counted_before: &std::collections::BTreeMap<String, usize>,
+) {
+    let counted = crate::counted_since(&loaded.host, counted_before);
+    let failure = format!("{call}: {error}");
+    if loaded
+        .row
+        .note_menu_screen_failure(failure.clone(), &counted)
+    {
+        log::warn!("{LOG}: client {} menu screen {failure}", loaded.row.id);
+    }
 }
 
 /// Count a screen this bridge could not open, on the jar that registered it.
@@ -438,13 +477,22 @@ fn title_value(host: &dyn ClientHost, title: Option<&mod_api::Text>) -> Option<r
     runtime::screen_models::component_from_json(&json)
 }
 
+/// Why [`build_screen`] opened nothing.
+enum NotBuilt {
+    /// A Java call of the open threw, or the runtime refused it: the jar's failure, which the
+    /// row keeps with its text.
+    Failed(String),
+    /// The Java screen built, but Sunrise's window cannot show it: counted as a bridge tag.
+    Refused(String),
+}
+
 /// Construct, initialize and lay out the jar's screen in the current screen frame.
 fn build_screen(
     loaded: &mut LoadedJar,
     open: &MenuScreenOpen<'_>,
     menu_type: runtime::Value,
     title: runtime::Value,
-) -> Result<(MenuScreenLayout, ScreenLayout), String> {
+) -> Result<(MenuScreenLayout, ScreenLayout), NotBuilt> {
     let note = |loaded: &mut LoadedJar, reason: &str| {
         loaded
             .host
@@ -455,8 +503,7 @@ fn build_screen(
             .jar
             .create_client_menu(&mut loaded.host, menu_type.clone(), open.window)
     {
-        note(loaded, "client_menu_not_built");
-        return Err(format!("MenuType.create failed: {error}"));
+        return Err(NotBuilt::Failed(format!("MenuType.create failed: {error}")));
     }
     let layout = match loaded
         .jar
@@ -464,11 +511,14 @@ fn build_screen(
     {
         Ok(layout) => layout.layout,
         Err(error) => {
-            note(loaded, "screen_not_built");
-            return Err(format!("the screen did not open: {error}"));
+            return Err(NotBuilt::Failed(format!(
+                "the screen did not open: {error}"
+            )));
         }
     };
     if let Err(error) = loaded.jar.count_sunrise_screen_overrides(&mut loaded.host) {
+        // The screen opened; only the override census could not run, and each override it
+        // could not look at is counted by the runtime.
         log::debug!("{LOG}: client {} screen overrides: {error}", loaded.row.id);
     }
     // Sunrise labels the window with the server's title; vanilla's `extractLabels` draws the
@@ -483,8 +533,9 @@ fn build_screen(
     let presentation = match loaded.jar.client_screen_slot_presentation(&mut loaded.host) {
         Ok(presentation) => presentation,
         Err(error) => {
-            note(loaded, "slot_presentation_not_read");
-            return Err(format!("the slots' presentation: {error}"));
+            return Err(NotBuilt::Failed(format!(
+                "the slots' presentation: {error}"
+            )));
         }
     };
     let (screen_layout, mismatches) = sunrise_layout(&layout, &presentation, open);
@@ -496,12 +547,12 @@ fn build_screen(
         .map(|screen| (screen, java_layout))
         .ok_or_else(|| {
             note(loaded, "slot_count_mismatch");
-            format!(
+            NotBuilt::Refused(format!(
                 "the Java menu has {} slots, Sunrise's window {} + {}",
                 layout.slots.len(),
                 open.backing_slots,
                 open.player_slots
-            )
+            ))
         })
 }
 

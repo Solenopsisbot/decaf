@@ -223,6 +223,7 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"stash\"), StashMenu.TYPE);\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"boom\"), BoomMenu.TYPE);\n\
              Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"sour\"), SourMenu.TYPE);\n\
+             Registry.register(BuiltInRegistries.MENU, Identifier.fromNamespaceAndPath(\"demo\", \"glitch\"), GlitchMenu.TYPE);\n\
            }\n\
          }",
     ),
@@ -533,6 +534,39 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
          }",
     ),
     (
+        "demo/GlitchMenu.java",
+        "package demo;\n\
+         import net.minecraft.world.SimpleContainer;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         import net.minecraft.world.flag.FeatureFlags;\n\
+         import net.minecraft.world.inventory.AbstractContainerMenu;\n\
+         import net.minecraft.world.inventory.MenuType;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         public class GlitchMenu extends AbstractContainerMenu {\n\
+           public static final MenuType<GlitchMenu> TYPE = new MenuType<>(GlitchMenu::new, FeatureFlags.VANILLA_SET);\n\
+           public GlitchMenu(int id, Inventory inventory) {\n\
+             super(TYPE, id);\n\
+             this.addSlot(new Slot(new SimpleContainer(1), 0, 80, 35));\n\
+             this.addStandardInventorySlots(inventory, 8, 84);\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/GlitchScreen.java",
+        "package demo;\n\
+         import net.minecraft.client.gui.GuiGraphicsExtractor;\n\
+         import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;\n\
+         import net.minecraft.network.chat.Component;\n\
+         import net.minecraft.world.entity.player.Inventory;\n\
+         public class GlitchScreen extends AbstractContainerScreen<GlitchMenu> {\n\
+           public GlitchScreen(GlitchMenu menu, Inventory inventory, Component title) { super(menu, inventory, title); }\n\
+           @Override public void extractBackground(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {\n\
+             super.extractBackground(graphics, mouseX, mouseY, partialTick);\n\
+             throw new IllegalStateException(\"glitch\");\n\
+           }\n\
+         }",
+    ),
+    (
         "demo/ClientProbe.java",
         "package demo;\n\
          import net.fabricmc.api.ClientModInitializer;\n\
@@ -547,6 +581,7 @@ const SCREEN_SOURCES: &[(&str, &str)] = &[
              MenuScreens.register(StashMenu.TYPE, StashScreen::new);\n\
              MenuScreens.register(BoomMenu.TYPE, BoomScreen::new);\n\
              MenuScreens.register(SourMenu.TYPE, SourScreen::new);\n\
+             MenuScreens.register(GlitchMenu.TYPE, GlitchScreen::new);\n\
            }\n\
          }",
     ),
@@ -951,6 +986,11 @@ fn javac_container_screen_counts_the_overrides_sunrise_performs() {
                 counted_since(java, &before),
                 vec![
                     (
+                        "bridge: sunrise#menu_screen:screen_title_is_not_the_server_title"
+                            .to_owned(),
+                        1
+                    ),
+                    (
                         "demo/IconSlot#getNoItemIcon()Lnet/minecraft/resources/Identifier;"
                             .to_owned(),
                         1
@@ -962,11 +1002,6 @@ fn javac_container_screen_counts_the_overrides_sunrise_performs() {
                     ),
                     (
                         "demo/ShelfScreen#mouseClicked(Lnet/minecraft/client/input/MouseButtonEvent;Z)Z"
-                            .to_owned(),
-                        1
-                    ),
-                    (
-                        "game-hook re-entry: sunrise#menu_screen:screen_title_is_not_the_server_title"
                             .to_owned(),
                         1
                     ),
@@ -1064,13 +1099,12 @@ fn a_background_without_super_and_a_label_moved_by_init_are_counted() {
                 counted_since(java, &before),
                 vec![
                     (
-                        "game-hook re-entry: sunrise#menu_screen:backdrop_without_Screen.extractBackground"
+                        "bridge: sunrise#menu_screen:backdrop_without_Screen.extractBackground"
                             .to_owned(),
                         2
                     ),
                     (
-                        "game-hook re-entry: sunrise#menu_screen:layout_changed_after_open"
-                            .to_owned(),
+                        "bridge: sunrise#menu_screen:layout_changed_after_open".to_owned(),
                         1
                     ),
                     (
@@ -1132,7 +1166,7 @@ fn reads_in_removed_and_of_reused_containers_are_counted() {
                 counted_since(java, &before),
                 vec![
                     (
-                        "game-hook re-entry: sunrise#menu_screen:backdrop_without_Screen.extractBackground"
+                        "bridge: sunrise#menu_screen:backdrop_without_Screen.extractBackground"
                             .to_owned(),
                         2
                     ),
@@ -1216,7 +1250,7 @@ fn a_screen_that_fails_to_construct_or_to_close_leaves_no_stale_state() {
     on_a_big_stack("menu-screen-fail", || {
         with_client(
             screens_jar(),
-            &["demo:bench", "demo:boom", "demo:sour"],
+            &["demo:bench", "demo:boom", "demo:sour", "demo:glitch"],
             |java| {
                 let before = counted(java);
                 let host = ScreenHost::new([640, 480], 2);
@@ -1268,20 +1302,92 @@ fn a_screen_that_fails_to_construct_or_to_close_leaves_no_stale_state() {
                 let bench = open_as(32, "demo:bench", 3).expect("a fresh opening works");
                 assert!(java.lock_client().menu_screen_open());
                 drop(bench);
+                // A sour screen the window drops: its `removed()` throws on close.
+                let sour = open_as(33, "demo:sour", 1).expect("the sour screen opened again");
+                drop(sour);
+                assert_eq!(removals(java), Some(crate::runtime::Value::Int(2)));
+                assert!(!java.lock_client().menu_screen_open());
+                // A glitch screen whose `extractBackground` throws on every frame: one failure
+                // row, two times.
+                let glitch = open_as(34, "demo:glitch", 1).expect("the glitch screen opened");
+                bench_ops(&glitch);
+                bench_ops(&glitch);
+                drop(glitch);
+                // The failures are the jar's, with their text, never counted calls (no
+                // `screen_not_built` tag): what is counted is the switch-out a failed `removed()`
+                // made, and the partial tick the glitch frames read.
                 assert_eq!(
-                counted_since(java, &before),
-                vec![
-                    (
-                        "game-hook re-entry: sunrise#menu_screen:screen_not_built".to_owned(),
-                        2
-                    ),
-                    (
-                        "net/minecraft/client/gui/Gui#setScreen(Lnet/minecraft/client/gui/screens/Screen;)V"
-                            .to_owned(),
-                        1
-                    ),
-                ]
-            );
+                    counted_since(java, &before),
+                    vec![
+                        // The glitch screen's `super.extractBackground` reads the partial tick
+                        // Sunrise's frame does not carry, once per frame.
+                        (
+                            "net/minecraft/client/DeltaTracker#getGameTimeDeltaPartialTick(Z)F"
+                                .to_owned(),
+                            2
+                        ),
+                        (
+                            "net/minecraft/client/gui/Gui#setScreen(Lnet/minecraft/client/gui/screens/Screen;)V"
+                                .to_owned(),
+                            1
+                        ),
+                    ]
+                );
+                let row = java.lock_client().report_rows().next().unwrap();
+                assert_eq!(row["summary"], "ran-clean, 5 menu-screen failures");
+                assert_eq!(row["client"]["menu_screen"]["failed"], 5);
+                let failures: Vec<(String, u64)> = row["client"]["menu_screen"]["failures"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| {
+                        (
+                            row["failure"].as_str().unwrap().to_owned(),
+                            row["times"].as_u64().unwrap(),
+                        )
+                    })
+                    .collect();
+                let thrown = |message: &str, frame: &str| {
+                    format!(
+                        "uncaught exception java/lang/IllegalStateException: {message} (at {frame})"
+                    )
+                };
+                assert_eq!(
+                    failures,
+                    vec![
+                        (
+                            format!(
+                                "open demo:boom: the screen did not open: {}",
+                                thrown("boom", "demo/BoomScreen#<init> +16")
+                            ),
+                            1
+                        ),
+                        // The bench's open switched the sour screen out: its `removed()` threw.
+                        (
+                            format!(
+                                "open demo:bench: the screen did not open: {}",
+                                thrown("sour", "demo/SourScreen#removed +21")
+                            ),
+                            1
+                        ),
+                        (
+                            format!("close: {}", thrown("sour", "demo/SourScreen#removed +21")),
+                            1
+                        ),
+                        (
+                            format!(
+                                "draw: {}",
+                                thrown("glitch", "demo/GlitchScreen#extractBackground +18")
+                            ),
+                            2
+                        ),
+                    ]
+                );
+                let line = java.lock_client().row_lines().remove(0);
+                assert!(
+                    line.contains("ran-clean, 5 menu-screen failures") && line.contains("glitch"),
+                    "{line}"
+                );
             },
         );
     });
@@ -1391,6 +1497,79 @@ fn real_runes_altar_screen_opens_and_draws_through_the_sunrise_hooks() {
             );
             drop(screen);
             assert!(!java.lock_client().menu_screen_open());
+            assert_eq!(counted_since(java, &before), Vec::new());
+        });
+    });
+}
+
+/// Round 2 bug 1 (#609): after a few minutes of hovering Runes' items, every altar open failed
+/// with "RuneCraftingScreen#235 was collected while still reachable (a missed heap root)" until
+/// restart. The altar's `appendHoverText` allocates one `ChatFormatting[]` per hover and no
+/// object, while each hover's tooltip sink took a new number of its own: the collection that
+/// ran during a hover took the sink's number as the heap's limit and freed the numbers the
+/// screen's objects were then given. Here the client host runs Runes' creative-tab listeners
+/// and 1,500 altar hovers (well past a collection), as the game's creative inventory does, and
+/// then opens the altar: it opens as on a fresh client, nothing counted.
+#[test]
+fn real_runes_altar_screen_opens_after_many_tooltips_and_tab_builds() {
+    let Some(path) = std::env::var_os("RUNES_JAR") else {
+        eprintln!("RUNES_JAR is unset; real Runes tooltips-then-screen test skipped");
+        return;
+    };
+    let bytes = fs::read(&path).expect("read RUNES_JAR");
+    on_a_big_stack("menu-screen-runes-after-tooltips", move || {
+        with_client(bytes, &["runes:crafting"], |java| {
+            let before = counted(java);
+            {
+                use crate::runtime::client_surface::{
+                    tooltip_context, tooltip_display, tooltip_flag, tooltip_stack,
+                };
+                let mut client = java.lock_client();
+                let (jar, host) = client.resident(0);
+                for tab in ["minecraft:functional_blocks", "minecraft:combat"] {
+                    jar.creative_tab_contents(host, tab)
+                        .unwrap_or_else(|error| panic!("creative tab {tab}: {error}"));
+                }
+                let altar = host
+                    .observed_registry_entry("minecraft:item", "runes:crafting_altar")
+                    .expect("Runes registers its altar item")
+                    .value
+                    .clone();
+                for hover in 0..1500 {
+                    let lines = jar
+                        .run_item_tooltip(
+                            &altar,
+                            tooltip_stack(),
+                            tooltip_context(),
+                            tooltip_display(),
+                            tooltip_flag(false, true),
+                            host,
+                            &crate::runtime::ExecutionBudget::within(crate::JAR_BUDGET),
+                        )
+                        .unwrap_or_else(|error| panic!("altar hover {hover}: {error}"));
+                    assert_eq!(lines.len(), 1, "the altar's hint line");
+                }
+                // The hovers' arrays were collected: a collection ran while a sink was live.
+                assert!(
+                    host.resident_heap().arrays() < 750,
+                    "{} arrays kept: no collection ran during the hovers",
+                    host.resident_heap().arrays()
+                );
+            }
+            let host = ScreenHost::new([640, 480], 2);
+            let title = Text::translate("gui.runes.rune_crafting", Vec::new());
+            for window in [8, 9] {
+                let (_, screen) = mod_api::__private::create_menu_screen(
+                    &host,
+                    open(window, "runes:crafting", &title, 3),
+                )
+                .expect("the menu type has a screen factory");
+                let screen = screen
+                    .unwrap()
+                    .expect("RuneCraftingScreen opened after the tooltips");
+                assert_eq!(screen.layout().title_label, Some([60.0, 18.0]));
+                drop(screen);
+            }
             assert_eq!(counted_since(java, &before), Vec::new());
         });
     });

@@ -2791,8 +2791,12 @@ impl StdHost {
     ///
     /// Seeding makes the stream known again (see the module docs).
     pub fn seed_level_random(&mut self, level_marker: &str, seed: i64) {
-        // Out of random source numbers (counted): the stream stays as it was.
+        // Out of random source numbers (counted): no new copy, and the old one no longer stands
+        // for the stream (Java reseeded it), so forget it: every later draw counts. (The lent
+        // live stream, `level_random.rs`, is another handle that never reads this copy, and
+        // the embedder's stream did not move here, so its position stays known.)
         let Some(handle) = self.make_random_handle(random_source::legacy_state(seed)) else {
+            self.mark_one_sound_stream_unknown(&level_random_stream(level_marker));
             return;
         };
         self.level_sound

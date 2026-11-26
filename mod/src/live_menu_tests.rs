@@ -1903,7 +1903,7 @@ fn open_bench(java: &HorizonJava, host: &mut MenuTestHost) -> i32 {
 
 /// The whole click, counted when a step of it counted (`runtime/live_menu.rs`, `run_call`).
 const CONTAINER_CLICK: &str = "net/minecraft/server/network/ServerGamePacketListenerImpl#handleContainerClick(Lnet/minecraft/network/protocol/game/ServerboundContainerClickPacket;)V";
-const SLOT_TAKE: &str = "game-hook re-entry: sunrise#live_menu:menu_slot_take_not_dispatched";
+const SLOT_TAKE: &str = "bridge: sunrise#live_menu:menu_slot_take_not_dispatched";
 
 /// The two-input combiner from end to end through the hooks: a provider whose `createMenu`
 /// answers `null` advances both counters; the bench opens as the Sunrise window the player's
@@ -2134,8 +2134,7 @@ fn a_block_change_during_the_players_tick_is_counted_and_closes_at_do_tick() {
             assert_eq!(
                 counted(&java),
                 [(
-                    "game-hook re-entry: sunrise#live_menu:still_valid_before_game_mode_tick"
-                        .to_owned(),
+                    "bridge: sunrise#live_menu:still_valid_before_game_mode_tick".to_owned(),
                     1
                 )]
             );
@@ -2238,7 +2237,7 @@ fn data_slots_open_with_their_values_and_a_mismatched_layout_never_opens() {
             assert_eq!(
                 counted(&java),
                 [(
-                    "game-hook re-entry: sunrise#openModMenu:layout_unverified".to_owned(),
+                    "bridge: sunrise#openModMenu:layout_unverified".to_owned(),
                     1
                 )]
             );
@@ -2313,10 +2312,9 @@ fn a_disconnect_or_a_death_drops_what_the_menu_held() {
                 assert_eq!(
                     counted(&java),
                     [
-                        ("game-hook re-entry: sunrise#live_menu:drop".to_owned(), 1),
+                        ("bridge: sunrise#live_menu:drop".to_owned(), 1),
                         (
-                            "game-hook re-entry: sunrise#live_menu:drop_without_player_throw"
-                                .to_owned(),
+                            "bridge: sunrise#live_menu:drop_without_player_throw".to_owned(),
                             1
                         ),
                     ],
@@ -2368,10 +2366,9 @@ fn a_disconnect_drops_the_inputs_in_slot_order() {
             assert_eq!(
                 counted(&java),
                 [
-                    ("game-hook re-entry: sunrise#live_menu:drop".to_owned(), 2),
+                    ("bridge: sunrise#live_menu:drop".to_owned(), 2),
                     (
-                        "game-hook re-entry: sunrise#live_menu:drop_without_player_throw"
-                            .to_owned(),
+                        "bridge: sunrise#live_menu:drop_without_player_throw".to_owned(),
                         2
                     ),
                 ]
@@ -2447,9 +2444,9 @@ fn a_level_random_draw_after_a_deferred_drop_is_counted() {
                         assert_eq!(
                             counted,
                             [
-                                ("game-hook re-entry: sunrise#live_menu:drop".to_owned(), 1),
+                                ("bridge: sunrise#live_menu:drop".to_owned(), 1),
                                 (
-                                    "game-hook re-entry: sunrise#live_menu:drop_without_player_throw"
+                                    "bridge: sunrise#live_menu:drop_without_player_throw"
                                         .to_owned(),
                                     1
                                 ),
@@ -2563,10 +2560,7 @@ fn a_refused_toss_keeps_every_item() {
                             "1 minecraft:cobblestone"
                         );
                         assert!(spawned.is_empty());
-                        assert_eq!(
-                            tags,
-                            ["game-hook re-entry: sunrise#live_menu:drop", SLOT_TAKE]
-                        );
+                        assert_eq!(tags, ["bridge: sunrise#live_menu:drop", SLOT_TAKE]);
                     }
                     Some(TossRefusal::Cancel) => {
                         // Back onto the four it came from, in the selected hotbar slot.
@@ -2579,8 +2573,8 @@ fn a_refused_toss_keeps_every_item() {
                         assert_eq!(
                             tags,
                             [
-                                "game-hook re-entry: sunrise#live_menu:drop",
-                                "game-hook re-entry: sunrise#live_menu:drop_refused",
+                                "bridge: sunrise#live_menu:drop",
+                                "bridge: sunrise#live_menu:drop_refused",
                                 SLOT_TAKE,
                             ]
                         );
@@ -2597,9 +2591,9 @@ fn a_refused_toss_keeps_every_item() {
                         assert_eq!(
                             tags,
                             [
-                                "game-hook re-entry: sunrise#live_menu:drop",
-                                "game-hook re-entry: sunrise#live_menu:drop_refused",
-                                "game-hook re-entry: sunrise#live_menu:drop_refused_spawned",
+                                "bridge: sunrise#live_menu:drop",
+                                "bridge: sunrise#live_menu:drop_refused",
+                                "bridge: sunrise#live_menu:drop_refused_spawned",
                                 SLOT_TAKE,
                             ]
                         );
@@ -2721,7 +2715,7 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
                 [
                     (SLOT_TAKE.to_owned(), 1),
                     (
-                        "game-hook re-entry: sunrise#live_menu:recipe_crafted_trigger".to_owned(),
+                        "bridge: sunrise#live_menu:recipe_crafted_trigger".to_owned(),
                         1
                     ),
                     (CONTAINER_CLICK.to_owned(), 1),
@@ -2782,7 +2776,7 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
                 row["counted"]["since_start"],
                 serde_json::json!({
                     SLOT_TAKE: 1,
-                    "game-hook re-entry: sunrise#live_menu:recipe_crafted_trigger": 1,
+                    "bridge: sunrise#live_menu:recipe_crafted_trigger": 1,
                     CONTAINER_CLICK: 1,
                     crate::runtime::DRAW_AFTER_DEFERRED_EFFECT: 1,
                 })

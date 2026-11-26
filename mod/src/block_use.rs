@@ -62,6 +62,47 @@ pub(crate) struct FailedCall {
     pub(crate) times: usize,
 }
 
+/// Keep one failed call in `rows`: the same failure after the same counted calls is one row
+/// (`times` counts them), and at most [`MAX_FAILURE_ROWS`] distinct ones are kept. Answers
+/// whether it made a new row, so a caller that runs every frame logs each distinct failure once.
+pub(crate) fn note_failed_call(
+    rows: &mut Vec<FailedCall>,
+    failure: String,
+    counted: &BTreeMap<String, usize>,
+) -> bool {
+    if let Some(row) = rows
+        .iter_mut()
+        .find(|row| row.failure == failure && row.counted == *counted)
+    {
+        row.times += 1;
+        false
+    } else if rows.len() < MAX_FAILURE_ROWS {
+        rows.push(FailedCall {
+            failure,
+            counted: counted.clone(),
+            times: 1,
+        });
+        true
+    } else {
+        false
+    }
+}
+
+/// [`FailedCall`]s as the report shows them.
+pub(crate) fn failed_calls_json(rows: &[FailedCall]) -> serde_json::Value {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "failure": row.failure,
+                    "counted": row.counted,
+                    "times": row.times,
+                })
+            })
+            .collect(),
+    )
+}
+
 impl Tally {
     /// Count one failed call (`uses_failed`) and keep what it said with the counted calls it
     /// made: the same failure after the same counted calls is one row.
@@ -71,20 +112,7 @@ impl Tally {
         counted: &BTreeMap<String, usize>,
     ) {
         self.uses_failed += 1;
-        let failure = failure.into();
-        if let Some(row) = self
-            .failures
-            .iter_mut()
-            .find(|row| row.failure == failure && row.counted == *counted)
-        {
-            row.times += 1;
-        } else if self.failures.len() < MAX_FAILURE_ROWS {
-            self.failures.push(FailedCall {
-                failure,
-                counted: counted.clone(),
-                times: 1,
-            });
-        }
+        note_failed_call(&mut self.failures, failure.into(), counted);
     }
 
     pub(crate) fn note_refusal(&mut self, reason: impl Into<String>) {
@@ -104,11 +132,7 @@ impl Tally {
             "menus_refused": self.menus_refused,
             "refusals": self.refusals,
             "menu_calls": self.menu_calls,
-            "failures": self.failures.iter().map(|row| json!({
-                "failure": row.failure,
-                "counted": row.counted,
-                "times": row.times,
-            })).collect::<Vec<_>>(),
+            "failures": failed_calls_json(&self.failures),
         })
     }
 }

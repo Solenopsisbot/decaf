@@ -444,3 +444,25 @@ fn a_huge_consume_count_is_counted_instead_of_drawn() {
         ]
     );
 }
+
+/// `seed_level_random` refused for want of random source numbers: Decaf's seeded copy of the
+/// level's stream no longer stands for it, so it is forgotten and the stream is unknown; a
+/// `getRandom()` handle Java already holds then draws nothing (counted by its caller).
+#[test]
+fn a_refused_reseed_forgets_the_old_level_random_copy() {
+    let mut host = StdHost::new();
+    let marker = "game/level/minecraft:overworld";
+    host.seed_level_random(marker, 1);
+    let old = host
+        .level_random_handle_impl(marker)
+        .expect("a seeded copy");
+    assert!(host.draw_random_handle_long(&old).is_some());
+    host.next_random_source = u64::MAX;
+    host.seed_level_random(marker, 2);
+    assert!(!host.sound_stream_known(&crate::runtime::level_sound::level_random_stream(marker)));
+    assert_eq!(
+        host.draw_random_handle_long(&old),
+        None,
+        "the old seed no longer answers"
+    );
+}
