@@ -157,7 +157,11 @@ fn an_items_lore_is_its_declarations_component_patch_as_the_game_encodes_it() {
     }
     assert_eq!(files["wand"]["max_stack_size"], 1);
     for case in ["removed", "plain"] {
-        assert!(files[case].get("components").is_none(), "{case}: {}", files[case]);
+        assert!(
+            files[case].get("components").is_none(),
+            "{case}: {}",
+            files[case]
+        );
     }
     assert_eq!(
         host.unknown_host_call_count(),
@@ -177,23 +181,47 @@ fn runes_pouches_declare_their_lore_and_the_jar_loads_its_nested_bundle_api() {
         eprintln!("RUNES_JAR is unset; real Runes test skipped");
         return;
     };
-    let jar = NativeJar::from_path(std::path::Path::new(&jar)).expect("load real Runes jar");
-    let mut host = StdHost::new();
-    for entry in jar.discover_entrypoints("main") {
-        jar.execute(&entry.class, entry.method.as_deref(), "main", &mut host)
-            .expect("Runes main entrypoint");
-    }
-    assert_eq!(host.unknown_host_call_count(), 0, "{:?}", host.unknown_host_calls());
-    let files = item_files(&host);
-    let lore = serde_json::json!({
-        "minecraft:lore": [{"translate": "item.runes.rune_pouch.hint", "color": "gray"}]
-    });
-    for pouch in ["small_rune_pouch", "medium_rune_pouch", "large_rune_pouch"] {
-        assert_eq!(files[pouch]["components"], lore, "{pouch}: {}", files[pouch]);
-        assert_eq!(files[pouch]["max_stack_size"], 1, "{pouch}");
-    }
-    assert_eq!(files["large_rune_pouch"]["rarity"], "uncommon");
-    // The runes themselves set no component.
-    assert!(files["fire_stone"].get("components").is_none());
-    assert_eq!(host.loaded_jar_mods(jar.fabric_id.as_deref()), ["runes", "bundleapi"]);
+    // Unoptimised test builds need more than the default test thread's stack while Runes
+    // initialises its nested Bundle API classes (as `fixture_bundle_api`'s Runes test).
+    std::thread::Builder::new()
+        .name("runes-item-lore".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let jar =
+                NativeJar::from_path(std::path::Path::new(&jar)).expect("load real Runes jar");
+            // `seed_host` links the nested jars `fabric.mod.json` `jars` selects, as the probe does.
+            let mut host = jar.seed_host(StdHost::new().with_game_version("26.3"));
+            for entry in jar.discover_entrypoints("main") {
+                jar.execute(&entry.class, entry.method.as_deref(), "main", &mut host)
+                    .expect("Runes main entrypoint");
+            }
+            assert_eq!(
+                host.unknown_host_call_count(),
+                0,
+                "{:?}",
+                host.unknown_host_calls()
+            );
+            let files = item_files(&host);
+            let lore = serde_json::json!({
+                "minecraft:lore": [{"translate": "item.runes.rune_pouch.hint", "color": "gray"}]
+            });
+            for pouch in ["small_rune_pouch", "medium_rune_pouch", "large_rune_pouch"] {
+                assert_eq!(
+                    files[pouch]["components"], lore,
+                    "{pouch}: {}",
+                    files[pouch]
+                );
+                assert_eq!(files[pouch]["max_stack_size"], 1, "{pouch}");
+            }
+            assert_eq!(files["large_rune_pouch"]["rarity"], "uncommon");
+            // The runes themselves set no component.
+            assert!(files["fire_stone"].get("components").is_none());
+            assert_eq!(
+                host.loaded_jar_mods(jar.fabric_id.as_deref()),
+                ["runes", "bundleapi"]
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

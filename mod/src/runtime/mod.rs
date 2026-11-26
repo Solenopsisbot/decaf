@@ -7731,7 +7731,8 @@ impl StdHost {
     /// `Lists.transform`), an opaque list, or a longer one (the canonical constructor's
     /// `IllegalArgumentException`) keeps the call as it was.
     fn item_lore_init(&mut self, r: &MethodRef, receiver: &Value, args: &[Value]) -> Option<Value> {
-        if r.owner != ITEM_LORE_CLASS || r.name != "<init>" || r.descriptor != "(Ljava/util/List;)V" {
+        if r.owner != ITEM_LORE_CLASS || r.name != "<init>" || r.descriptor != "(Ljava/util/List;)V"
+        {
             return None;
         }
         let marker = jar_object::instance_key(receiver)?;

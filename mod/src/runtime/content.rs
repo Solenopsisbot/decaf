@@ -457,7 +457,10 @@ mod tests {
                         "component:minecraft:lore".to_owned(),
                         r#"[{"translate":"item.m3_fixture.pouch.hint","color":"gray"}]"#.to_owned(),
                     ),
-                    ("component:minecraft:broken".to_owned(), "not json".to_owned()),
+                    (
+                        "component:minecraft:broken".to_owned(),
+                        "not json".to_owned(),
+                    ),
                 ]),
             },
         )];
