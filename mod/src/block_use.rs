@@ -183,17 +183,11 @@ impl JavaBlockUsePart {
         match outcome {
             Ok(outcome) => {
                 jar.row.block_use.uses_ran += 1;
-                jar.row.block_use.unknown_host_calls += outcome.unknown_host_call_count;
-                if outcome.unknown_host_call_count > 0 {
-                    log::warn!(
-                        "{LOG}: {}: {} {} leaned on {} unmodelled host call(s): {:?}",
-                        jar.row.id,
-                        self.block_id,
-                        hook_name,
-                        outcome.unknown_host_call_count,
-                        outcome.unknown_host_calls
-                    );
-                }
+                crate::level_random::note_call_counts(
+                    &mut jar.row,
+                    &format!("{} {}", self.block_id, hook_name),
+                    &outcome.unknown_host_calls,
+                );
                 for applied in applied {
                     record_menu_outcome(jar, click.player, applied);
                 }
@@ -957,15 +951,11 @@ fn run_menu_closes(
         });
         match closed {
             Ok(Ok(Some(outcome))) => {
-                jar.row.block_use.unknown_host_calls += outcome.unknown_host_call_count;
-                if outcome.unknown_host_call_count > 0 {
-                    log::warn!(
-                        "{LOG}: {}: closing menu {window} leaned on {} unmodelled host call(s): {:?}",
-                        jar.row.id,
-                        outcome.unknown_host_call_count,
-                        outcome.unknown_host_calls
-                    );
-                }
+                crate::level_random::note_call_counts(
+                    &mut jar.row,
+                    &format!("closing menu {window}"),
+                    &outcome.unknown_host_calls,
+                );
                 if let Some(failure) = &outcome.failure {
                     // Vanilla's `handleContainerClose` would throw too; the menu stays
                     // installed, and the player's next `openMenu` closes it again.

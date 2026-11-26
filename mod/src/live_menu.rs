@@ -325,7 +325,6 @@ pub(crate) struct Prepared {
     /// Hook tags counted while building this (an effect Sunrise has no call for).
     pub(crate) counted: Vec<&'static str>,
     pub(crate) unknown_host_calls: BTreeMap<String, usize>,
-    pub(crate) unknown_host_call_count: usize,
     pub(crate) failure: Option<String>,
     /// Where the player was, for a drop Sunrise has no player to make.
     pub(crate) seen: Option<Seen>,
@@ -881,7 +880,6 @@ fn mirror(
         menu_effects: outcome.menu_effects,
         counted,
         unknown_host_calls: outcome.unknown_host_calls,
-        unknown_host_call_count: outcome.unknown_host_call_count,
         failure: outcome.failure,
         seen: None,
         throws_from_player: true,
@@ -1331,16 +1329,11 @@ pub(crate) fn record(state: &mut State, prepared: Prepared, applied: Applied) {
         return;
     };
     jar.row.block_use.menu_calls += 1;
-    jar.row.block_use.unknown_host_calls += prepared.unknown_host_call_count;
-    if prepared.unknown_host_call_count > 0 {
-        log::warn!(
-            "{LOG}: {}: menu {} leaned on {} unmodelled host call(s): {:?}",
-            jar.row.id,
-            prepared.window,
-            prepared.unknown_host_call_count,
-            prepared.unknown_host_calls
-        );
-    }
+    crate::level_random::note_call_counts(
+        &mut jar.row,
+        &format!("menu {}", prepared.window),
+        &prepared.unknown_host_calls,
+    );
     if let Some(failure) = &prepared.failure {
         // Vanilla's handler would throw too (`ReportedException("Container click")`); what the
         // Java menu did before it is mirrored all the same. The counted calls it made are

@@ -2431,6 +2431,15 @@ fn a_level_random_draw_after_a_deferred_drop_is_counted() {
                 );
                 let counted = counted(&java);
                 eprintln!("{how} counted: {counted:?}");
+                // A counted level-stream draw is no unmodelled host call (`level_random.rs`).
+                assert_eq!(
+                    java.state.lock().unwrap().jars[0]
+                        .row
+                        .block_use
+                        .unknown_host_calls,
+                    0,
+                    "{how}"
+                );
                 let after = (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1);
                 match how {
                     "disconnect" => {
@@ -2698,6 +2707,15 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             // window; no inventory or data slot changed). The take itself, its stat, the recipe,
             // the sound and `onPlayedRuneCraftingSound` all ran inside `onTake`, before it.
             assert_eq!(take_failures(&java), []);
+            // The draw is a counted call, never an unmodelled one: `block_use`'s unmodelled tally
+            // holds only the click it stopped.
+            assert_eq!(
+                java.state.lock().unwrap().jars[0]
+                    .row
+                    .block_use
+                    .unknown_host_calls,
+                1
+            );
             assert_eq!(
                 taken,
                 [

@@ -13,9 +13,12 @@
 //! resident, a host without server authority), the call runs anyway, with `getRandom()` counted
 //! as before.
 
+use std::collections::BTreeMap;
+
 use mod_api::{LevelRef, RandomSource, ServerHost};
 
-use crate::runtime::{LevelRandomStream, StdHost};
+use crate::runtime::{LevelRandomStream, StdHost, is_counted_level_stream_draw};
+use crate::{JarRow, LOG};
 
 /// Sunrise's lent stream, as the runtime's [`LevelRandomStream`]. Each method is one SDK draw.
 struct Lent<'a>(&'a mut dyn RandomSource);
@@ -44,6 +47,33 @@ impl LevelRandomStream for Lent<'_> {
     }
     fn next_gaussian(&mut self) -> f64 {
         self.0.next_gaussian()
+    }
+}
+
+/// Report one block-use or live-menu call's counted calls on `row`, described by `what`
+/// (`menu 3`, `block runes:crafting_altar useWithoutItem`). The unmodelled host calls go into
+/// `block_use.unknown_host_calls` and a WARN. The level-stream draws the lend answered but counted
+/// for their position (`runtime/level_random.rs`) are no unmodelled call: they reach the jar's
+/// counted calls (its summary, report and stop line) with every other counted call, and are
+/// logged here as what they are.
+pub(crate) fn note_call_counts(row: &mut JarRow, what: &str, calls: &BTreeMap<String, usize>) {
+    let (draws, unmodelled): (BTreeMap<&String, &usize>, BTreeMap<&String, &usize>) = calls
+        .iter()
+        .partition(|(key, _)| is_counted_level_stream_draw(key));
+    let unmodelled_count: usize = unmodelled.values().copied().sum();
+    row.block_use.unknown_host_calls += unmodelled_count;
+    if unmodelled_count > 0 {
+        log::warn!(
+            "{LOG}: {}: {what} leaned on {unmodelled_count} unmodelled host call(s): {unmodelled:?}",
+            row.id
+        );
+    }
+    let draw_count: usize = draws.values().copied().sum();
+    if draw_count > 0 {
+        log::info!(
+            "{LOG}: {}: {what} counted {draw_count} level-stream draw(s), answered from the live stream but not claimed to be at vanilla's position: {draws:?}",
+            row.id
+        );
     }
 }
 

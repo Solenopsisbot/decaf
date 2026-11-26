@@ -137,6 +137,14 @@ pub const DRAW_AFTER_DEFERRED_EFFECT: &str =
 pub const LEVEL_STREAM_UNKNOWN: &str =
     "net/minecraft/util/RandomSource#<level stream draw after its position became unknown>";
 
+/// Whether a counted call's `key` is one of the level-stream draws above:
+/// answered from the live stream, so no unmodelled host call, but counted
+/// because its position in that stream may be off vanilla's. An embedder
+/// reports them as counted calls, never as unmodelled ones.
+pub fn is_counted_level_stream_draw(key: &str) -> bool {
+    key == DRAW_AFTER_DEFERRED_EFFECT || key == LEVEL_STREAM_UNKNOWN
+}
+
 const LEGACY: &str = "net/minecraft/world/level/levelgen/LegacyRandomSource";
 
 /// The most `nextInt()` draws one `consumeCount(n)` answers (see the module

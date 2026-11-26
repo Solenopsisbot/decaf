@@ -209,7 +209,10 @@ mod level_random;
 #[cfg(test)]
 #[path = "level_random_tests.rs"]
 mod level_random_tests;
-pub use level_random::{DRAW_AFTER_DEFERRED_EFFECT, LEVEL_STREAM_UNKNOWN, LevelRandomStream};
+pub use level_random::{
+    DRAW_AFTER_DEFERRED_EFFECT, LEVEL_STREAM_UNKNOWN, LevelRandomStream,
+    is_counted_level_stream_draw,
+};
 pub mod level_sound;
 mod library_dispatch;
 mod linked_resources;
