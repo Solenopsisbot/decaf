@@ -2791,7 +2791,10 @@ impl StdHost {
     ///
     /// Seeding makes the stream known again (see the module docs).
     pub fn seed_level_random(&mut self, level_marker: &str, seed: i64) {
-        let handle = self.make_random_handle(random_source::legacy_state(seed));
+        // Out of random source numbers (counted): the stream stays as it was.
+        let Some(handle) = self.make_random_handle(random_source::legacy_state(seed)) else {
+            return;
+        };
         self.level_sound
             .level_random_handles
             .insert(level_marker.to_owned(), handle);

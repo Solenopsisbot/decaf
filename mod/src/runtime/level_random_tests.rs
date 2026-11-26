@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use crate::runtime::{DRAW_AFTER_DEFERRED_EFFECT, LevelRandomStream, NativeJar, StdHost, Value};
+use crate::runtime::{
+    DRAW_AFTER_DEFERRED_EFFECT, LEVEL_STREAM_UNKNOWN, LevelRandomStream, NativeJar, StdHost, Value,
+};
 
 /// The oracle's seed (`java25.txt`).
 const SEED: i64 = 6_301_295_841;
@@ -251,7 +253,8 @@ fn a_kept_handle_draws_only_inside_a_lend_and_stays_the_same_object() {
     let mut oracle = Legacy::new(SEED);
     let first = lent(&mut host, &mut stream, "keep", &format!("({LEVEL})I"));
     assert_eq!(first.ok(), Some(Value::Int(oracle.next_int())));
-    // Outside the lend nothing answers the kept handle: counted, and the stream doesn't move.
+    // Outside the lend nothing answers the kept handle: counted, and the live stream doesn't
+    // move where vanilla's did.
     let outside =
         jar().invoke_method_with_args("demo/LevelRandoms", "drawKept", "()I", None, &[], &mut host);
     assert_eq!(outside.ok(), Some(Value::Int(0)));
@@ -259,7 +262,8 @@ fn a_kept_handle_draws_only_inside_a_lend_and_stays_the_same_object() {
         host.unknown_host_calls(),
         vec![("net/minecraft/util/RandomSource#nextInt()I".into(), 1)]
     );
-    // In the next lend, `getRandom()` is the object Java kept, and it draws again.
+    // In the next lend, `getRandom()` is the object Java kept, and it draws again: the live
+    // stream's next value, but no longer vanilla's position, so counted.
     let same = lent(
         &mut host,
         &mut stream,
@@ -272,11 +276,13 @@ fn a_kept_handle_draws_only_inside_a_lend_and_stays_the_same_object() {
     });
     assert_eq!(again.ok(), Some(Value::Int(oracle.next_int())));
     assert_eq!(
-        host.unknown_host_calls().len(),
-        1,
-        "{:?}",
-        host.unknown_host_calls()
+        host.unknown_host_calls(),
+        vec![
+            ("net/minecraft/util/RandomSource#<level stream draw after its position became unknown>".into(), 1),
+            ("net/minecraft/util/RandomSource#nextInt()I".into(), 1),
+        ]
     );
+    assert_eq!(host.unknown_host_calls()[0].0, LEVEL_STREAM_UNKNOWN);
 }
 
 #[test]
@@ -284,11 +290,35 @@ fn set_seed_on_the_level_stream_is_counted_and_reseeds_nothing() {
     let mut host = StdHost::new();
     let mut stream = Legacy::new(SEED);
     let answer = lent(&mut host, &mut stream, "reseed", &format!("({LEVEL})I"));
-    // Not `new LegacyRandomSource(42).nextInt()`: the live stream's own next value.
+    // Not `new LegacyRandomSource(42).nextInt()`: the live stream's own next value. Vanilla's
+    // stream was reseeded, so that draw is no longer at vanilla's position: counted too.
     assert_eq!(answer.ok(), Some(Value::Int(Legacy::new(SEED).next_int())));
     assert_eq!(
         host.unknown_host_calls(),
-        vec![("net/minecraft/util/RandomSource#setSeed(J)V".into(), 1)]
+        vec![
+            (LEVEL_STREAM_UNKNOWN.into(), 1),
+            ("net/minecraft/util/RandomSource#setSeed(J)V".into(), 1),
+        ]
+    );
+    // The mark outlives the lend: the next lend's draws count as well.
+    let next = lent(&mut host, &mut stream, "keep", &format!("({LEVEL})I"));
+    assert!(next.is_ok(), "{next:?}");
+    assert_eq!(
+        host.unknown_host_calls()[0],
+        (LEVEL_STREAM_UNKNOWN.into(), 2)
+    );
+    // Another open of the level (a new world) is a new stream, known again.
+    let mut fresh = Legacy::new(SEED);
+    let new_world = host.with_lent_level_random(OVERWORLD, "2/0", &mut fresh, |host| {
+        call(host, "keep", &format!("({LEVEL})I"))
+    });
+    assert_eq!(
+        new_world.ok(),
+        Some(Value::Int(Legacy::new(SEED).next_int()))
+    );
+    assert_eq!(
+        host.unknown_host_calls()[0],
+        (LEVEL_STREAM_UNKNOWN.into(), 2)
     );
 }
 
@@ -403,9 +433,14 @@ fn a_huge_consume_count_is_counted_instead_of_drawn() {
             host,
         )
     });
+    // The draw after it is the live stream's next value, but vanilla's had moved 65537 places:
+    // counted.
     assert_eq!(answer.ok(), Some(Value::Int(Legacy::new(SEED).next_int())));
     assert_eq!(
         host.unknown_host_calls(),
-        vec![("net/minecraft/util/RandomSource#consumeCount(I)V".into(), 1)]
+        vec![
+            (LEVEL_STREAM_UNKNOWN.into(), 1),
+            ("net/minecraft/util/RandomSource#consumeCount(I)V".into(), 1),
+        ]
     );
 }

@@ -389,10 +389,6 @@ pub(crate) struct ActiveBlockUse {
     /// vanilla's `ReportedException.getCause()`. Java sees only the wrapper; the embedder's
     /// failure line names both, so a click that threw says why (`live_menu.rs`).
     pub(crate) wrapped_click_cause: Option<String>,
-    /// The player's inventory as the call started, by stack contents, while a
-    /// level stream is lent (`level_random.rs`): what tells a lent draw that
-    /// this call has written the inventory.
-    pub(crate) inventory_start: Option<Vec<Option<crate::recipe_models::StackComponents>>>,
 }
 
 /// One `ServerPlayer` object's menu state, as Decaf models it (#629 review P1 1 and 2).
@@ -2666,7 +2662,6 @@ impl NativeJar {
             facts: None,
             live_effects: Vec::new(),
             wrapped_click_cause: None,
-            inventory_start: None,
         });
         host.mark_close_sent();
         let roots = vec![level, player_value.clone(), player_inventory, menu];
@@ -2755,7 +2750,6 @@ impl NativeJar {
             facts: facts.clone(),
             live_effects: Vec::new(),
             wrapped_click_cause: None,
-            inventory_start: host.inventory_baseline(facts.as_ref()),
         });
 
         let roots = vec![

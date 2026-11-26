@@ -5949,7 +5949,6 @@ impl NativeJar {
             facts: Some(facts.clone()),
             live_effects: Vec::new(),
             wrapped_click_cause: None,
-            inventory_start: host.inventory_baseline(Some(facts)),
         });
         if closing {
             // The window is gone; the menu stays installed until `doCloseContainer` offset 19.
@@ -6264,7 +6263,6 @@ impl NativeJar {
             facts: None,
             live_effects: Vec::new(),
             wrapped_click_cause: None,
-            inventory_start: None,
         });
         let roots = [menu_type.clone(), level, player, inventory.clone()];
         let mut refusal = None;

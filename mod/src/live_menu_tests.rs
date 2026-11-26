@@ -1901,6 +1901,8 @@ fn open_bench(java: &HorizonJava, host: &mut MenuTestHost) -> i32 {
         .window
 }
 
+/// The whole click, counted when a step of it counted (`runtime/live_menu.rs`, `run_call`).
+const CONTAINER_CLICK: &str = "net/minecraft/server/network/ServerGamePacketListenerImpl#handleContainerClick(Lnet/minecraft/network/protocol/game/ServerboundContainerClickPacket;)V";
 const SLOT_TAKE: &str = "game-hook re-entry: sunrise#live_menu:menu_slot_take_not_dispatched";
 
 /// The two-input combiner from end to end through the hooks: a provider whose `createMenu`
@@ -2379,19 +2381,18 @@ fn a_disconnect_drops_the_inputs_in_slot_order() {
 }
 
 /// A Java `removed` that draws `level.getRandom()` after vanilla's `removed` has handed the
-/// inputs on (`clearContainer`, `dropOrPlaceInInventory`). Decaf leaves both to Sunrise after
-/// the call: on a disconnect a drop (an effect whose Sunrise path isn't verified to leave the
-/// level stream alone), on a live close a write of the player's inventory (whose
-/// `inventory_changed` can complete an advancement whose reward loot draws `level.random`).
-/// Either way vanilla's order of the two isn't claimed: the draw is still Sunrise's live stream,
-/// but counted. With nothing in the inputs, `removed` hands nothing on and the same draw is
-/// exact.
+/// inputs on (`clearContainer`, `dropOrPlaceInInventory`). On a disconnect they drop: a drop is
+/// an effect Sunrise carries out after the call, on a path not verified to leave the level
+/// stream alone, so vanilla's order of the two isn't claimed: the draw is still Sunrise's live
+/// stream, but counted. A live close puts them back into the inventory instead, which draws
+/// nothing of the level's before Java's draw in vanilla either (`INVENTORY_CHANGED` waits for
+/// `broadcastChanges`), and the same draw is exact.
 #[test]
-fn a_level_random_draw_after_deferred_work_is_counted() {
+fn a_level_random_draw_after_a_deferred_drop_is_counted() {
     use mod_api::RandomSource as _;
     on_a_big_stack("live-menu-draw-after-drop", || {
         let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
-        for how in ["empty", "close", "disconnect"] {
+        for how in ["close", "disconnect"] {
             let java = java_with(Arc::clone(&jar));
             with_bridge(&java, BENCH_MENUS, || {
                 let mut host = MenuTestHost::new(BENCH_ITEMS, BENCH_TYPES);
@@ -2407,12 +2408,10 @@ fn a_level_random_draw_after_deferred_work_is_counted() {
                     ),
                     Some(InteractionResult::Consume)
                 );
-                if how != "empty" {
-                    // One cobblestone into the base; the other four put back.
-                    assert!(host.click(hotbar(3, 0), 0, 0));
-                    assert!(host.click(0, 1, 0));
-                    assert!(host.click(hotbar(3, 0), 0, 0));
-                }
+                // One cobblestone into the base; the other four put back.
+                assert!(host.click(hotbar(3, 0), 0, 0));
+                assert!(host.click(0, 1, 0));
+                assert!(host.click(hotbar(3, 0), 0, 0));
                 host.tick();
                 assert_eq!(counted(&java), [], "{how}");
                 if how == "disconnect" {
@@ -2449,12 +2448,8 @@ fn a_level_random_draw_after_deferred_work_is_counted() {
                             ]
                         );
                     }
-                    "close" => {
-                        assert!(host.world.spawned.is_empty());
-                        assert_eq!(host.held(), ["5 minecraft:cobblestone"]);
-                        assert_eq!(counted, [after]);
-                    }
                     _ => {
+                        assert!(host.world.spawned.is_empty());
                         assert_eq!(host.held(), ["5 minecraft:cobblestone"]);
                         assert_eq!(counted, []);
                     }
@@ -2694,7 +2689,14 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             // Its draw comes after `awardUsedRecipes` in `onTake` (+18 against +86), and Sunrise
             // carries the recipe unlock out after the call: in vanilla an unlock can complete an
             // advancement whose reward loot draws `level.random` first, so the draw's order
-            // isn't claimed (`DRAW_AFTER_DEFERRED_EFFECT`, `runtime/level_random.rs`).
+            // isn't claimed (`DRAW_AFTER_DEFERRED_EFFECT`, `runtime/level_random.rs`). A counted
+            // draw counts as any counted call does: the `onTake` override's `vcall` sees it and
+            // the click stops there, counted (`CONTAINER_CLICK`). What that skips: `doClick`'s
+            // trailing `slot.setChanged()` (the result slot's `ResultContainer.setChanged` is
+            // empty in 26.3), and `handleContainerClick`'s `resumeRemoteUpdates` and
+            // `broadcastChanges` (the slot and cursor packets, which Sunrise sends for its own
+            // window; no inventory or data slot changed). The take itself, its stat, the recipe,
+            // the sound and `onPlayedRuneCraftingSound` all ran inside `onTake`, before it.
             assert_eq!(take_failures(&java), []);
             assert_eq!(
                 taken,
@@ -2704,6 +2706,7 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
                         "game-hook re-entry: sunrise#live_menu:recipe_crafted_trigger".to_owned(),
                         1
                     ),
+                    (CONTAINER_CLICK.to_owned(), 1),
                     (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1),
                 ]
             );
@@ -2756,12 +2759,13 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
             // on (BUGS-3d34 #3: they read `ran-clean`, 0 unknown host calls).
             stop_server(&mut host);
             let row = report_row(&java);
-            assert_eq!(row["summary"], "ran-clean, 3 counted calls since start");
+            assert_eq!(row["summary"], "ran-clean, 4 counted calls since start");
             assert_eq!(
                 row["counted"]["since_start"],
                 serde_json::json!({
                     SLOT_TAKE: 1,
                     "game-hook re-entry: sunrise#live_menu:recipe_crafted_trigger": 1,
+                    CONTAINER_CLICK: 1,
                     crate::runtime::DRAW_AFTER_DEFERRED_EFFECT: 1,
                 })
             );

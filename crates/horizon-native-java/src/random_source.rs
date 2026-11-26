@@ -173,11 +173,14 @@ impl StdHost {
             }
             _ => return None,
         };
-        Some(self.random_handle(state))
+        // Out of numbers (counted): the `new` allocates a plain object, whose calls count.
+        self.random_handle(state).ok()
     }
 
-    pub(crate) fn make_random_handle(&mut self, state: State) -> Value {
-        self.random_handle(state)
+    /// A new `RandomSource` handle for `state`; `None` once the numbers are exhausted
+    /// (counted), when the caller keeps the stream unknown.
+    pub(crate) fn make_random_handle(&mut self, state: State) -> Option<Value> {
+        self.random_handle(state).ok()
     }
 
     pub(crate) fn draw_random_handle_long(&mut self, handle: &Value) -> Option<i64> {
@@ -207,26 +210,44 @@ impl StdHost {
         Value::Host(HostRef::new(HostKind::RandomSource, key))
     }
 
-    /// A fresh number for a handle key. Never the table's length: after
-    /// `forget_random_state` or a heap prune shrinks the table, the length
-    /// names a key a live handle still holds, and its state would be
-    /// overwritten.
-    fn next_random_number(&mut self) -> u64 {
-        let number = self.next_random_source;
-        self.next_random_source += 1;
-        number
-    }
-
-    fn random_handle(&mut self, state: State) -> Value {
-        let key = format!("{}#{}", state.class(), self.next_random_number());
+    /// A new `RandomSource` handle (its own [`HostKind`], never a jar object) for `state`.
+    fn random_handle(&mut self, state: State) -> Result<Value, NativeError> {
+        let class = state.class();
+        let key = self.next_random_key(class)?;
         self.random_sources.insert(key.clone(), state);
-        Value::Host(HostRef::new(HostKind::RandomSource, key))
+        Ok(Value::Host(HostRef::new(HostKind::RandomSource, key)))
     }
 
     fn java_random_handle(&mut self, state: State) -> Value {
-        let key = format!("{JAVA_RANDOM}#{}", self.next_random_number());
+        let key = format!("{JAVA_RANDOM}#{}", self.random_sources.len());
         self.random_sources.insert(key.clone(), state);
         crate::jar_object::handle(key)
+    }
+
+    /// A new `RandomSource` handle's key, `<class>#random<n>`:
+    /// - `n` comes from a counter that only grows. Numbering by the table's size reused a live
+    ///   source's key once another was collected or forgotten (`#0`, `#1`; `#0` goes; the next
+    ///   is `#1` again), and the new source overwrote the live one's state.
+    /// - `random` keeps the key out of the jar's allocation keys (`class#<digits>`, numbered by
+    ///   the heap): the collector frees these with their own family (`heap::collectable`), and
+    ///   no jar object's number can name one.
+    ///
+    /// `u64::MAX` is never handed out: past it the source is refused (counted), never given a
+    /// number another source holds.
+    fn next_random_key(&mut self, class: &str) -> Result<String, NativeError> {
+        let number = self.next_random_source;
+        if number == u64::MAX {
+            let _ = self.unknown_host_call(&MethodRef {
+                owner: class.to_owned(),
+                name: "<new>".into(),
+                descriptor: ": random source numbers exhausted".into(),
+            });
+            return Err(NativeError::Metadata(format!(
+                "the host's random source numbers are exhausted; a new {class} would reuse a live source's key"
+            )));
+        }
+        self.next_random_source = number + 1;
+        Ok(format!("{class}#random{number}"))
     }
 
     fn random_key(value: &Value) -> Option<String> {
@@ -293,7 +314,7 @@ impl StdHost {
             }
             _ => return Err(NativeError::Metadata("unknown RandomSource class".into())),
         };
-        Ok(self.random_handle(state))
+        self.random_handle(state)
     }
 
     pub(crate) fn random_instance(
@@ -485,7 +506,10 @@ impl StdHost {
                     }
                     _ => return Some(Err(NativeError::Metadata("positional fork".into()))),
                 };
-                let value = self.random_handle(child);
+                let value = match self.random_handle(child) {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
                 self.save_random(key, state);
                 return Some(Ok(value));
             }
@@ -503,7 +527,10 @@ impl StdHost {
                     },
                     _ => return Some(Err(NativeError::Metadata("positional fork".into()))),
                 };
-                let value = self.random_handle(child);
+                let value = match self.random_handle(child) {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
                 self.save_random(key, state);
                 return Some(Ok(value));
             }
@@ -543,7 +570,7 @@ impl StdHost {
                     }
                     _ => unreachable!(),
                 };
-                Ok(self.random_handle(next))
+                self.random_handle(next)
             }
             ("at", "(III)Lnet/minecraft/util/RandomSource;") => {
                 let x = arg_int(args.first())?;
@@ -557,7 +584,7 @@ impl StdHost {
                     State::XoroshiroPositional { lo, hi } => xoro_state(mixed as u64 ^ lo, hi),
                     _ => unreachable!(),
                 };
-                Ok(self.random_handle(next))
+                self.random_handle(next)
             }
             _ => self.unknown_host_call(r),
         }

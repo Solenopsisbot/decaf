@@ -612,6 +612,8 @@ fn collectable(marker: &str) -> bool {
             .or_else(|| serial.strip_prefix("menu"))
             .or_else(|| serial.strip_prefix("ir"))
             .or_else(|| serial.strip_prefix("hit"))
+            // A `RandomSource` handle (`random_source.rs`): `<class>#random<n>`.
+            .or_else(|| serial.strip_prefix("random"))
     {
         return !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit());
     }
@@ -2131,6 +2133,8 @@ mod tests {
         const HOLDS_NO_OBJECT: &[&str] = &[
             // A dimension name and a lend id (`level_random.rs`).
             "level_random_lend",
+            // Stream names (`level_random.rs`).
+            "level_random_unknown",
             // A key counter (`random_source.rs`).
             "next_random_source",
             "next_unmodifiable_collection",

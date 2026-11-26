@@ -212,7 +212,7 @@ mod level_random;
 #[cfg(test)]
 #[path = "level_random_tests.rs"]
 mod level_random_tests;
-pub use level_random::{DRAW_AFTER_DEFERRED_EFFECT, LevelRandomStream};
+pub use level_random::{DRAW_AFTER_DEFERRED_EFFECT, LEVEL_STREAM_UNKNOWN, LevelRandomStream};
 pub mod level_sound;
 mod library_dispatch;
 mod linked_resources;
@@ -4149,7 +4149,8 @@ pub struct StdHost {
     shared_empties: BTreeMap<&'static str, String>,
     /// Explicitly seeded Minecraft RandomSource state, keyed by its host handle.
     random_sources: BTreeMap<String, random_source::State>,
-    /// The number the next random source handle's key takes (`random_source.rs`).
+    /// The next random source's number (`random_source.rs`): only ever grows, so a source
+    /// made after another was collected or forgotten never takes a live one's key.
     next_random_source: u64,
     random_seed_uniquifier: u64,
     random_time_origin: std::time::Instant,
@@ -4330,6 +4331,9 @@ pub struct StdHost {
     /// The server level whose live `Level.random` the embedder lent for the
     /// running call (`level_random.rs`), if any.
     level_random_lend: Option<level_random::Lend>,
+    /// The level streams whose position is no longer vanilla's, by
+    /// `<instance>/<dimension>` (`level_random.rs`): their draws count.
+    level_random_unknown: BTreeSet<String>,
 }
 
 /// Who placed the block for a [`BlockPlaceContextData`] snapshot.
@@ -4653,6 +4657,7 @@ impl StdHost {
             block_use: block_use::BlockUseHostState::default(),
             level_sound: level_sound::LevelSoundState::default(),
             level_random_lend: None,
+            level_random_unknown: BTreeSet::new(),
         }
     }
 
@@ -8782,15 +8787,7 @@ impl Host for StdHost {
     }
 
     fn counted_unknown_calls(&self) -> usize {
-        // A lent draw out of vanilla's order (`level_random.rs`) is counted, but it answered
-        // with the real stream's value, no placeholder: what a step built on it is still exact,
-        // so it doesn't fail the `exact` regions that read this.
         self.unknown_host_call_count()
-            - self
-                .unknown_host_calls
-                .get(level_random::DRAW_AFTER_DEFERRED_EFFECT)
-                .copied()
-                .unwrap_or(0)
     }
 
     fn supports_recipe_sync(&self) -> bool {
