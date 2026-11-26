@@ -49,6 +49,45 @@ pub(crate) fn handle(key: String) -> Value {
     Value::Host(HostRef::new(HostKind::JarObject, key))
 }
 
+/// The running heap's allocator, lent to a host model whose answer is a new object keyed as a
+/// jar object (`class#n`): an `EntityType` builder, an `EntityDataAccessor`, `Vec2.ZERO`
+/// (`Host::allocating_call`). One counter numbers every object the jar can see, so a model's
+/// object never takes a number the heap hands out (and frees) for another (#669: the models
+/// counted from `700_000`, `720_000`, `900_000` or an accessor's id, numbers the heap reaches,
+/// so a model's object could be born "collected", or `==` to another).
+pub(crate) struct Numbers<'a> {
+    next: &'a mut usize,
+    exhausted: Option<String>,
+}
+
+impl<'a> Numbers<'a> {
+    pub(crate) fn new(next: &'a mut usize) -> Self {
+        Self {
+            next,
+            exhausted: None,
+        }
+    }
+
+    /// A new object of `class`: `class#n`, `n` the heap's next number. `usize::MAX` marks the
+    /// numbers exhausted (`Runtime::new_object_key`): then no object is made, the call fails,
+    /// and [`Self::take_exhausted`] names the class for the host to count.
+    pub(crate) fn handle(&mut self, class: &str) -> Result<Value, crate::runtime::NativeError> {
+        let number = *self.next;
+        if number == usize::MAX {
+            self.exhausted = Some(class.to_owned());
+            return Err(crate::runtime::allocation_numbers_exhausted(class));
+        }
+        *self.next = number + 1;
+        Ok(handle(format!("{class}#{number}")))
+    }
+
+    /// The class an allocation ran out of numbers for, once: the host counts it
+    /// (`Host::note_allocation_numbers_exhausted`).
+    pub(crate) fn take_exhausted(&mut self) -> Option<String> {
+        self.exhausted.take()
+    }
+}
+
 /// A canonical handle for one of the runtime's modelled `java.io.Writer`
 /// classes. Keeping this family separate from ordinary jar objects is part of
 /// the sink boundary: Gson may write only to this kind (or an Appendable

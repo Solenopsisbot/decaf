@@ -2826,6 +2826,51 @@ pub trait Host {
     /// counts calls counts this one.
     fn note_allocation_numbers_exhausted(&mut self, _class: &str) {}
 
+    /// A host model's static (`receiver` `None`) or instance call that may hand the jar a new
+    /// object keyed as a jar object (`class#n`: an `EntityType` builder, an
+    /// `EntityDataAccessor`), with `next_object`, the running heap's allocator, to number it:
+    /// `n` is taken from it and it advances, as for [`Self::random_new`], so no host object and
+    /// jar object share a number (#669: the models minted keys from counters of their own,
+    /// whose numbers the heap also handed out, and freed). `None` when the model has no answer;
+    /// the runtime then makes the plain [`Self::invoke`] / [`Self::invoke_instance`] call, where
+    /// such a model answers only what needs no new object.
+    ///
+    /// The runtime asks this first wherever it hands a call to the host's models (an
+    /// `invokestatic`/`invokevirtual` of a class the jar does not hold); a call that reaches
+    /// the host another way (reflection, a method handle) has no allocator, and the models
+    /// leave it unanswered.
+    fn allocating_call(
+        &mut self,
+        _r: &MethodRef,
+        _receiver: Option<&Value>,
+        _args: &[Value],
+        _next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        None
+    }
+
+    /// [`Self::allocating_call`] for a `getstatic` of a constant a host model makes on first
+    /// read (`Vec2.ZERO`, `EntityDataSerializers.INT`): one object for the run, numbered by
+    /// `next_object` once.
+    fn allocating_static_field(
+        &mut self,
+        _r: &MethodRef,
+        _next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        None
+    }
+
+    /// The constants of a game enum a host model makes as jar objects (`MobCategory`), for its
+    /// `values()`: the same objects its `getstatic`s answer, numbered by `next_object` on first
+    /// use.
+    fn allocating_enum_values(
+        &mut self,
+        _owner: &str,
+        _next_object: &mut usize,
+    ) -> Option<Result<Vec<Value>, NativeError>> {
+        None
+    }
+
     #[doc(hidden)]
     fn as_std_host(&self) -> Option<&StdHost> {
         None
@@ -9930,10 +9975,14 @@ impl Host for StdHost {
         if let Some(value) = tool_material::static_field(&mut self.tool_material, r) {
             return value;
         }
-        if let Some(value) = vec2::static_field(&mut self.vec2, r) {
+        // The constants already made; a first read needs the heap's allocator
+        // (`Host::allocating_static_field`), so without it they are unanswered here.
+        if let Some(value) = vec2::static_field(&mut self.vec2, r, None) {
             return value;
         }
-        if let Some(value) = entity_registration::static_field(&mut self.entity_registration, r) {
+        if let Some(value) =
+            entity_registration::static_field(&mut self.entity_registration, r, None)
+        {
             return value;
         }
         self.record(r, None, &[]);
@@ -10273,6 +10322,67 @@ impl Host for StdHost {
         });
     }
 
+    fn allocating_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        let mut numbers = jar_object::Numbers::new(next_object);
+        let answer = match receiver {
+            None => entity_registration::static_call(
+                &mut self.entity_registration,
+                r,
+                args,
+                Some(&mut numbers),
+            ),
+            Some(receiver) => entity_registration::instance_call(
+                &mut self.entity_registration,
+                r,
+                receiver,
+                args,
+                Some(&mut numbers),
+            ),
+        };
+        if let Some(class) = numbers.take_exhausted() {
+            self.note_allocation_numbers_exhausted(&class);
+        }
+        answer
+    }
+
+    fn allocating_static_field(
+        &mut self,
+        r: &MethodRef,
+        next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        let mut numbers = jar_object::Numbers::new(next_object);
+        let answer = vec2::static_field(&mut self.vec2, r, Some(&mut numbers)).or_else(|| {
+            entity_registration::static_field(&mut self.entity_registration, r, Some(&mut numbers))
+        });
+        if let Some(class) = numbers.take_exhausted() {
+            self.note_allocation_numbers_exhausted(&class);
+        }
+        answer
+    }
+
+    fn allocating_enum_values(
+        &mut self,
+        owner: &str,
+        next_object: &mut usize,
+    ) -> Option<Result<Vec<Value>, NativeError>> {
+        let mut numbers = jar_object::Numbers::new(next_object);
+        let answer = entity_registration::enum_values(
+            &mut self.entity_registration,
+            owner,
+            Some(&mut numbers),
+        );
+        if let Some(class) = numbers.take_exhausted() {
+            self.note_allocation_numbers_exhausted(&class);
+        }
+        answer
+    }
+
     fn note_entity_data_hierarchy(&mut self, entries: &[(String, String)]) {
         entity_registration::note_hierarchy(&mut self.entity_registration, entries);
     }
@@ -10434,8 +10544,10 @@ impl Host for StdHost {
         {
             return value;
         }
+        // No allocator on this path (`Host::allocating_call` has it): only what needs no new
+        // object is answered.
         if let Some(value) =
-            entity_registration::static_call(&mut self.entity_registration, r, args)
+            entity_registration::static_call(&mut self.entity_registration, r, args, None)
         {
             return value;
         }
@@ -11989,9 +12101,13 @@ impl Host for StdHost {
         {
             return value;
         }
-        if let Some(value) =
-            entity_registration::instance_call(&mut self.entity_registration, r, receiver, args)
-        {
+        if let Some(value) = entity_registration::instance_call(
+            &mut self.entity_registration,
+            r,
+            receiver,
+            args,
+            None,
+        ) {
             return value;
         }
         self.record(r, Some(receiver), args);
@@ -17616,6 +17732,16 @@ fn value_marker(value: &Value) -> String {
         Value::Ref(None) => "null".to_owned(),
         Value::Void => "void".to_owned(),
     }
+}
+
+/// The failure of an allocation the heap has no number left for (`usize::MAX` marks the
+/// numbers exhausted, see `Runtime::new_object_key`): the runtime's own and a host model's
+/// (`jar_object::Numbers`) alike.
+pub(crate) fn allocation_numbers_exhausted(class: &str) -> NativeError {
+    NativeError::Metadata(format!(
+        "the jar's object allocation numbers are exhausted (the next would be {}, the last); a new {class} would reuse a live object's number",
+        usize::MAX
+    ))
 }
 
 /// Open the builder chain a `new` site or static factory just made. The entry
@@ -28980,7 +29106,7 @@ impl<H: Host> Runtime<'_, H> {
                         {
                             self.host.get_field(receiver, &target)?
                         } else {
-                            self.host.get_static(&target)?
+                            self.host_static_field(&target)?
                         };
                         if value != Value::Ref(None) {
                             if plan.static_target {
@@ -29121,7 +29247,7 @@ impl<H: Host> Runtime<'_, H> {
                             self.static_constant(&target.owner, &target.name, &target.descriptor)?
                                 .unwrap_or_else(|| Value::default_for(&target.descriptor))
                         }
-                        None => self.host.get_static(&target)?,
+                        None => self.host_static_field(&target)?,
                     }
                 }
             }
@@ -30177,6 +30303,32 @@ impl<H: Host> Runtime<'_, H> {
         number
     }
 
+    /// A static call the runtime hands the host's models (a class the jar does not hold): first
+    /// with this heap's allocator, for a model whose answer is a new jar object
+    /// (`Host::allocating_call`, #669), else the plain call. Out of `invoke_frame`, whose frame
+    /// `fixture_deep_recursion` bounds.
+    #[inline(never)]
+    fn invoke_host_static(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
+        if let Some(answer) = self
+            .host
+            .allocating_call(r, None, args, &mut self.next_object)
+        {
+            return answer;
+        }
+        self.host.invoke(r, args)
+    }
+
+    /// A `getstatic` the runtime hands the host's models: first with this heap's allocator, for
+    /// a constant a model makes on first read (`Host::allocating_static_field`, #669), else the
+    /// plain read.
+    #[inline(never)]
+    fn host_static_field(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
+        if let Some(answer) = self.host.allocating_static_field(r, &mut self.next_object) {
+            return answer;
+        }
+        self.host.get_static(r)
+    }
+
     /// The `new` opcode's object: the host's model of `class` or a jar object, refused once
     /// the allocation numbers are exhausted (never one number for two objects). Out of
     /// `invoke_frame`, whose frame `fixture_deep_recursion` bounds.
@@ -30205,10 +30357,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn allocations_exhausted(class: &str) -> NativeError {
-        NativeError::Metadata(format!(
-            "the jar's object allocation numbers are exhausted (the next would be {}, the last); a new {class} would reuse a live object's number",
-            usize::MAX
-        ))
+        allocation_numbers_exhausted(class)
     }
 
     /// Resolve `Class.forName` against the running jar's classes and the
@@ -32420,8 +32569,18 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }
-        if let Some(values) = crate::runtime::entity_registration::enum_values(&r.owner) {
-            return Some(self.new_array_value(&format!("[L{};", r.owner), values));
+        // A model whose constants are jar objects numbered by the heap (`MobCategory`, #669).
+        // Out of numbers, nothing is made: the frame fails where it returns
+        // (`refuse_exhausted_allocations`), so no answer is given here.
+        match self
+            .host
+            .allocating_enum_values(&r.owner, &mut self.next_object)
+        {
+            Some(Ok(values)) => {
+                return Some(self.new_array_value(&format!("[L{};", r.owner), values));
+            }
+            Some(Err(_)) => return None,
+            None => {}
         }
         if let Some(values) = crate::runtime::vanilla_values::enum_values(r) {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
@@ -36021,6 +36180,13 @@ impl<H: Host> Runtime<'_, H> {
         // A `Matcher` call that reaches the host unanswered may have moved the
         // matcher: its position is no longer known (`regex_matcher.rs`).
         regex_matcher::note_host_call(r, receiver);
+        // A model whose answer is a new jar object takes its number from this heap (#669).
+        if let Some(answer) =
+            self.host
+                .allocating_call(r, Some(receiver), args, &mut self.next_object)
+        {
+            return answer.map(|value| self.materialize_host_array(value));
+        }
         let value = if level_sound::needs_block_pos_resolution(r, args) {
             let mut resolved_args = args.to_vec();
             level_sound::resolve_block_pos_arg(self, r, &mut resolved_args);
@@ -38501,7 +38667,7 @@ impl<H: Host> Runtime<'_, H> {
                         self.note_string_intern(&r, Some(receiver));
                         self.invoke_host_instance(&r, receiver, args)
                     }
-                    None => self.host.invoke(&r, args),
+                    None => self.invoke_host_static(&r, args),
                 };
             }
             (None, None) => {
@@ -38533,7 +38699,7 @@ impl<H: Host> Runtime<'_, H> {
                         {
                             self.prepare_entity_data_hierarchy(args);
                         }
-                        self.host.invoke(&r, args)
+                        self.invoke_host_static(&r, args)
                     }
                 },
                 JarCallRedirect::Jar(r) => {
@@ -38628,7 +38794,7 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         self.prepare_entity_data_hierarchy(args);
                     }
-                    self.host.invoke(&r, args)
+                    self.invoke_host_static(&r, args)
                 }
             };
         };
@@ -41142,7 +41308,7 @@ impl<H: Host> Runtime<'_, H> {
                                             {
                                                 self.prepare_entity_data_hierarchy(&args);
                                             }
-                                            self.host.invoke(&resolved, &args)
+                                            self.invoke_host_static(&resolved, &args)
                                         })
                                     }
                                 } else if let Some(receiver) = receiver.as_ref() {
@@ -41192,7 +41358,7 @@ impl<H: Host> Runtime<'_, H> {
                                         {
                                             self.prepare_entity_data_hierarchy(&args);
                                         }
-                                        self.host.invoke(&resolved, &args)
+                                        self.invoke_host_static(&resolved, &args)
                                     })
                                 }
                             }

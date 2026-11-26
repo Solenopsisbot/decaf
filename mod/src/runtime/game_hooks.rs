@@ -2037,6 +2037,44 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.random_new(class, next_object)
     }
 
+    /// The bootstrap host's models that hand out new jar objects (an `EntityType` builder, an
+    /// `EntityDataAccessor`), numbered by this firing's allocator (#669). They answer only their
+    /// own classes and objects, never a game object's call, which [`Self::invoke_instance`]'s
+    /// rules keep.
+    fn allocating_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        self.inner.allocating_call(r, receiver, args, next_object)
+    }
+
+    fn allocating_static_field(
+        &mut self,
+        r: &MethodRef,
+        next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        // A `@Shadow` field is the game object's own: `get_static` refuses it.
+        if self
+            .model
+            .shadow_fields
+            .contains(&format!("{}#{}{}", r.owner, r.name, r.descriptor))
+        {
+            return None;
+        }
+        self.inner.allocating_static_field(r, next_object)
+    }
+
+    fn allocating_enum_values(
+        &mut self,
+        owner: &str,
+        next_object: &mut usize,
+    ) -> Option<Result<Vec<Value>, NativeError>> {
+        self.inner.allocating_enum_values(owner, next_object)
+    }
+
     fn pause_collections(&mut self, paused: bool) {
         self.inner.pause_collections(paused);
     }

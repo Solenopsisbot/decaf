@@ -104,10 +104,16 @@ fn text(value: &Value) -> Option<String> {
     crate::runtime::expect_ref(value).cloned()
 }
 
-fn next_key(state: &mut State, prefix: &str) -> String {
-    let key = format!("{prefix}#{}", state.next);
-    state.next = state.next.saturating_add(1);
-    key
+/// A new builder, layer or part's key, `<prefix>/<n>`, `n` from a counter that only grows.
+///
+/// `/`, not `#` (#669): these are handles of their own kinds, numbered by this model, and a
+/// `<text>#<digits>` key spells a jar object's allocation key, whose number the collector reads
+/// as the heap's (`heap::note_numbers`) and `jar_object::stored_value` reads back as a jar
+/// object. `None` (the call unanswered) once the counter is spent, never one key for two.
+fn next_key(state: &mut State, prefix: &str) -> Option<String> {
+    let key = format!("{prefix}/{}", state.next);
+    state.next = state.next.checked_add(1)?;
+    Some(key)
 }
 
 fn handle(kind: HostKind, key: String) -> Value {
@@ -201,7 +207,7 @@ pub(crate) fn invoke(
 ) -> Option<Result<Value, NativeError>> {
     let value = match (r.owner.as_str(), r.name.as_str()) {
         (CUBE_LIST_BUILDER, "create") if r.descriptor == format!("()L{CUBE_LIST_BUILDER};") => {
-            let key = next_key(state, "cube-builder");
+            let key = next_key(state, "cube-builder")?;
             state.builders.insert(
                 key.clone(),
                 Builder {
@@ -238,7 +244,7 @@ pub(crate) fn invoke(
             let mesh = kind(args.first()?, HostKind::MeshDefinition)?;
             let width = int(args.get(1)?)?;
             let height = int(args.get(2)?)?;
-            let key = next_key(state, "layer-definition");
+            let key = next_key(state, "layer-definition")?;
             state.layers.insert(
                 key.clone(),
                 Layer {
@@ -520,7 +526,7 @@ pub(crate) fn instance(
                 .and_then(|key| state.meshes.get(mesh_key)?.nodes.get(key))
                 .map(|node| node.children.clone())
                 .unwrap_or_default();
-            let child = next_key(state, "part");
+            let child = next_key(state, "part")?;
             let mesh = state.meshes.get_mut(mesh_key)?;
             if let Some(entry) = mesh
                 .nodes

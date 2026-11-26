@@ -183,8 +183,7 @@ fn config_objects_made_after_a_game_hook_are_distinct() {
 #[test]
 fn enum_set_all_of_answers_values_or_fails_as_java() {
     let jar = compile("enum_set", &["host_minted_keys/enum_set"]);
-    let oracle =
-        std::fs::read_to_string(fixture("host_minted_keys/enum_set/java25.txt")).unwrap();
+    let oracle = std::fs::read_to_string(fixture("host_minted_keys/enum_set/java25.txt")).unwrap();
     let mut host = jar.seed_host(StdHost::new());
     let (answer, counted) = run(&jar, &mut host, "demo/EnumSetProbe", "run");
     assert_eq!(answer, oracle.trim_end());
@@ -218,7 +217,13 @@ fn a_service_loader_after_a_game_hook_is_a_new_loader() {
     let mut host = jar.seed_host(StdHost::new());
     host.heap.next_object = 7;
     let first = jar
-        .invoke_method("demo/ServiceKeys", "load", "()Ljava/lang/Object;", None, &mut host)
+        .invoke_method(
+            "demo/ServiceKeys",
+            "load",
+            "()Ljava/lang/Object;",
+            None,
+            &mut host,
+        )
         .unwrap();
     host.heap.next_object = GAME_HOOK_OBJECT_BASE + loader_serial(&first);
     let answer = jar
@@ -260,7 +265,13 @@ fn field_copies_take_heap_numbers_and_count_running_out() {
     let mut host = jar.seed_host(StdHost::new());
     host.heap.next_object = usize::MAX - 1;
     let failed = jar
-        .invoke_method("demo/FieldCopies", "run", "()Ljava/lang/String;", None, &mut host)
+        .invoke_method(
+            "demo/FieldCopies",
+            "run",
+            "()Ljava/lang/String;",
+            None,
+            &mut host,
+        )
         .unwrap_err()
         .to_string();
     assert!(
@@ -269,8 +280,112 @@ fn field_copies_take_heap_numbers_and_count_running_out() {
     );
     let counted = host.unknown_host_calls();
     assert!(
-        counted.iter().any(|(name, _)| name
-            == "java/lang/reflect/Field#<new>: allocation numbers exhausted"),
+        counted
+            .iter()
+            .any(|(name, _)| name == "java/lang/reflect/Field#<new>: allocation numbers exhausted"),
         "{counted:?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Host models' jar objects (`entity_registration.rs`, `vec2.rs`)
+
+/// Each `SynchedEntityData.defineId` is a new `EntityDataAccessor`, even when two holders' ids
+/// are equal (real 26.3 server jar on JDK 25.0.5:
+/// `tests/fixtures/host_minted_keys/entity_accessors/java25.txt`, command in `command.txt`).
+/// Before #669 an accessor's key was `EntityDataAccessor#<id>`, so two unrelated holders' first
+/// accessors (both id 0) were one key, `==`, and a number the heap hands out to other objects.
+#[test]
+fn entity_data_accessors_are_new_objects_whatever_their_id() {
+    let jar = compile(
+        "entity_accessors",
+        &[
+            "entity_registration/stubs",
+            "host_minted_keys/entity_accessors/demo",
+        ],
+    );
+    let oracle =
+        std::fs::read_to_string(fixture("host_minted_keys/entity_accessors/java25.txt")).unwrap();
+    let mut host = jar.seed_host(StdHost::new());
+    let (answer, counted) = run(&jar, &mut host, "demo/AccessorProbe", "rows");
+    assert_eq!(answer, oracle.trim_end());
+    assert!(counted.is_empty(), "{counted:?}");
+}
+
+/// `Vec2`'s constants are the host's objects, numbered by the heap like any other: a heap that
+/// already handed out and freed the numbers the model used to mint from its own counter
+/// (`Vec2#900000`..) still reads `Vec2.ZERO.x`, as Java 25 does (`fixture_vec2`'s oracle,
+/// `tests/fixtures/vec2/java25.txt`). Before #669 `Vec2.ZERO` was born with a freed number, and
+/// its first field read failed as "collected while still reachable".
+#[test]
+fn vec2_constants_are_never_born_collected() {
+    let jar = compile(
+        "vec2_numbers",
+        &["host_minted_keys/vec2_numbers", "vec2/demo/Probe.java"],
+    );
+    let oracle = std::fs::read_to_string(fixture("vec2/java25.txt")).unwrap();
+    let mut host = jar.seed_host(StdHost::new());
+    host.heap.next_object = 900_000;
+    let made = jar
+        .invoke_method_with_args(
+            "demo/Churn",
+            "churn",
+            "(I)I",
+            None,
+            &[Value::Int(2048)],
+            &mut host,
+        )
+        .unwrap();
+    assert_eq!(made, Value::Int(2048));
+    let (answer, counted) = run(&jar, &mut host, "demo/Probe", "rows");
+    assert_eq!(answer, oracle);
+    assert!(counted.is_empty(), "{counted:?}");
+}
+
+/// A model-layer builder's and layer's keys (handles of their own kinds, numbered by the model)
+/// never spell a jar object's allocation key, whose number the collector would read as the
+/// heap's. Before #669 they were `cube-builder#<n>` and `layer-definition#<n>`.
+#[test]
+fn model_layer_keys_are_no_allocation_keys() {
+    use crate::runtime::host_ref::{HostKind, HostRef};
+    use crate::runtime::model_layers::{CUBE_LIST_BUILDER, LAYER_DEFINITION, MESH_DEFINITION};
+    let mut state = crate::runtime::model_layers::State::default();
+    let builder = crate::runtime::model_layers::invoke(
+        &mut state,
+        &crate::runtime::MethodRef {
+            owner: CUBE_LIST_BUILDER.into(),
+            name: "create".into(),
+            descriptor: format!("()L{CUBE_LIST_BUILDER};"),
+        },
+        &[],
+    )
+    .unwrap()
+    .unwrap();
+    let mesh_key = format!("{MESH_DEFINITION}#5");
+    crate::runtime::model_layers::ensure_mesh(&mut state, &mesh_key);
+    let layer = crate::runtime::model_layers::invoke(
+        &mut state,
+        &crate::runtime::MethodRef {
+            owner: LAYER_DEFINITION.into(),
+            name: "create".into(),
+            descriptor: format!("(L{MESH_DEFINITION};II)L{LAYER_DEFINITION};"),
+        },
+        &[
+            Value::Host(HostRef::new(HostKind::MeshDefinition, mesh_key)),
+            Value::Int(64),
+            Value::Int(32),
+        ],
+    )
+    .unwrap()
+    .unwrap();
+    for value in [builder, layer] {
+        let Value::Host(handle) = &value else {
+            panic!("{value:?}");
+        };
+        assert!(
+            !crate::runtime::jar_object::spells_key_text(handle.key()),
+            "{} spells an allocation key",
+            handle.key()
+        );
+    }
 }

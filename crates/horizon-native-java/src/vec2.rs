@@ -1,3 +1,12 @@
+//! `net.minecraft.world.phys.Vec2`'s constants (`ZERO`, `ONE`, `UNIT_X`, …): one object each,
+//! whose `x`/`y` the model answers.
+//!
+//! Each constant is keyed as a jar object, `Vec2#n`, with `n` from the running heap's allocator
+//! when it is first read (`Host::allocating_static_field`). #669: they were `Vec2#900000`..,
+//! numbers the heap also hands out; once it had handed out and freed one, the constant was
+//! born "collected", and reading its `x` failed. They are collection roots
+//! ([`State::root_texts`]): a static final field is never unreachable.
+use crate::jar_object::Numbers;
 use crate::{MethodRef, NativeError, Value, jar_object};
 use std::collections::BTreeMap;
 
@@ -38,34 +47,33 @@ impl State {
         self.handles
             .retain(|_, value| jar_object::object_key(value).is_some_and(&keep));
     }
+    /// The constants' keys: roots of a collection, so their numbers are never freed.
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        out.extend(self.handles.values().filter_map(jar_object::object_key));
+    }
 }
-pub(crate) fn static_field(state: &mut State, r: &MethodRef) -> Option<Result<Value, NativeError>> {
+/// A `getstatic` of a `Vec2` constant: the one object for it, made with `numbers` on its first
+/// read; unanswered when it is not made yet and there is no allocator.
+pub(crate) fn static_field(
+    state: &mut State,
+    r: &MethodRef,
+    numbers: Option<&mut Numbers<'_>>,
+) -> Option<Result<Value, NativeError>> {
     if r.owner != OWNER
         || r.descriptor != "Lnet/minecraft/world/phys/Vec2;"
         || row(&r.name).is_none()
     {
         return None;
     }
-    let id = [
-        "ZERO",
-        "ONE",
-        "UNIT_X",
-        "NEG_UNIT_X",
-        "UNIT_Y",
-        "NEG_UNIT_Y",
-        "MAX",
-        "MIN",
-    ]
-    .iter()
-    .position(|name| *name == r.name)
-    .unwrap()
-        + 900000;
-    // 900000+ cannot collide: the jar never allocates a Vec2 itself; new Vec2 is counted.
-    let v = state
-        .handles
-        .entry(r.name.clone())
-        .or_insert_with(|| jar_object::handle(format!("{OWNER}#{id}")));
-    Some(Ok(v.clone()))
+    if let Some(v) = state.handles.get(&r.name) {
+        return Some(Ok(v.clone()));
+    }
+    let v = match numbers?.handle(OWNER) {
+        Ok(v) => v,
+        Err(error) => return Some(Err(error)),
+    };
+    state.handles.insert(r.name.clone(), v.clone());
+    Some(Ok(v))
 }
 pub(crate) fn get_field(
     state: &State,
