@@ -10,7 +10,13 @@
 //! * loader: key [`HostRef::of_values`] of the service class name and the
 //!   load's serial. Every `ServiceLoader.load` is a new loader: canonical by
 //!   serial, `Object`'s `equals`, `toString` `java.util.ServiceLoader[<service>]`.
-//! * iterator: key the serial; one object per `iterator()` call.
+//!   The interpreter's loaders (`service_loader.rs`) take the serial from the
+//!   heap's allocator, whole, as a `long` (#669: `serial as i32` once wrapped a
+//!   number past a game hook's `1 << 40` onto a loader made before the hook, and
+//!   two loaders were `==`). A loader the host makes alone ([`host_loader`]) is
+//!   numbered by the host's own counter, so its serial is a tagged text that no
+//!   heap number spells.
+//! * iterator: key the serial (a heap number); one object per `iterator()` call.
 //! * provider: key the service and the provider class, what
 //!   `ProviderImpl.equals` compares: providers of two loaders are equal (and
 //!   one bucket of a `HashSet`), but not `==`. Not canonical: one loader
@@ -46,19 +52,34 @@ pub(crate) fn provider_types(_: &str) -> &'static [&'static str] {
     PROVIDER_TYPES
 }
 
-/// A `ServiceLoader` for `service` (internal name), load number `serial`.
+/// A `ServiceLoader` for `service` (internal name) the interpreter made: `serial` is the heap
+/// allocation number it took (`Runtime::new_object_number`), kept whole.
 pub(crate) fn loader(service: &str, serial: usize) -> Value {
     Value::Host(HostRef::of_values(
         HostKind::ServiceLoader,
         &[
             Value::Ref(Some(service.to_owned())),
-            Value::Int(serial as i32),
+            // One-to-one on the 64-bit numbers: two numbers stay two serials.
+            Value::Long(serial as i64),
         ],
     ))
 }
 
-/// A loader handle's service and serial.
-pub(crate) fn loader_parts(value: &Value) -> Option<(String, i32)> {
+/// A `ServiceLoader` for `service` the host made with no interpreter to number it, load
+/// `serial` of the host's own counter: a text serial (`host/<n>`), so it never spells an
+/// interpreter loader's heap number.
+pub(crate) fn host_loader(service: &str, serial: usize) -> Value {
+    Value::Host(HostRef::of_values(
+        HostKind::ServiceLoader,
+        &[
+            Value::Ref(Some(service.to_owned())),
+            Value::Ref(Some(format!("host/{serial}"))),
+        ],
+    ))
+}
+
+/// The service of a loader handle, whichever made it.
+pub(crate) fn loader_service(value: &Value) -> Option<String> {
     let Value::Host(handle) = value else {
         return None;
     };
@@ -66,7 +87,7 @@ pub(crate) fn loader_parts(value: &Value) -> Option<(String, i32)> {
         return None;
     }
     match handle.values()?.as_slice() {
-        [Value::Ref(Some(service)), Value::Int(serial)] => Some((service.clone(), *serial)),
+        [Value::Ref(Some(service)), Value::Long(_) | Value::Ref(Some(_))] => Some(service.clone()),
         _ => None,
     }
 }
@@ -125,8 +146,8 @@ fn provider_handle_parts(handle: &HostRef) -> Option<(String, String)> {
 
 /// `"java.util.ServiceLoader[" + service.getName() + "]"`.
 fn loader_text(handle: &HostRef, _: &mut dyn Nested) -> Result<Option<String>, NativeError> {
-    Ok(loader_parts(&Value::Host(handle.clone()))
-        .map(|(service, _)| format!("java.util.ServiceLoader[{}]", service.replace('/', "."))))
+    Ok(loader_service(&Value::Host(handle.clone()))
+        .map(|service| format!("java.util.ServiceLoader[{}]", service.replace('/', "."))))
 }
 
 pub(crate) const LOADER_METHODS: Methods = Methods {

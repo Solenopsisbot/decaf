@@ -152,9 +152,15 @@ mod tests {
             );
             let loader = crate::runtime::host_services::loader(text, 7);
             assert_eq!(
-                crate::runtime::host_services::loader_parts(&loader),
-                Some((text.clone(), 7))
+                crate::runtime::host_services::loader_service(&loader),
+                Some(text.clone())
             );
+            let host_loader = crate::runtime::host_services::host_loader(text, 7);
+            assert_eq!(
+                crate::runtime::host_services::loader_service(&host_loader),
+                Some(text.clone())
+            );
+            assert_ne!(loader, host_loader);
             let provider = crate::runtime::host_services::provider(text, text);
             assert_eq!(
                 crate::runtime::host_services::provider_parts(&provider),

@@ -148,8 +148,9 @@ impl<H: Host> Runtime<'_, H> {
         let count = self.counter(&copies);
         self.fields
             .insert(copies, Value::Int(count.saturating_add(1)));
-        let copy = self.next_object;
-        self.next_object = self.next_object.saturating_add(1);
+        // A `Field` object is one the jar sees: its copy number is a heap allocation number,
+        // and running out is counted by name, never one number for two copies (#669).
+        let copy = self.new_object_number("java/lang/reflect/Field");
         host_reflect::field(class, name, declared, Some(copy as u64))
     }
 

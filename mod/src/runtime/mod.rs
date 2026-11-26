@@ -10666,10 +10666,10 @@ impl Host for StdHost {
                 if !self.merged_service_providers(&service).is_empty()
                     || !host_models_class(&service)
                 {
-                    // The interpreter makes each load its own loader
-                    // (`service_loader.rs`); this host-only one shares its
-                    // iterator counter for a serial.
-                    let loader = host_services::loader(&service, self.next_iterator);
+                    // The interpreter makes each load its own loader, numbered by the
+                    // heap (`service_loader.rs`); this host-only one shares its iterator
+                    // counter for a serial, tagged so it never spells a heap number (#669).
+                    let loader = host_services::host_loader(&service, self.next_iterator);
                     self.next_iterator = self.next_iterator.saturating_add(1);
                     Ok(loader)
                 } else {
@@ -13993,7 +13993,7 @@ impl Host for StdHost {
             };
         }
         if r.owner == "java/util/ServiceLoader"
-            && let Some((service, _)) = host_services::loader_parts(receiver)
+            && let Some(service) = host_services::loader_service(receiver)
         {
             let service = service.as_str();
             if r.name == "iterator" && r.descriptor == "()Ljava/util/Iterator;" {
@@ -48400,7 +48400,7 @@ mandatory = true
         let loader = host
             .invoke(&load, &[host_class::class_value("demo/Provider")])
             .unwrap();
-        assert_eq!(loader, host_services::loader("demo/Provider", 0));
+        assert_eq!(loader, host_services::host_loader("demo/Provider", 0));
         // The interpreter builds the providers (`service_loader.rs`); the host
         // cannot (a provider's name is a `String`, #156 P13c), so its own
         // iterator is counted and hands out none.

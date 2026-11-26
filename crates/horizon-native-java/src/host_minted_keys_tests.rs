@@ -190,3 +190,87 @@ fn enum_set_all_of_answers_values_or_fails_as_java() {
     assert_eq!(answer, oracle.trim_end());
     assert!(counted.is_empty(), "{counted:?}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// ServiceLoader serials (`service_loader.rs`)
+
+/// The heap number a `ServiceLoader` handle's serial holds, however it is kept.
+fn loader_serial(loader: &Value) -> usize {
+    let Value::Host(handle) = loader else {
+        panic!("{loader:?} is no loader");
+    };
+    match handle.values().unwrap().as_slice() {
+        [_, Value::Int(serial)] => *serial as usize,
+        [_, Value::Long(serial)] => *serial as usize,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A loader made after a game hook is not one made before it (Java 25:
+/// `tests/fixtures/host_minted_keys/service_loader/java25.txt`). The second load is numbered
+/// `1 << 40` past the first; before #669 the serial was kept as `serial as i32`, which wrapped it
+/// onto the first loader's: one key, so `first == second` answered `true`.
+#[test]
+fn a_service_loader_after_a_game_hook_is_a_new_loader() {
+    let jar = compile("service_loader", &["host_minted_keys/service_loader"]);
+    let oracle =
+        std::fs::read_to_string(fixture("host_minted_keys/service_loader/java25.txt")).unwrap();
+    let mut host = jar.seed_host(StdHost::new());
+    host.heap.next_object = 7;
+    let first = jar
+        .invoke_method("demo/ServiceKeys", "load", "()Ljava/lang/Object;", None, &mut host)
+        .unwrap();
+    host.heap.next_object = GAME_HOOK_OBJECT_BASE + loader_serial(&first);
+    let answer = jar
+        .invoke_method_with_args(
+            "demo/ServiceKeys",
+            "same",
+            "(Ljava/lang/Object;)Ljava/lang/String;",
+            None,
+            &[first],
+            &mut host,
+        )
+        .unwrap();
+    assert_eq!(answer, Value::Ref(Some(oracle.trim_end().to_owned())));
+    assert!(
+        host.unknown_host_calls().is_empty(),
+        "{:?}",
+        host.unknown_host_calls()
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// `Field` copy numbers (`reflect_override.rs`)
+
+/// Each `getDeclaredField` is a new `Field` copy numbered by the heap (Java 25:
+/// `tests/fixtures/host_minted_keys/field_copies/java25.txt`). With one number left, the second
+/// copy finds the numbers exhausted: counted by name and the call fails, as for every allocation
+/// (#667). Before #669 the copy saturated at the mark, unnamed, and the second and third copies
+/// shared it.
+#[test]
+fn field_copies_take_heap_numbers_and_count_running_out() {
+    let jar = compile("field_copies", &["host_minted_keys/field_copies"]);
+    let oracle =
+        std::fs::read_to_string(fixture("host_minted_keys/field_copies/java25.txt")).unwrap();
+    let mut host = jar.seed_host(StdHost::new());
+    let (answer, counted) = run(&jar, &mut host, "demo/FieldCopies", "run");
+    assert_eq!(answer, oracle.trim_end());
+    assert!(counted.is_empty(), "{counted:?}");
+
+    let mut host = jar.seed_host(StdHost::new());
+    host.heap.next_object = usize::MAX - 1;
+    let failed = jar
+        .invoke_method("demo/FieldCopies", "run", "()Ljava/lang/String;", None, &mut host)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        failed.contains("allocation numbers are exhausted"),
+        "{failed}"
+    );
+    let counted = host.unknown_host_calls();
+    assert!(
+        counted.iter().any(|(name, _)| name
+            == "java/lang/reflect/Field#<new>: allocation numbers exhausted"),
+        "{counted:?}"
+    );
+}
