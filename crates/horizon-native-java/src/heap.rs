@@ -612,6 +612,8 @@ fn collectable(marker: &str) -> bool {
             .or_else(|| serial.strip_prefix("menu"))
             .or_else(|| serial.strip_prefix("ir"))
             .or_else(|| serial.strip_prefix("hit"))
+            // A `RandomSource` handle (`random_source.rs`): `<class>#random<n>`.
+            .or_else(|| serial.strip_prefix("random"))
     {
         return !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit());
     }
@@ -1804,6 +1806,21 @@ mod tests {
         assert_eq!(heap.next_object, 51);
         let next = format!("demo/Screen#{}", heap.next_object);
         assert!(!host.freed_objects.holds_key(&next), "{next} is born freed");
+    }
+
+    /// A key numbered at the top moves the heap's next number to `usize::MAX`, the exhausted
+    /// mark the allocator never hands out (`Runtime::new_object_key`): the next call refuses
+    /// instead of numbering two objects alike.
+    #[test]
+    fn a_key_at_the_top_exhausts_the_heap_instead_of_wrapping() {
+        let mut host = StdHost::new();
+        let mut heap = JavaHeap::default();
+        heap.fields.insert(
+            field(&format!("demo/Top#{}", usize::MAX - 1), "x"),
+            Value::Int(1),
+        );
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(heap.next_object, usize::MAX);
     }
 
     /// A tooltip sink is no allocation key: live during its `appendHoverText`'s store, its

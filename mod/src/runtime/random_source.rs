@@ -91,6 +91,12 @@ pub(crate) fn bit_conversion(
 pub(crate) const RANDOM_SOURCE: &str = "net/minecraft/util/RandomSource";
 const LEGACY: &str = "net/minecraft/world/level/levelgen/LegacyRandomSource";
 const JAVA_RANDOM: &str = "java/util/Random";
+
+/// Whether `class` is `java.util.Random`, whose objects the host models under jar-object keys
+/// numbered by the running heap's allocator (`Host::random_new`).
+pub(crate) fn is_java_random(class: &str) -> bool {
+    class == JAVA_RANDOM
+}
 const SINGLE: &str = "net/minecraft/world/level/levelgen/SingleThreadedRandomSource";
 const XORO: &str = "net/minecraft/world/level/levelgen/XoroshiroRandomSource";
 const LEGACY_POS: &str =
@@ -131,12 +137,27 @@ impl StdHost {
         (self.random_seed_uniquifier as i64) ^ self.random_time_origin.elapsed().as_nanos() as i64
     }
 
-    pub(crate) fn random_new(&mut self, class: &str) -> Option<Value> {
+    /// The host's object for a `new` of a modelled random class. A `java.util.Random` is a
+    /// jar object (`java/util/Random#n`, its `Object` methods and identity the runtime's), so
+    /// its number is the running heap's next one (`next_object`), never a counter of the
+    /// host's: with two counters, a `Random::new` constructor reference (the runtime's
+    /// allocator) took a seeded `new Random(1L)`'s key and reseeded it (#667 review).
+    pub(crate) fn random_new(&mut self, class: &str, next_object: &mut usize) -> Option<Value> {
         let state = match class {
             JAVA_RANDOM => {
-                return Some(self.java_random_handle(State::Java {
-                    seed: scramble_legacy(0),
-                }));
+                // Exhausted: the runtime refuses the allocation (`Runtime::allocate_new`).
+                if *next_object == usize::MAX {
+                    return None;
+                }
+                let key = format!("{JAVA_RANDOM}#{next_object}");
+                *next_object += 1;
+                self.random_sources.insert(
+                    key.clone(),
+                    State::Java {
+                        seed: scramble_legacy(0),
+                    },
+                );
+                return Some(crate::runtime::jar_object::handle(key));
             }
             LEGACY => State::Legacy {
                 seed: scramble_legacy(0),
@@ -150,11 +171,14 @@ impl StdHost {
             }
             _ => return None,
         };
-        Some(self.random_handle(state))
+        // Out of numbers (counted): the `new` allocates a plain object, whose calls count.
+        self.random_handle(state).ok()
     }
 
-    pub(crate) fn make_random_handle(&mut self, state: State) -> Value {
-        self.random_handle(state)
+    /// A new `RandomSource` handle for `state`; `None` once the numbers are exhausted
+    /// (counted), when the caller keeps the stream unknown.
+    pub(crate) fn make_random_handle(&mut self, state: State) -> Option<Value> {
+        self.random_handle(state).ok()
     }
 
     pub(crate) fn draw_random_handle_long(&mut self, handle: &Value) -> Option<i64> {
@@ -173,26 +197,38 @@ impl StdHost {
         }
     }
 
-    fn random_handle(&mut self, state: State) -> Value {
-        let key = self.next_random_key(state.class());
+    /// A new `RandomSource` handle (its own [`HostKind`], never a jar object) for `state`.
+    fn random_handle(&mut self, state: State) -> Result<Value, NativeError> {
+        let class = state.class();
+        let key = self.next_random_key(class)?;
         self.random_sources.insert(key.clone(), state);
-        Value::Host(HostRef::new(HostKind::RandomSource, key))
+        Ok(Value::Host(HostRef::new(HostKind::RandomSource, key)))
     }
 
-    fn java_random_handle(&mut self, state: State) -> Value {
-        let key = self.next_random_key(JAVA_RANDOM);
-        self.random_sources.insert(key.clone(), state);
-        crate::runtime::jar_object::handle(key)
-    }
-
-    /// A new source's key, `<class>#<n>` from a counter that only grows. Numbering by the
-    /// table's size reused a live source's key once another was collected or forgotten
-    /// (`#0`, `#1`; `#0` goes; the next is `#1` again): the new source overwrote the live
-    /// one's state, and two Java objects drew from one sequence.
-    fn next_random_key(&mut self, class: &str) -> String {
+    /// A new `RandomSource` handle's key, `<class>#random<n>`:
+    /// - `n` comes from a counter that only grows. Numbering by the table's size reused a live
+    ///   source's key once another was collected or forgotten (`#0`, `#1`; `#0` goes; the next
+    ///   is `#1` again), and the new source overwrote the live one's state.
+    /// - `random` keeps the key out of the jar's allocation keys (`class#<digits>`, numbered by
+    ///   the heap): the collector frees these with their own family (`heap::collectable`), and
+    ///   no jar object's number can name one.
+    ///
+    /// `u64::MAX` is never handed out: past it the source is refused (counted), never given a
+    /// number another source holds.
+    fn next_random_key(&mut self, class: &str) -> Result<String, NativeError> {
         let number = self.next_random_source;
-        self.next_random_source = number.saturating_add(1);
-        format!("{class}#{number}")
+        if number == u64::MAX {
+            let _ = self.unknown_host_call(&MethodRef {
+                owner: class.to_owned(),
+                name: "<new>".into(),
+                descriptor: ": random source numbers exhausted".into(),
+            });
+            return Err(NativeError::Metadata(format!(
+                "the host's random source numbers are exhausted; a new {class} would reuse a live source's key"
+            )));
+        }
+        self.next_random_source = number + 1;
+        Ok(format!("{class}#random{number}"))
     }
 
     fn random_key(value: &Value) -> Option<String> {
@@ -259,7 +295,7 @@ impl StdHost {
             }
             _ => return Err(NativeError::Metadata("unknown RandomSource class".into())),
         };
-        Ok(self.random_handle(state))
+        self.random_handle(state)
     }
 
     pub(crate) fn random_instance(
@@ -443,7 +479,10 @@ impl StdHost {
                     }
                     _ => return Some(Err(NativeError::Metadata("positional fork".into()))),
                 };
-                let value = self.random_handle(child);
+                let value = match self.random_handle(child) {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
                 self.save_random(key, state);
                 return Some(Ok(value));
             }
@@ -461,7 +500,10 @@ impl StdHost {
                     },
                     _ => return Some(Err(NativeError::Metadata("positional fork".into()))),
                 };
-                let value = self.random_handle(child);
+                let value = match self.random_handle(child) {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(error)),
+                };
                 self.save_random(key, state);
                 return Some(Ok(value));
             }
@@ -501,7 +543,7 @@ impl StdHost {
                     }
                     _ => unreachable!(),
                 };
-                Ok(self.random_handle(next))
+                self.random_handle(next)
             }
             ("at", "(III)Lnet/minecraft/util/RandomSource;") => {
                 let x = arg_int(args.first())?;
@@ -515,7 +557,7 @@ impl StdHost {
                     State::XoroshiroPositional { lo, hi } => xoro_state(mixed as u64 ^ lo, hi),
                     _ => unreachable!(),
                 };
-                Ok(self.random_handle(next))
+                self.random_handle(next)
             }
             _ => self.unknown_host_call(r),
         }
@@ -809,6 +851,31 @@ mod tests {
             fresh.draw_random_handle_long(&replay)
         );
         assert!(before.is_some());
+    }
+
+    /// A source's key is `<class>#random<n>`: no allocation key (`class#<digits>`), so no jar
+    /// object's number names it; and past the last number a new source is refused, counted.
+    #[test]
+    fn source_keys_are_their_own_family_and_refuse_past_the_last_number() {
+        let mut host = StdHost::new();
+        let Value::Host(handle) = host.random_seeded(LEGACY, 7).unwrap() else {
+            panic!("a seeded source is a host handle")
+        };
+        assert_eq!(handle.key(), format!("{LEGACY}#random0"));
+        assert!(crate::runtime::jar_object::parse_key(handle.key()).is_none());
+        host.next_random_source = u64::MAX;
+        let refused = host.random_seeded(LEGACY, 8).unwrap_err().to_string();
+        assert!(
+            refused.contains("random source numbers are exhausted"),
+            "{refused}"
+        );
+        assert_eq!(
+            host.unknown_host_calls(),
+            vec![(
+                format!("{LEGACY}#<new>: random source numbers exhausted"),
+                1
+            )]
+        );
     }
 
     #[test]

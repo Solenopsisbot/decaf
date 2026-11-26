@@ -263,6 +263,9 @@ pub use callback_marker::test_token as callback_test_token;
 mod sound_event;
 mod unmodifiable_sublist;
 pub use parked_threads::ParkedThread;
+#[cfg(test)]
+#[path = "allocation_numbers_tests.rs"]
+mod allocation_numbers_tests;
 mod priority_queue;
 mod pure_helpers;
 mod random_source;
@@ -2794,9 +2797,20 @@ pub trait Host {
     /// leave it as a no-op while the call remains counted by the runtime.
     fn dfu_codec_refused(&mut self, _reason: String) {}
 
-    fn random_new(&mut self, _class: &str) -> Option<Value> {
+    /// The host's own object for a `new` of `class` (a seeded `java.util.Random`, a modelled
+    /// stack), or `None` to let the runtime allocate a plain jar object. A host that keys its
+    /// object as a jar object (`class#n`) takes `n` from `next_object`, the running heap's
+    /// allocator, and advances it: one counter numbers every allocation key, so a host object
+    /// and a jar object never share one (#667 review). `usize::MAX` there means the numbers
+    /// are exhausted: take none.
+    fn random_new(&mut self, _class: &str, _next_object: &mut usize) -> Option<Value> {
         None
     }
+
+    /// The running heap has no allocation number left for an object of `class`: the allocation
+    /// is refused and the call fails ([`Runtime::refuse_exhausted_allocations`]). A host that
+    /// counts calls counts this one.
+    fn note_allocation_numbers_exhausted(&mut self, _class: &str) {}
 
     #[doc(hidden)]
     fn as_std_host(&self) -> Option<&StdHost> {
@@ -10125,11 +10139,19 @@ impl Host for StdHost {
         }
     }
 
-    fn random_new(&mut self, class: &str) -> Option<Value> {
+    fn random_new(&mut self, class: &str, next_object: &mut usize) -> Option<Value> {
         recipe_models::random_new(self, class)
             .or_else(|| vanilla_values::random_new(self, class))
             .or_else(|| block_use::random_new(self, class))
-            .or_else(|| StdHost::random_new(self, class))
+            .or_else(|| StdHost::random_new(self, class, next_object))
+    }
+
+    fn note_allocation_numbers_exhausted(&mut self, class: &str) {
+        let _ = self.unknown_host_call(&MethodRef {
+            owner: class.to_owned(),
+            name: "<new>".into(),
+            descriptor: ": allocation numbers exhausted".into(),
+        });
     }
 
     fn note_entity_data_hierarchy(&mut self, entries: &[(String, String)]) {
@@ -29955,6 +29977,13 @@ impl<H: Host> Runtime<'_, H> {
     /// A new object of `class`: a [`HostKind::JarObject`] handle keyed by a
     /// fresh allocation number (`jar_object.rs`).
     fn new_object(&mut self, class: &str) -> Value {
+        // A `Random` a constructor reference or reflection makes is the host's model too, as one
+        // `new` makes is: numbered by this allocator, so neither kind takes the other's key.
+        if random_source::is_java_random(class)
+            && let Some(value) = self.host.random_new(class, &mut self.next_object)
+        {
+            return value;
+        }
         let key = self.new_object_key(class);
         if render_math::is_class(class) {
             self.host.register_render_handle(&key);
@@ -29972,10 +30001,53 @@ impl<H: Host> Runtime<'_, H> {
 
     /// A fresh allocation key `class#n`, for a model whose object is a handle
     /// of its own kind (an executor, a cache builder) kept under the key.
+    ///
+    /// `usize::MAX` is never handed out: it marks the numbers as exhausted. A model allocating
+    /// past it gets that number, counted, and the call fails where it returns
+    /// ([`Self::refuse_exhausted_allocations`]); a jar `new` is refused before it allocates
+    /// ([`Self::allocate_new`]).
     fn new_object_key(&mut self, class: &str) -> String {
-        let key = format!("{class}#{}", self.next_object);
-        self.next_object = self.next_object.saturating_add(1);
-        key
+        let number = self.next_object;
+        if number == usize::MAX {
+            self.host.note_allocation_numbers_exhausted(class);
+        } else {
+            self.next_object = number + 1;
+        }
+        format!("{class}#{number}")
+    }
+
+    /// The `new` opcode's object: the host's model of `class` or a jar object, refused once
+    /// the allocation numbers are exhausted (never one number for two objects). Out of
+    /// `invoke_frame`, whose frame `fixture_deep_recursion` bounds.
+    #[inline(never)]
+    fn allocate_new(&mut self, class: &str) -> Result<Value, NativeError> {
+        if self.next_object == usize::MAX {
+            self.host.note_allocation_numbers_exhausted(class);
+            return Err(Self::allocations_exhausted(class));
+        }
+        Ok(match self.host.random_new(class, &mut self.next_object) {
+            Some(value) => value,
+            None => self.new_object(class),
+        })
+    }
+
+    /// Fail a call that starts or returns with the heap's allocation numbers exhausted
+    /// (`usize::MAX`, see [`Self::new_object_key`]): a collection that found a key numbered at
+    /// the top moved the heap's next number there, and no object can be numbered after it.
+    /// Fatal for the host: every later call adopts the same heap and fails here too.
+    #[inline(never)]
+    fn refuse_exhausted_allocations(&self, class: &str) -> Result<(), NativeError> {
+        if self.next_object == usize::MAX {
+            return Err(Self::allocations_exhausted(class));
+        }
+        Ok(())
+    }
+
+    fn allocations_exhausted(class: &str) -> NativeError {
+        NativeError::Metadata(format!(
+            "the jar's object allocation numbers are exhausted (the next would be {}, the last); a new {class} would reuse a live object's number",
+            usize::MAX
+        ))
     }
 
     /// Resolve `Class.forName` against the running jar's classes and the
@@ -37256,6 +37328,7 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Err(self.budget_exceeded(class, method));
         }
+        self.refuse_exhausted_allocations(class)?;
         if self.depth == 0 {
             // A required Mixin config that fails a game class stops the game itself.
             self.refuse_failed_game_mixin_target()?;
@@ -37279,7 +37352,9 @@ impl<H: Host> Runtime<'_, H> {
             self.check_shape_probes = true;
         }
         stack_walk::enter(class, method);
-        let result = self.invoke_frame(class, method, desc, receiver, args, frame_id);
+        let result = self
+            .invoke_frame(class, method, desc, receiver, args, frame_id)
+            .and_then(|value| self.refuse_exhausted_allocations(class).map(|()| value));
         stack_walk::leave();
         self.check_shape_probes = prev_check_shape_probes;
         self.depth -= 1;
@@ -39231,10 +39306,7 @@ impl<H: Host> Runtime<'_, H> {
                             // and in this frame, so its failure is catchable
                             // at this instruction.
                             invoke_or_catch!(at, self.ensure_initialized(&created));
-                            let object = self
-                                .host
-                                .random_new(&created)
-                                .unwrap_or_else(|| self.new_object(&created));
+                            let object = self.allocate_new(&created)?;
                             stack.push(object);
                         }
                         // A cancelled NEW leaves the reference descriptor's

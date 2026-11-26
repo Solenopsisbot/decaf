@@ -2019,6 +2019,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.object_collected(key)
     }
 
+    fn note_allocation_numbers_exhausted(&mut self, class: &str) {
+        self.inner.note_allocation_numbers_exhausted(class);
+    }
+
     fn pause_collections(&mut self, paused: bool) {
         self.inner.pause_collections(paused);
     }
