@@ -380,17 +380,16 @@ impl State {
         }))
     }
 
-    /// The component's own `extractImage` at `(x, y)` in a `width` x `height` tooltip box, its
-    /// draws painted on `draw`. A draw that counted paints nothing of that call.
-    fn draw_java_tooltip_image(
+    /// The component's own `extractImage` at `(x, y)` in a `width` x `height` tooltip box, planned
+    /// under the client lock so the caller can paint through `draw` without holding the lock
+    /// (`draw.item_stack` can re-enter `ItemPart::item_bar` and range-select item model properties
+    /// on the same thread). A draw that counted returns `None` and paints nothing of that call.
+    fn plan_java_tooltip_image(
         &mut self,
         data: &JavaTooltipData,
         [x, y, width, height]: [i32; 4],
-        draw: &mut dyn DrawContext,
-    ) {
-        let Some(loaded) = self.jars.get_mut(data.held.jar) else {
-            return;
-        };
+    ) -> Option<Vec<PaintStep>> {
+        let loaded = self.jars.get_mut(data.held.jar)?;
         let jar = &loaded.jar;
         // Drawn every frame the tooltip shows: what the draw makes is garbage once it painted.
         let outcome = loaded.host.with_transient_rows(|jar_host| {
@@ -409,31 +408,15 @@ impl State {
         });
         let Some(ops) = outcome.exact() else {
             loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
-            return;
+            return None;
         };
         // A text or stack the forms made at `tooltip_image` don't hold (the component drew
         // something else this time) counts, and nothing of the call is painted.
-        let plan = match paint_plan(&ops, &data.forms) {
-            Ok(plan) => plan,
+        match paint_plan(&ops, &data.forms) {
+            Ok(plan) => Some(plan),
             Err(reason) => {
                 note(loaded, &format!("tooltip_image:undrawable_{reason}"));
-                return;
-            }
-        };
-        for step in plan {
-            match step {
-                Paint::Gui(draws) => {
-                    if draw.gui_paint(&draws).is_err() {
-                        note(loaded, "tooltip_image:gui_paint_refused");
-                        return;
-                    }
-                }
-                Paint::Stack(stack, at) => {
-                    if !draw.item_stack(stack, at, ITEM_SIZE) {
-                        note(loaded, "tooltip_image:item_stack_refused");
-                        return;
-                    }
-                }
+                None
             }
         }
     }
@@ -573,10 +556,10 @@ fn count_text(stack: &StackComponents, given: &Option<String>) -> Option<String>
 /// A slot's item and the GUI pixels it is drawn in.
 const ITEM_SIZE: f32 = 16.0;
 
-/// One step of painting a tooltip image: a run of GUI ops, or a stack.
-enum Paint<'a> {
+/// One step of painting a tooltip image: a run of GUI ops, or an index into `TooltipForms::stacks`.
+enum PaintStep {
     Gui(Vec<GuiDraw>),
-    Stack(&'a mod_api::ItemStack, [f32; 2]),
+    Stack(usize, [f32; 2]),
 }
 
 /// The tooltip's draws as Sunrise paints them, in order, or why it can't.
@@ -592,7 +575,7 @@ enum Paint<'a> {
 /// `itemDecorations` pushed and left unchanged. A model draw alone, decorations alone, a scaled
 /// stack or one off the pixel grid refuse. The draw names no holder and no seed: Sunrise draws the
 /// stack as its GUI does, which differs only for an item model that reads its holder or seed.
-fn paint_plan<'a>(ops: &[DrawOp], forms: &'a TooltipForms) -> Result<Vec<Paint<'a>>, &'static str> {
+fn paint_plan(ops: &[DrawOp], forms: &TooltipForms) -> Result<Vec<PaintStep>, &'static str> {
     let text_of = |text: &ClientText| match forms.texts.get(text) {
         Some(text) => Some(text.clone()),
         None => match text {
@@ -640,16 +623,15 @@ fn paint_plan<'a>(ops: &[DrawOp], forms: &'a TooltipForms) -> Result<Vec<Paint<'
         }
         let count = count_text(stack, given);
         ops.next();
-        let api = forms
+        let stack_index = forms
             .stacks
             .iter()
-            .find(|(known, _)| known == stack)
-            .map(|(_, api)| api)
+            .position(|(known, _)| known == stack)
             .ok_or("stack_form")?;
         if !gui.is_empty() {
-            plan.push(Paint::Gui(std::mem::take(&mut gui)));
+            plan.push(PaintStep::Gui(std::mem::take(&mut gui)));
         }
-        plan.push(Paint::Stack(api, *at));
+        plan.push(PaintStep::Stack(stack_index, *at));
         if let Some(count) = count {
             let width = *forms.count_widths.get(&count).ok_or("stack_count_form")?;
             let (x, y) = (x as i32, y as i32);
@@ -663,7 +645,7 @@ fn paint_plan<'a>(ops: &[DrawOp], forms: &'a TooltipForms) -> Result<Vec<Paint<'
         }
     }
     if !gui.is_empty() {
-        plan.push(Paint::Gui(gui));
+        plan.push(PaintStep::Gui(gui));
     }
     Ok(plan)
 }
@@ -693,15 +675,46 @@ impl ClientTooltipComponent for JavaTooltip {
         height: i32,
         draw: &mut dyn DrawContext,
     ) {
-        let Some(mut state) = try_lock(&self.held.client) else {
+        let plan = {
+            let Some(mut state) = try_lock(&self.held.client) else {
+                return;
+            };
+            let data = JavaTooltipData {
+                held: Arc::clone(&self.held),
+                size: self.size,
+                forms: Arc::clone(&self.forms),
+            };
+            state.plan_java_tooltip_image(&data, [x, y, width, height])
+        };
+        let Some(plan) = plan else {
             return;
         };
-        let data = JavaTooltipData {
-            held: Arc::clone(&self.held),
-            size: self.size,
-            forms: Arc::clone(&self.forms),
-        };
-        state.draw_java_tooltip_image(&data, [x, y, width, height], draw);
+        // Paint without holding the client lock: `draw.item_stack` can synchronously invoke
+        // `ItemPart::item_bar` and range-select item model properties on this thread.
+        let mut refused: Option<&'static str> = None;
+        for step in plan {
+            match step {
+                PaintStep::Gui(draws) => {
+                    if draw.gui_paint(&draws).is_err() {
+                        refused = Some("tooltip_image:gui_paint_refused");
+                        break;
+                    }
+                }
+                PaintStep::Stack(stack_index, at) => {
+                    let (_, stack) = &self.forms.stacks[stack_index];
+                    if !draw.item_stack(stack, at, ITEM_SIZE) {
+                        refused = Some("tooltip_image:item_stack_refused");
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(tag) = refused
+            && let Some(mut state) = try_lock(&self.held.client)
+            && let Some(loaded) = state.jars.get_mut(self.held.jar)
+        {
+            note(loaded, tag);
+        }
     }
 }
 
@@ -924,15 +937,18 @@ mod tests {
                 .expect("the stack forms");
             let plan = paint_plan(&ops, &forms).expect("the slot paints");
             let [
-                Paint::Gui(before),
-                Paint::Stack(stack, at),
-                Paint::Gui(after),
+                PaintStep::Gui(before),
+                PaintStep::Stack(stack_index, at),
+                PaintStep::Gui(after),
             ] = &plan[..]
             else {
                 panic!("three steps");
             };
             assert_eq!(before.len(), 1);
-            assert_eq!(**stack, host.stack("demo:rune", count as u32));
+            assert_eq!(
+                forms.stacks[*stack_index].1,
+                host.stack("demo:rune", count as u32)
+            );
             assert_eq!(*at, [84.0, 12.0]);
             if count == 10 {
                 // "10" is 12 wide: x = 84 + 19 - 2 - 12, y = 12 + 9.
