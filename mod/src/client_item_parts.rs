@@ -185,32 +185,38 @@ fn property_value(
             .map(|entry| entry.value.clone())
     });
     let jar_types = crate::item_parts::persistent_jar_types(&loaded.host);
-    let Some(stack) = crate::item_parts::java_stack(
-        host,
-        &loaded.jar,
-        &mut loaded.host,
-        item_override,
-        input.stack,
-        &jar_types,
-    ) else {
+    let context = input.context;
+    let jar = &loaded.jar;
+    // A draw runs every frame: what it makes is garbage once it has its number, and the stack
+    // is the one the last draw of this game stack used while nothing changed it.
+    let outcome = loaded.host.with_transient_rows(|jar_host| {
+        let stack = crate::item_parts::java_draw_stack(
+            host,
+            jar,
+            jar_host,
+            item_override,
+            input.stack,
+            &jar_types,
+        )?;
+        Some(jar.range_select_property_value(
+            jar_host,
+            &property.held.value,
+            &stack,
+            ItemModelHolder {
+                level: context.level.is_some(),
+                owner: context.owner.is_some(),
+            },
+            context.seed,
+            &ExecutionBudget::within(JAR_BUDGET),
+        ))
+    });
+    let Some(outcome) = outcome else {
         note(
             loaded,
             &format!("range_select_property:{}:stack unreadable", property.id),
         );
         return 0.0;
     };
-    let context = input.context;
-    let outcome = loaded.jar.range_select_property_value(
-        &mut loaded.host,
-        &property.held.value,
-        &stack,
-        ItemModelHolder {
-            level: context.level.is_some(),
-            owner: context.owner.is_some(),
-        },
-        context.seed,
-        &ExecutionBudget::within(JAR_BUDGET),
-    );
     loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
     outcome.exact().unwrap_or(0.0)
 }
@@ -252,49 +258,47 @@ impl State {
             .get(&ItemHook::TooltipImage)?
             .clone();
         let jar_types = crate::item_parts::persistent_jar_types(&loaded.host);
-        let Some(value) = crate::item_parts::java_stack(
-            host,
-            &loaded.jar,
-            &mut loaded.host,
-            Some(item.clone()),
-            stack,
-            &jar_types,
-        ) else {
-            note(loaded, "tooltip_image:stack unreadable");
-            return None;
-        };
-        let budget = ExecutionBudget::within(JAR_BUDGET);
-        let image = loaded
-            .jar
-            .item_tooltip_image(&mut loaded.host, &item, &owner, &value, &budget)
-            .exact();
-        let data = match image {
-            Some(Some(data)) => data,
-            // `Optional.empty()`: no image, exactly.
-            Some(None) => return None,
-            None => {
-                loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
-                return None;
-            }
-        };
-        let component = loaded
-            .jar
-            .client_tooltip_component(&mut loaded.host, &data, &budget)
-            .exact();
-        loaded.host.release(&data);
-        let component = component?;
-        loaded.host.begin_client_frame(tooltip_frame(), &[]);
-        let size = loaded
-            .jar
-            .tooltip_component_size(&mut loaded.host, &component, &budget)
-            .exact();
-        // A draw that would count paints nothing: Sunrise would keep an empty box where vanilla
-        // draws the image. The image is drawn once here, in its own box, to know.
-        let drawable = size.is_some_and(|size| {
-            loaded
-                .jar
-                .draw_tooltip_component_image(
-                    &mut loaded.host,
+        let jar = &loaded.jar;
+        // Asked on every frame the tooltip shows: what the calls make is garbage once the
+        // component is measured (the component itself is retained), and the stack is the one
+        // the last draw of this game stack used while nothing changed it.
+        let made = loaded.host.with_transient_rows(|jar_host| {
+            let Some(value) = crate::item_parts::java_draw_stack(
+                host,
+                jar,
+                jar_host,
+                Some(item.clone()),
+                stack,
+                &jar_types,
+            ) else {
+                return TooltipMade::Unreadable;
+            };
+            let budget = ExecutionBudget::within(JAR_BUDGET);
+            let image = jar
+                .item_tooltip_image(jar_host, &item, &owner, &value, &budget)
+                .exact();
+            let data = match image {
+                Some(Some(data)) => data,
+                // `Optional.empty()`: no image, exactly.
+                Some(None) => return TooltipMade::Empty,
+                None => return TooltipMade::ImageCounted,
+            };
+            let component = jar
+                .client_tooltip_component(jar_host, &data, &budget)
+                .exact();
+            jar_host.release(&data);
+            let Some(component) = component else {
+                return TooltipMade::Empty;
+            };
+            jar_host.begin_client_frame(tooltip_frame(), &[]);
+            let size = jar
+                .tooltip_component_size(jar_host, &component, &budget)
+                .exact();
+            // A draw that would count paints nothing: Sunrise would keep an empty box where
+            // vanilla draws the image. The image is drawn once here, in its own box, to know.
+            let drawable = size.is_some_and(|size| {
+                jar.draw_tooltip_component_image(
+                    jar_host,
                     &component,
                     0,
                     0,
@@ -307,11 +311,25 @@ impl State {
                     ops.iter()
                         .all(|op| super::menu_screen::gui_draw_with(op, &|_| None).is_ok())
                 })
+            });
+            jar_host.end_client_frame();
+            TooltipMade::Measured(component, size.filter(|_| drawable))
         });
-        loaded.host.end_client_frame();
+        let (component, size) = match made {
+            TooltipMade::Unreadable => {
+                note(loaded, "tooltip_image:stack unreadable");
+                return None;
+            }
+            TooltipMade::Empty => return None,
+            TooltipMade::ImageCounted => {
+                loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
+                return None;
+            }
+            TooltipMade::Measured(component, size) => (component, size),
+        };
         loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
         // A component that can't measure or draw itself shows nothing rather than a guessed box.
-        let Some(size) = size.filter(|_| drawable) else {
+        let Some(size) = size else {
             loaded.host.release(&component);
             return None;
         };
@@ -334,17 +352,22 @@ impl State {
         let Some(loaded) = self.jars.get_mut(data.held.jar) else {
             return;
         };
-        loaded.host.begin_client_frame(tooltip_frame(), &[]);
-        let outcome = loaded.jar.draw_tooltip_component_image(
-            &mut loaded.host,
-            &data.held.value,
-            x,
-            y,
-            width,
-            height,
-            &ExecutionBudget::within(JAR_BUDGET),
-        );
-        loaded.host.end_client_frame();
+        let jar = &loaded.jar;
+        // Drawn every frame the tooltip shows: what the draw makes is garbage once it painted.
+        let outcome = loaded.host.with_transient_rows(|jar_host| {
+            jar_host.begin_client_frame(tooltip_frame(), &[]);
+            let outcome = jar.draw_tooltip_component_image(
+                jar_host,
+                &data.held.value,
+                x,
+                y,
+                width,
+                height,
+                &ExecutionBudget::within(JAR_BUDGET),
+            );
+            jar_host.end_client_frame();
+            outcome
+        });
         let Some(ops) = outcome.exact() else {
             loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
             return;
@@ -364,6 +387,18 @@ impl State {
             note(loaded, "tooltip_image:gui_paint_refused");
         }
     }
+}
+
+/// How making a tooltip image ended ([`State::java_tooltip_image`]).
+enum TooltipMade {
+    /// The game stack has no Java stack (counted by the caller).
+    Unreadable,
+    /// No image: `Optional.empty()`, or a component `create` that counted.
+    Empty,
+    /// `getTooltipImage` counted.
+    ImageCounted,
+    /// The component (retained), and its size when it measured and drew exactly.
+    Measured(Value, Option<TooltipComponentSize>),
 }
 
 /// A frame for a tooltip component's Java code: no player, no level, nothing a screen reads.

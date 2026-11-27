@@ -34,6 +34,14 @@
 //! that merely spells a live marker keeps that object alive; that is the only
 //! imprecision, and it errs on the side of keeping.
 //!
+//! The recipe model's rows (stacks, templates, component patches: `recipe_models.rs`) are
+//! host state an embedder may hold, so they are roots, except the ones made inside a transient
+//! scope ([`StdHost::with_transient_rows`], a client draw), which are objects like any other.
+//!
+//! Collection is linear in what it traces: each object's fields are a range of the sorted
+//! field table, and the Kotlin lazy states a text keeps are found with one automaton pass over
+//! the text ([`LazyHolders`]), not a walk of every field per text (#609 round 4 bug 1).
+//!
 //! The heap is bounded after collection ([`MAX_RESIDENT_FIELDS`],
 //! [`MAX_RESIDENT_ARRAYS`], [`MAX_RESIDENT_BYTES`]); a store over a bound is
 //! refused with an error that names it, so the callback that grew it fails
@@ -213,6 +221,42 @@ impl StdHost {
     /// so this follows live blocks rather than every block a jar ever constructed.
     pub fn block_state_count(&self) -> usize {
         self.block_states.len()
+    }
+
+    /// Run `body` with a transient scope open: every stack, template, component patch and
+    /// other recipe-model row made inside it (by the embedder's calls or by the jar's code) is
+    /// an ordinary object of the heap collector, kept only while something reaches it, rather
+    /// than a root for the host's life.
+    ///
+    /// The embedder promises not to hold a value made inside the scope after it ends, except
+    /// through [`Self::retain`] (or by the jar's own roots, which the collector sees). That
+    /// holds for a call whose answer is plain data (a model property's number, an item bar,
+    /// a tooltip image's draws): the client's draw paths, which run every frame. Rows made
+    /// anywhere else stay roots, as before.
+    ///
+    /// A collection inside the scope sees the scope's live values as roots the way any
+    /// invocation's are (its receiver, arguments and result are roots of its own store); a
+    /// value the embedder keeps from one call of the scope to a later one is retained for
+    /// that while (`NativeJar::make_item_stack` does so for its decoded values).
+    ///
+    /// Scopes nest; the depth is restored however `body` ends, a panic included.
+    pub fn with_transient_rows<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let depth = self.recipes.enter_transient();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(self)));
+        self.recipes.leave_transient(depth);
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// How many recipe-model rows (stacks, templates, patches, ...) the host keeps, and how
+    /// many of them are collectable ([`Self::with_transient_rows`]).
+    pub fn recipe_row_counts(&self) -> (usize, usize) {
+        (
+            self.recipes.entry_count(),
+            self.recipes.collectable_rows.len(),
+        )
     }
 
     pub(crate) fn take_resident_heap(&mut self) -> JavaHeap {
@@ -409,6 +453,8 @@ impl StdHost {
         self.vec2.root_texts(out);
         self.tool_material.root_texts(out);
         self.entity_registration.root_texts(out);
+        // The client draw stacks kept for reuse (`item_stack_cache.rs`).
+        self.item_stack_cache.root_texts(out);
         // Seeded `Level.random` handles kept per dimension (`level_sound.rs`).
         for held in self.level_sound.level_random_handles.values() {
             value(held, out);
@@ -436,7 +482,7 @@ impl StdHost {
     /// guard, a comparator, a reference's referent, a throwable's cause, a
     /// collection's layout. Edges from `marker` when it is collectable,
     /// roots when not.
-    fn keyed_texts(&self, marker: &str, out: &mut Vec<String>) {
+    pub(crate) fn keyed_texts(&self, marker: &str, out: &mut Vec<String>) {
         fn push(entry: Option<&impl std::fmt::Debug>, out: &mut Vec<String>) {
             if let Some(entry) = entry {
                 out.push(format!("{entry:?}"));
@@ -492,7 +538,22 @@ impl StdHost {
 
     /// Every key of the tables [`Self::keyed_texts`] reads, and of the other
     /// tables kept per object.
-    fn keyed_table_keys(&self) -> impl Iterator<Item = &str> {
+    pub(crate) fn keyed_table_keys(&self) -> impl Iterator<Item = &str> {
+        self.state_table_keys().chain(self.layout_table_keys())
+    }
+
+    /// The keys of the per-object tables that hold a hash or tree collection's layout
+    /// (its iteration order), state of the collection itself.
+    pub(crate) fn layout_table_keys(&self) -> impl Iterator<Item = &str> {
+        self.hash_tables
+            .keys()
+            .chain(self.red_black_trees.keys())
+            .chain(self.probe_tables.keys())
+            .map(String::as_str)
+    }
+
+    /// [`Self::keyed_table_keys`] but the layouts ([`Self::layout_table_keys`]).
+    pub(crate) fn state_table_keys(&self) -> impl Iterator<Item = &str> {
         self.io_paths
             .keys()
             .chain(self.set_from_map_views.keys())
@@ -510,9 +571,6 @@ impl StdHost {
             .chain(self.throwable_causes.keys())
             .chain(self.throwable_suppressed.keys())
             .chain(self.throwable_messages.keys())
-            .chain(self.hash_tables.keys())
-            .chain(self.red_black_trees.keys())
-            .chain(self.probe_tables.keys())
             .chain(self.constructed_items.iter())
             .chain(self.constructed_blocks.iter())
             .chain(self.block_items.keys())
@@ -664,6 +722,11 @@ const KOTLIN_LAZY_FIELD_PREFIX: &str = "kotlin-lazy|";
 
 fn kotlin_lazy_field_handle(key: &str) -> Option<&str> {
     key.strip_prefix(KOTLIN_LAZY_FIELD_PREFIX)
+}
+
+/// Whether a field key is a Kotlin lazy state's (`kotlin-lazy|<holder>`).
+pub(crate) fn kotlin_lazy_field_key(key: &str) -> bool {
+    kotlin_lazy_field_handle(key).is_some()
 }
 
 fn heap_entries(heap: &JavaHeap, host: &StdHost) -> usize {
@@ -950,13 +1013,13 @@ fn note_menu_numbers(text: &str, out: &mut Vec<usize>) {
 
 /// The collectable markers of a heap and the distinct lengths they come in,
 /// which is what [`scan`] tries at each digit-run end.
-struct Collectable {
-    markers: HashSet<String>,
+pub(crate) struct Collectable {
+    pub(crate) markers: HashSet<String>,
     lengths: Vec<usize>,
 }
 
 impl Collectable {
-    fn new(heap: &JavaHeap, host: &StdHost) -> Self {
+    pub(crate) fn new(heap: &JavaHeap, host: &StdHost) -> Self {
         // Field keys are sorted, so an object's fields are adjacent: each
         // receiver is checked once.
         let mut previous = "";
@@ -979,6 +1042,10 @@ impl Collectable {
             .chain(host.block_states.values().map(|(block, _)| block.as_str()))
             .chain(host.keyed_table_keys())
             .filter(|marker| collectable(marker))
+            // The recipe rows a transient scope minted (`recipe_models::RecipeState::
+            // collectable_rows`): `recipe-stack/<n>` and the like, which end in their serial
+            // as every marker here does, so `scan` finds them where a text names them.
+            .chain(host.recipes.collectable_rows.iter().map(String::as_str))
             .map(str::to_owned)
             .collect();
         let lengths: BTreeSet<usize> = markers.iter().map(String::len).collect();
@@ -988,9 +1055,15 @@ impl Collectable {
         }
     }
 
+    /// Recompute the marker lengths [`Self::scan`] tries, after `markers` changed.
+    pub(crate) fn refresh_lengths(&mut self) {
+        let lengths: BTreeSet<usize> = self.markers.iter().map(String::len).collect();
+        self.lengths = lengths.into_iter().collect();
+    }
+
     /// Every collectable marker `text` names, itself or embedded: each one
     /// ends where a run of digits ends.
-    fn scan(&self, text: &str, out: &mut Vec<String>) {
+    pub(crate) fn scan(&self, text: &str, out: &mut Vec<String>) {
         let bytes = text.as_bytes();
         for end in 1..=bytes.len() {
             if !bytes[end - 1].is_ascii_digit() || bytes.get(end).is_some_and(u8::is_ascii_digit) {
@@ -1010,27 +1083,174 @@ impl Collectable {
     }
 }
 
-fn mark_kotlin_lazy_states(
-    heap: &JavaHeap,
-    text: &str,
+/// Every Kotlin lazy state of a heap (`kotlin-lazy|<holder>` fields), and an automaton that
+/// finds, in one pass over a text, every holder the text contains (Aho-Corasick over the
+/// holders' bytes).
+///
+/// A lazy state lives while some traced text contains its holder (`text.contains(holder)`,
+/// the holder being a `KotlinLazy` handle's key, which a value embeds wherever it sits, #301).
+/// Testing each holder against each text walked every heap field once per traced text, which
+/// made a collection O(texts x fields): with a pouch drawn every frame the heap grew until one
+/// collection took minutes (#609 round 4 bug 1). This answers the same `contains` for all
+/// holders at once in O(text + matches).
+struct LazyHolders<'h> {
+    /// Holder and value of each lazy state, in field order.
+    holders: Vec<(&'h str, &'h Value)>,
+    /// Trie edges per node, sorted by byte; node 0 is the root.
+    next: Vec<Vec<(u8, u32)>>,
+    /// The longest proper suffix of a node's path that is also a trie path.
+    fail: Vec<u32>,
+    /// The holders that end exactly at a node.
+    own: Vec<Vec<u32>>,
+    /// The nearest node on the fail chain (the node itself excluded) with holders of its own.
+    dict: Vec<u32>,
+    /// Holders of length 0, which every text contains.
+    empty: Vec<u32>,
+}
+
+const NO_NODE: u32 = u32::MAX;
+
+impl<'h> LazyHolders<'h> {
+    fn new(heap: &'h JavaHeap) -> Self {
+        let holders: Vec<(&str, &Value)> = heap
+            .fields
+            .iter()
+            .filter_map(|(key, value)| kotlin_lazy_field_handle(key).map(|holder| (holder, value)))
+            .collect();
+        let mut out = Self {
+            holders,
+            next: vec![Vec::new()],
+            fail: vec![0],
+            own: vec![Vec::new()],
+            dict: vec![NO_NODE],
+            empty: Vec::new(),
+        };
+        for index in 0..out.holders.len() {
+            let holder = out.holders[index].0;
+            let index = index as u32;
+            if holder.is_empty() {
+                out.empty.push(index);
+                continue;
+            }
+            let mut node = 0u32;
+            for &byte in holder.as_bytes() {
+                node = match out.child(node, byte) {
+                    Some(child) => child,
+                    None => {
+                        let child = out.next.len() as u32;
+                        out.next.push(Vec::new());
+                        out.fail.push(0);
+                        out.own.push(Vec::new());
+                        out.dict.push(NO_NODE);
+                        let edges = &mut out.next[node as usize];
+                        let at = edges.partition_point(|&(b, _)| b < byte);
+                        edges.insert(at, (byte, child));
+                        child
+                    }
+                };
+            }
+            out.own[node as usize].push(index);
+        }
+        // Fail and dictionary links, breadth first (a node's fail target is shallower).
+        let mut queue = std::collections::VecDeque::new();
+        for &(_, child) in &out.next[0] {
+            queue.push_back(child);
+        }
+        while let Some(node) = queue.pop_front() {
+            for at in 0..out.next[node as usize].len() {
+                let (byte, child) = out.next[node as usize][at];
+                let mut fallback = out.fail[node as usize];
+                let target = loop {
+                    if let Some(target) = out.child(fallback, byte) {
+                        break target;
+                    }
+                    if fallback == 0 {
+                        break 0;
+                    }
+                    fallback = out.fail[fallback as usize];
+                };
+                out.fail[child as usize] = target;
+                out.dict[child as usize] = if out.own[target as usize].is_empty() {
+                    out.dict[target as usize]
+                } else {
+                    target
+                };
+                queue.push_back(child);
+            }
+        }
+        out
+    }
+
+    fn is_empty(&self) -> bool {
+        self.holders.is_empty()
+    }
+
+    fn child(&self, node: u32, byte: u8) -> Option<u32> {
+        let edges = &self.next[node as usize];
+        edges
+            .binary_search_by_key(&byte, |&(b, _)| b)
+            .ok()
+            .map(|at| edges[at].1)
+    }
+
+    /// Call `each` with the index of every holder `text` contains (a holder found at several
+    /// places is reported at each).
+    fn matches(&self, text: &str, mut each: impl FnMut(usize)) {
+        for &index in &self.empty {
+            each(index as usize);
+        }
+        if self.next[0].is_empty() {
+            return;
+        }
+        let mut node = 0u32;
+        for &byte in text.as_bytes() {
+            loop {
+                if let Some(child) = self.child(node, byte) {
+                    node = child;
+                    break;
+                }
+                if node == 0 {
+                    break;
+                }
+                node = self.fail[node as usize];
+            }
+            let mut out = node;
+            while out != NO_NODE {
+                for &index in &self.own[out as usize] {
+                    each(index as usize);
+                }
+                out = self.dict[out as usize];
+            }
+        }
+    }
+}
+
+/// Mark every lazy state whose holder `text` contains, then those its value's text contains,
+/// and so on; the collectable markers their values name go to `pending`. The same closure the
+/// field-by-field walk reached (the order differs, which nothing reads).
+fn mark_kotlin_lazy_states<'t>(
+    lazy: &LazyHolders<'t>,
+    text: &'t str,
     reached: &mut HashSet<String>,
     pending: &mut Vec<String>,
     collectable: &Collectable,
 ) {
-    for (field, value) in &heap.fields {
-        let Some(holder) = kotlin_lazy_field_handle(field) else {
-            continue;
-        };
-        if holder != text && !text.contains(holder) {
-            continue;
-        }
-        if !reached.insert(holder.to_owned()) {
-            continue;
-        }
-        if let Some(value) = value_text(value) {
-            collectable.scan(value, pending);
-            mark_kotlin_lazy_states(heap, value, reached, pending, collectable);
-        }
+    if lazy.is_empty() {
+        return;
+    }
+    let mut texts = vec![text];
+    while let Some(text) = texts.pop() {
+        lazy.matches(text, |index| {
+            let (holder, value) = lazy.holders[index];
+            if reached.contains(holder) {
+                return;
+            }
+            reached.insert(holder.to_owned());
+            if let Some(value) = value_text(value) {
+                collectable.scan(value, pending);
+                texts.push(value);
+            }
+        });
     }
 }
 
@@ -1124,6 +1344,13 @@ fn has_live_shape_probe(heap: &JavaHeap, host: &StdHost, extra: &[String]) -> bo
             .keys()
             .flat_map(|key| host.map_entries.held(key))
             .any(value_has_shape_probe)
+        // Collectable recipe rows are not roots (`root_texts` skips them).
+        || host
+            .recipes
+            .collectable_rows
+            .iter()
+            .flat_map(|key| host.recipes.row_values(key))
+            .any(value_has_shape_probe)
     {
         return true;
     }
@@ -1171,6 +1398,8 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     }
     let mut pending = Vec::new();
     let mut reached_kotlin_lazy = HashSet::new();
+    // Built once per collection; borrows the heap only while the trace reads it.
+    let lazy = LazyHolders::new(heap);
     // Every allocation number a text the trace reaches names: the objects
     // found live, those without a row of their own included (`FreedObjects`).
     let mut live = Vec::new();
@@ -1217,7 +1446,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
         }
         for text in roots {
             mark_kotlin_lazy_states(
-                heap,
+                &lazy,
                 text,
                 &mut reached_kotlin_lazy,
                 &mut pending,
@@ -1285,6 +1514,8 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .flat_map(|state| state.siblings.iter().chain(state.args.iter().flatten()));
         // A map entry's key and value, and a node's map (`host_map_entry.rs`).
         let entries = host.map_entries.held(&marker);
+        // A collectable recipe row's item and component values (`RecipeState::row_values`).
+        let rows = host.recipes.row_values(&marker);
         if let Some(map) = host.map_entries.map_of(&marker) {
             collectable.scan(map, &mut found);
         }
@@ -1297,10 +1528,11 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             .chain(enumerations)
             .chain(components)
             .chain(entries)
+            .chain(rows)
         {
             for text in value_texts(value) {
                 mark_kotlin_lazy_states(
-                    heap,
+                    &lazy,
                     text,
                     &mut reached_kotlin_lazy,
                     &mut found,
@@ -1322,7 +1554,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             host.keyed_texts(&marker, &mut keyed);
             for text in &keyed {
                 mark_kotlin_lazy_states(
-                    heap,
+                    &lazy,
                     text,
                     &mut reached_kotlin_lazy,
                     &mut found,
@@ -1335,6 +1567,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
         }
         pending.extend(found.drain(..).filter(|next| !reached.contains(next)));
     }
+    drop(lazy);
     let keep = |marker: &str| !collectable.markers.contains(marker) || reached.contains(marker);
     // Every number below the heap's next one that was not found live is
     // freed, so a later read of its fields is refused by name rather than
@@ -1411,6 +1644,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     host.tool_material.retain_keys(keep);
     host.vec2.retain_keys(keep);
     host.prune_keyed_tables(keep);
+    host.recipes.prune_rows(keep);
     host.render_objects
         .retain(|key, _| render_live.contains(key));
     host.render_handles.retain(|key| render_live.contains(key));
@@ -1534,6 +1768,191 @@ mod tests {
         out.extend(heap.arrays.keys().map(String::as_str));
         out.dedup();
         out
+    }
+
+    /// The holder matcher answers `text.contains(holder)` for every holder at once: holders that
+    /// nest, overlap, share prefixes or suffixes, repeat in the text, are empty, or hold
+    /// multi-byte characters, and a generated set besides.
+    #[test]
+    fn the_lazy_holder_matcher_answers_contains_for_every_holder() {
+        fn check(holders: &[String], texts: &[String]) {
+            let mut heap = JavaHeap::default();
+            for (index, holder) in holders.iter().enumerate() {
+                heap.fields.insert(
+                    format!("{KOTLIN_LAZY_FIELD_PREFIX}{holder}"),
+                    Value::Int(index as i32),
+                );
+            }
+            let lazy = LazyHolders::new(&heap);
+            for text in texts {
+                let mut found = BTreeSet::new();
+                lazy.matches(text, |index| {
+                    found.insert(lazy.holders[index].0);
+                });
+                let expected: BTreeSet<&str> = holders
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|holder| text.contains(holder))
+                    .collect();
+                assert_eq!(found, expected, "{text:?}");
+            }
+        }
+        let strings = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        check(
+            &strings(&[
+                "",
+                "a",
+                "ab",
+                "abc",
+                "bc",
+                "c",
+                "abab",
+                "ba",
+                "J:7",
+                "J:71",
+                "\u{e9}",
+                "a\u{e9}",
+                "s:SYNCHRONIZED,J:7,@indy:demo/Mod#1",
+            ]),
+            &strings(&[
+                "",
+                "a",
+                "abab",
+                "xabcx",
+                "cba",
+                "bbbbc",
+                "J:7",
+                "J:1",
+                "\u{e9}a\u{e9}",
+                "[s:SYNCHRONIZED,J:71,@indy:demo/Mod#1]",
+                "[s:SYNCHRONIZED,J:7,@indy:demo/Mod#1]",
+            ]),
+        );
+        // Generated over a small alphabet, so holders overlap in every way.
+        let mut seed = 0x2545_f491_u64;
+        let mut next = move |bound: u64| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 33) % bound
+        };
+        let mut word = |max: u64| {
+            (0..next(max))
+                .map(|_| ["a", "b", "#", "1"][next(4) as usize])
+                .collect::<String>()
+        };
+        let holders: Vec<String> = (0..200).map(|_| word(7)).collect();
+        let texts: Vec<String> = (0..400).map(|_| word(40)).collect();
+        check(&holders, &texts);
+    }
+
+    /// A lazy state lives while a traced text contains its holder, and what its value names lives
+    /// with it, transitively; one nothing reaches goes. Same closure as before #609 round 4.
+    #[test]
+    fn lazy_states_live_while_a_traced_text_contains_their_holder() {
+        let (mut host, mut heap) = graph("demo/Mod#unused");
+        // A static embeds holder `L1`; L1's value embeds holder `L2` and names node 3; L2's value
+        // names node 1. `L3` is reached by nothing.
+        host.persistent_static_fields.insert(
+            "demo/Mod#LAZYLjava/lang/Object;".into(),
+            text("@lazy[L1,J:7]"),
+        );
+        heap.fields.insert(
+            format!("{KOTLIN_LAZY_FIELD_PREFIX}L1,J:7"),
+            text("[L2,J:8|demo/Node#3]"),
+        );
+        heap.fields.insert(
+            format!("{KOTLIN_LAZY_FIELD_PREFIX}L2,J:8"),
+            text("demo/Node#1"),
+        );
+        heap.fields.insert(
+            format!("{KOTLIN_LAZY_FIELD_PREFIX}L3,J:9"),
+            text("demo/Node#1"),
+        );
+        collect(&mut heap, &mut host, &[]);
+        let lazy: Vec<&str> = heap
+            .fields
+            .keys()
+            .filter_map(|key| kotlin_lazy_field_handle(key))
+            .collect();
+        assert_eq!(lazy, ["L1,J:7", "L2,J:8"]);
+        assert_eq!(
+            objects(&heap)
+                .into_iter()
+                .filter(|object| object.starts_with("demo/"))
+                .collect::<Vec<_>>(),
+            ["demo/Node#1", "demo/Node#2", "demo/Node#3", "demo/Node#4"]
+        );
+    }
+
+    fn stack_holding(host: &mut StdHost, value: Value) -> Value {
+        let mut patch = crate::runtime::recipe_models::ComponentPatch::default();
+        patch.entries.insert("demo:held".into(), Some(value));
+        host.recipes
+            .alloc_stack(crate::runtime::recipe_models::LiveStack::from_item_id(
+                "minecraft:stone".into(),
+                1,
+                patch,
+            ))
+    }
+
+    fn key(value: &Value) -> String {
+        value_text(value).unwrap().to_owned()
+    }
+
+    /// A row made in a transient scope is an object: kept while something reaches it, its values
+    /// edges, dropped once nothing does. A row made outside one is a root, as before.
+    #[test]
+    fn rows_made_in_a_transient_scope_live_only_while_reached() {
+        let (mut host, mut heap) = graph("demo/Mod#unused");
+        let (reached, unreached) = host.with_transient_rows(|host| {
+            (
+                stack_holding(host, text("demo/Node#1")),
+                stack_holding(host, text("demo/Node#3")),
+            )
+        });
+        let rooted = stack_holding(&mut host, text("[Ldemo/Node;#1"));
+        host.persistent_static_fields
+            .insert("demo/Mod#HELDLjava/lang/Object;".into(), reached.clone());
+        collect(&mut heap, &mut host, &[]);
+        let stacks: Vec<&String> = host.recipes.stacks.keys().collect();
+        assert_eq!(stacks, [&key(&reached), &key(&rooted)]);
+        assert_eq!(
+            host.recipes.collectable_rows.iter().collect::<Vec<_>>(),
+            [&key(&reached)]
+        );
+        // Node 1 lives through the reached row, the array through the root row; node 3 went
+        // with the row nothing reached.
+        assert_eq!(
+            objects(&heap),
+            [
+                "demo/Node#1",
+                "demo/Node#2",
+                "[Ldemo/Node;#0",
+                "[Ldemo/Node;#1"
+            ]
+        );
+        // The static lets go: the row and what only it reached go too.
+        host.persistent_static_fields
+            .insert("demo/Mod#HELDLjava/lang/Object;".into(), Value::Ref(None));
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(
+            host.recipes.stacks.keys().collect::<Vec<_>>(),
+            [&key(&rooted)]
+        );
+        assert!(host.recipes.collectable_rows.is_empty());
+        assert_eq!(objects(&heap), ["[Ldemo/Node;#1"]);
+        let _ = unreached;
+    }
+
+    /// The scope's depth is restored however its body ends.
+    #[test]
+    fn a_transient_scope_closes_on_unwind() {
+        let mut host = StdHost::new();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            host.with_transient_rows(|_| panic!("body failed"))
+        }));
+        assert!(caught.is_err());
+        let stack = stack_holding(&mut host, Value::Int(1));
+        assert!(host.recipes.collectable_rows.is_empty(), "{stack:?}");
     }
 
     #[test]
@@ -2258,6 +2677,8 @@ mod tests {
             "vec2",
             "block_use",
             "level_sound",
+            // Kept client draw stacks: roots (`item_stack_cache.rs`).
+            "item_stack_cache",
         ];
         const HOLDS_NO_OBJECT: &[&str] = &[
             // A dimension name and a lend id (`level_random.rs`).

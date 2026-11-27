@@ -13,9 +13,9 @@ mod javac_fixture;
 
 use horizon_native_java::{
     BlockUsePlayerData, ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemClick, ItemClickDirection,
-    ItemDestroyed, ItemHook, ItemUse, LiveMenuEffect, MenuPlayerFacts, NativeJar, Nbt, NbtCompound,
-    PlayerContainer, RuntimeComponentValue, StdHost, Value, level_sound::SoundRecord,
-    player_drop_plan,
+    ItemDestroyed, ItemHook, ItemStackRequest, ItemUse, LiveMenuEffect, MenuPlayerFacts, NativeJar,
+    Nbt, NbtCompound, PlayerContainer, RuntimeComponentValue, StdHost, Value,
+    level_sound::SoundRecord, player_drop_plan,
 };
 
 const UUID: u128 = 0x0000_7a11_0000_0000_0000_0000_0000_0001;
@@ -658,4 +658,311 @@ fn tally_item_overrides_match_java25() {
         assert_eq!(got, want, "line {}", index + 1);
     }
     assert_eq!(lines.len(), expected.len(), "{lines:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// Client draws over a large live heap (#609 round 4 bug 1)
+// ---------------------------------------------------------------------------
+//
+// In game, a pouch on screen froze the client for minutes: every draw of its model property and
+// bar built a fresh Java stack (decoding its component with the jar's codec), each one stayed a
+// root of the heap collector for good, so the live set grew every frame, and each collection
+// walked every heap field once per traced text. These draw the tally's bar 10,000 times the way
+// the client bridge does, over a heap that holds 12,000 live objects as a real mod's does, and
+// check every answer against the oracle's line, nothing counted, the heap and the stack rows
+// staying bounded, and a time bound the old collector misses by far.
+
+/// Many live objects on the resident heap: a static list of linked cells.
+const BALLAST: &str = "package demo;\n\
+     import java.util.ArrayList; import java.util.List; import net.fabricmc.api.ModInitializer;\n\
+     /** Holds many live objects, as a real mod's heap does. */\n\
+     public final class Ballast implements ModInitializer {\n\
+       public record Cell(int n, Cell next) {}\n\
+       public static final List<Cell> HELD = new ArrayList<>();\n\
+       @Override public void onInitialize() {\n\
+         Cell last = null;\n\
+         for (int i = 0; i < 12000; i++) { last = new Cell(i, last); HELD.add(last); }\n\
+       }\n\
+     }\n";
+
+/// The tally the oracle's bar line is for (after its `take` click): `{count: 5, last:
+/// "minecraft:diamond"}`.
+fn oracle_tally() -> Nbt {
+    Nbt::Compound(NbtCompound::from([
+        ("count".to_owned(), Nbt::Int(5)),
+        (
+            "last".to_owned(),
+            Nbt::String("minecraft:diamond".to_owned()),
+        ),
+    ]))
+}
+
+/// The oracle's `bar ...` line.
+fn oracle_bar_line() -> &'static str {
+    JAVA25
+        .lines()
+        .find(|line| line.starts_with("bar "))
+        .expect("the oracle prints the bar")
+}
+
+/// What the client bridge builds a tally stack from (`mod/src/item_parts.rs`
+/// `java_stack_request`): the tally in the patch, the prototype holding none.
+fn tally_request(item: &Value, tally: Nbt) -> ItemStackRequest {
+    let mut defaults: Vec<(String, Option<Nbt>)> = GAME_PROTOTYPE_COMPONENTS
+        .iter()
+        .map(|id| ((*id).to_owned(), None))
+        .collect();
+    defaults.push((TALLY.to_owned(), None));
+    ItemStackRequest {
+        item_override: Some(item.clone()),
+        item_id: TALLY_ITEM.to_owned(),
+        count: 1,
+        patch: vec![(TALLY.to_owned(), Some(RuntimeComponentValue::Nbt(tally)))],
+        defaults,
+        ..ItemStackRequest::default()
+    }
+}
+
+/// A host with the demo's item registered and the ballast on its heap.
+fn ballast_host(fixture: &javac_fixture::Fixture) -> (StdHost, Value) {
+    let jar = &fixture.jar;
+    let mut host = StdHost::new();
+    jar.execute("demo.Probe", None, "main", &mut host)
+        .expect("demo onInitialize");
+    jar.execute("demo.Ballast", None, "main", &mut host)
+        .expect("ballast onInitialize");
+    assert!(
+        host.resident_heap().instance_fields() >= 24_000,
+        "the ballast is live: {} fields",
+        host.resident_heap().instance_fields()
+    );
+    let item = host
+        .registrations()
+        .iter()
+        .find(|entry| entry.registry == "minecraft:item" && entry.id == TALLY_ITEM)
+        .expect("the tally item is registered")
+        .value
+        .clone();
+    (host, item)
+}
+
+fn ballast_fixture() -> javac_fixture::Fixture {
+    let mut sources = STUBS.to_vec();
+    sources.extend_from_slice(&[
+        (
+            "demo/Tally.java",
+            include_str!("fixtures/item_parts/demo/Tally.java"),
+        ),
+        (
+            "demo/Probe.java",
+            include_str!("fixtures/item_parts/demo/Probe.java"),
+        ),
+        (
+            "demo/TallyItem.java",
+            include_str!("fixtures/item_parts/demo/TallyItem.java"),
+        ),
+        ("demo/Ballast.java", BALLAST),
+    ]);
+    javac_fixture::Fixture::build("item_parts_ballast", &sources)
+}
+
+fn bar_line(bar: &horizon_native_java::ItemBarOutcome) -> String {
+    format!(
+        "bar visible={} width={} color={}",
+        bar.visible.expect("visible"),
+        bar.width.expect("width"),
+        bar.color.expect("color")
+    )
+}
+
+/// `draws` bar draws as the client bridge makes them: in a transient scope, each on the stack
+/// `stack` gives. Panics on any answer but the oracle's; returns the time taken.
+fn draw_bars(
+    jar: &NativeJar,
+    host: &mut StdHost,
+    item: &Value,
+    draws: usize,
+    stack: impl Fn(&NativeJar, &mut StdHost) -> Value,
+) -> std::time::Duration {
+    let overrides = jar.item_overrides(item, host);
+    let expected = oracle_bar_line();
+    let start = std::time::Instant::now();
+    for draw in 0..draws {
+        let bar = host.with_transient_rows(|host| {
+            let stack = stack(jar, host);
+            jar.item_bar(
+                host,
+                item,
+                &overrides,
+                &stack,
+                false,
+                &ExecutionBudget::UNBOUNDED,
+            )
+            .expect("bar")
+        });
+        assert!(bar.report.exact(), "draw {draw}: {:?}", bar.report);
+        assert_eq!(bar_line(&bar), expected, "draw {draw}");
+    }
+    start.elapsed()
+}
+
+fn on_big_stack(body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(body)
+        .expect("spawn")
+        .join()
+        .unwrap();
+}
+
+/// The client bridge's path: 10,000 bar draws of one tally stack over a large heap. Every answer
+/// is the oracle's, nothing counts, the stack is decoded once, the heap and the recipe rows stay
+/// bounded, and the whole run takes seconds (the old collector took minutes on this heap).
+#[test]
+fn ten_thousand_bar_draws_over_a_large_heap_stay_exact_and_fast() {
+    on_big_stack(|| {
+        let fixture = ballast_fixture();
+        let jar = &fixture.jar;
+        let (mut host, item) = ballast_host(&fixture);
+        let counted = host.unknown_host_call_count();
+        let fields = host.resident_heap().instance_fields();
+        let request = tally_request(&item, oracle_tally());
+        let elapsed = draw_bars(jar, &mut host, &item, 10_000, |jar, host| {
+            jar.reusable_item_stack(host, request.clone())
+                .expect("tally stack")
+        });
+        eprintln!(
+            "10000 cached bar draws over {fields} live fields: {elapsed:?}; cache {:?}; rows {:?}; fields now {}",
+            host.item_stack_cache_counts(),
+            host.recipe_row_counts(),
+            host.resident_heap().instance_fields()
+        );
+        assert_eq!(
+            host.unknown_host_call_count(),
+            counted,
+            "{:?}",
+            host.unknown_host_calls()
+        );
+        // One build, then every draw reuses it.
+        assert_eq!(host.item_stack_cache_counts(), (1, 9_999, 1));
+        // Garbage lives at most until the heap doubles past what the last collection kept.
+        assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+        assert!(
+            host.recipe_row_counts().0 <= 2048,
+            "{:?}",
+            host.recipe_row_counts()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "10000 draws took {elapsed:?}"
+        );
+    });
+}
+
+/// The same draws with a fresh stack each (what the server's paths and an uncacheable stack
+/// do): the stacks and what their components decoded to are collected once the heap doubles
+/// past its live set, so the heap and the rows stay bounded, and each collection's cost stays
+/// linear on a large heap.
+#[test]
+fn fresh_draw_stacks_are_collected_over_a_large_heap() {
+    on_big_stack(|| {
+        let fixture = ballast_fixture();
+        let jar = &fixture.jar;
+        let (mut host, item) = ballast_host(&fixture);
+        let counted = host.unknown_host_call_count();
+        let fields = host.resident_heap().instance_fields();
+        let request = tally_request(&item, oracle_tally());
+        let draws = 8_000;
+        let elapsed = draw_bars(jar, &mut host, &item, draws, |jar, host| {
+            jar.build_item_stack(host, request.clone())
+                .expect("tally stack")
+        });
+        let (rows, collectable) = host.recipe_row_counts();
+        eprintln!(
+            "{draws} fresh bar draws over {fields} live fields: {elapsed:?}; rows {rows} ({collectable} collectable); fields now {}",
+            host.resident_heap().instance_fields()
+        );
+        assert_eq!(
+            host.unknown_host_call_count(),
+            counted,
+            "{:?}",
+            host.unknown_host_calls()
+        );
+        assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+        // Every draw made a stack; the ones left are the garbage since the last collection,
+        // which ran once the heap passed twice its live set.
+        assert_eq!(rows, collectable, "every draw's stack is collectable");
+        assert!(rows < draws * 3 / 4, "{rows} of {draws} stacks are left");
+        assert!(
+            elapsed < std::time::Duration::from_secs(120),
+            "{draws} draws took {elapsed:?}"
+        );
+    });
+}
+
+/// A stack a Java call changed is never handed out again: the next draw gets a fresh decode,
+/// as without the cache, and the draws after it too.
+#[test]
+fn a_kept_stack_that_java_changed_is_rebuilt() {
+    on_big_stack(|| {
+        let fixture = fixture();
+        let jar = &fixture.jar;
+        let mut host = StdHost::new();
+        jar.execute("demo.Probe", None, "main", &mut host)
+            .expect("demo onInitialize");
+        host.server_player_created(UUID, 1, 0);
+        let item = host
+            .registrations()
+            .iter()
+            .find(|entry| entry.registry == "minecraft:item" && entry.id == TALLY_ITEM)
+            .expect("the tally item is registered")
+            .value
+            .clone();
+        let overrides = jar.item_overrides(&item, &host);
+        let request = tally_request(&item, oracle_tally());
+        let first = jar.reusable_item_stack(&mut host, request.clone()).unwrap();
+        let again = jar.reusable_item_stack(&mut host, request.clone()).unwrap();
+        assert_eq!(first, again, "an unchanged stack is reused");
+        assert_eq!(host.item_stack_cache_counts(), (1, 1, 1));
+        // `use` drops a copy and removes the tally from the stack in hand (`TallyItem.use`).
+        let mut inventory = vec![StdHost::empty_item_stack(); 36];
+        inventory[0] = first.clone();
+        let used = jar
+            .item_use(
+                &mut host,
+                &player(Some(first.clone())),
+                "minecraft:overworld",
+                &facts(&inventory),
+                &item,
+                OWNER,
+                &ItemUse {
+                    hand: "MAIN_HAND".to_owned(),
+                },
+                &ExecutionBudget::UNBOUNDED,
+            )
+            .expect("use");
+        assert!(used.report.exact(), "{:?}", used.report);
+        assert_eq!(
+            stack_line(jar, &mut host, &first),
+            "1 demo:tally_item tally=none",
+            "use changed the kept stack"
+        );
+        for _ in 0..3 {
+            let rebuilt = jar.reusable_item_stack(&mut host, request.clone()).unwrap();
+            assert_ne!(rebuilt, first);
+            let bar = jar
+                .item_bar(
+                    &mut host,
+                    &item,
+                    &overrides,
+                    &rebuilt,
+                    false,
+                    &ExecutionBudget::UNBOUNDED,
+                )
+                .unwrap();
+            assert_eq!(bar_line(&bar), oracle_bar_line());
+        }
+        // Rebuilt on every call from then on.
+        assert_eq!(host.item_stack_cache_counts(), (0, 1, 4));
+    });
 }

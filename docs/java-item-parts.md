@@ -153,6 +153,21 @@ methods, and nothing in it names a mod.
    name (`NativeJar::record_item_prototype`; the mod seeds each registered item id in the NBT),
    since the type's codec reads them while it decodes.
 
+9. **Draws run every frame** (#609 round 4 bug 1: a pouch on screen froze the client for minutes).
+   The client bridge answers each draw of a jar item (its model property, bar, tooltip image and
+   the tooltip's `extractImage`) inside `StdHost::with_transient_rows`: every stack, template or
+   patch row made in it is an ordinary object of the heap collector, kept only while something
+   reaches it, where every row used to be a root for good (and the live set grew with each
+   frame). Rows made anywhere else (the server's clicks and uses, whose stacks the embedder keeps)
+   are roots as before. The draw's stack comes from `NativeJar::reusable_item_stack`: the stack an
+   earlier draw built from the same inputs, while a full record of every object the build made is
+   unchanged, as the game decodes a stack once and draws that object every frame. A build that
+   counted, or made an object of a kind the record doesn't read, is never kept, and a kept stack
+   Java changed is rebuilt on every draw from then on (`item_stack_cache.rs`). The answers are
+   never cached: the item's Java code runs on every draw. The collector itself finds Kotlin lazy
+   holders in a traced text with one automaton pass instead of a walk of every heap field per
+   text, so a collection is linear in what it traces (`heap.rs` `LazyHolders`).
+
 Tests, in the repo's usual pattern: javac fixtures for each façade with JDK 25 / game 26.3
 expected rows, then a real-jar test (`RUNES_JAR`) that inserts runes into a pouch through
 `overrideOtherStackedOnMe` and checks the encoded component, the bar width and colour, and the

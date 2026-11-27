@@ -27,8 +27,8 @@ use std::io::Read;
 use std::path::Path;
 
 use horizon_native_java::{
-    ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemHook, ItemModelHolder, NativeJar, Nbt,
-    NbtCompound, RuntimeComponentValue, StdHost, Value,
+    ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemHook, ItemModelHolder, ItemStackRequest,
+    NativeJar, Nbt, NbtCompound, RuntimeComponentValue, StdHost, Value,
 };
 
 const POUCH: &str = "runes:small_rune_pouch";
@@ -291,4 +291,60 @@ fn run(jar_path: &Path) {
         jar.draw_tooltip_component_image(&mut host, &components[0].0, 8, 8, 96, 45, &budget);
     assert!(!drawn.report.exact(), "{:?}", drawn.report);
     host.end_client_frame();
+
+    // A pouch on screen, drawn as the client bridge draws it every frame (#609 round 4 bug 1):
+    // its fullness on the stack the last draw of the same game stack used, in a transient scope.
+    // Every answer is the bytecode's `10/256`, nothing counts, the contents are decoded once, and
+    // the heap and the stack rows don't grow with the draws.
+    let counted = host.unknown_host_call_count();
+    let fields = host.resident_heap().instance_fields();
+    let request = ItemStackRequest {
+        item_override: Some(pouch_item.clone()),
+        item_id: POUCH.to_owned(),
+        count: 1,
+        patch: vec![(
+            CONTENTS.to_owned(),
+            Some(RuntimeComponentValue::Nbt(contents(&[(RUNE, 10)]))),
+        )],
+        defaults: defaults.clone(),
+        named_prototypes: vec![(RUNE.to_owned(), defaults.clone())],
+        ..ItemStackRequest::default()
+    };
+    let start = std::time::Instant::now();
+    for draw in 0..2_000 {
+        let value = host.with_transient_rows(|host| {
+            let stack = jar
+                .reusable_item_stack(host, request.clone())
+                .expect("pouch stack");
+            jar.range_select_property_value(
+                host,
+                &property,
+                &stack,
+                ItemModelHolder::default(),
+                0,
+                &budget,
+            )
+        });
+        assert_eq!(
+            value.clone().exact(),
+            Some(0.0390625),
+            "draw {draw}: {:?}",
+            value.report
+        );
+    }
+    eprintln!(
+        "2000 pouch fullness draws: {:?}; cache {:?}; rows {:?}; fields {fields} -> {}",
+        start.elapsed(),
+        host.item_stack_cache_counts(),
+        host.recipe_row_counts(),
+        host.resident_heap().instance_fields()
+    );
+    assert_eq!(
+        host.unknown_host_call_count(),
+        counted,
+        "{:?}",
+        host.unknown_host_calls()
+    );
+    assert_eq!(host.item_stack_cache_counts(), (1, 1_999, 1));
+    assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
 }

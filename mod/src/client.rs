@@ -644,27 +644,34 @@ impl State {
             let item = entry.value.clone();
             let overrides = loaded.jar.item_overrides(&item, &loaded.host);
             let jar_types = crate::item_parts::persistent_jar_types(&loaded.host);
-            let Some(value) = crate::item_parts::java_stack(
-                host,
-                &loaded.jar,
-                &mut loaded.host,
-                Some(item.clone()),
-                stack,
-                &jar_types,
-            ) else {
+            let jar = &loaded.jar;
+            // Drawn every frame the stack shows: what the calls make is garbage once the bar is
+            // known, and the stack is the one the last draw of this game stack used while
+            // nothing changed it.
+            let outcome = loaded.host.with_transient_rows(|jar_host| {
+                let value = crate::item_parts::java_draw_stack(
+                    host,
+                    jar,
+                    jar_host,
+                    Some(item.clone()),
+                    stack,
+                    &jar_types,
+                )?;
+                Some(jar.item_bar(
+                    jar_host,
+                    &item,
+                    &overrides,
+                    &value,
+                    bar.is_some(),
+                    &ExecutionBudget::within(JAR_BUDGET),
+                ))
+            });
+            let Some(outcome) = outcome else {
                 loaded
                     .host
                     .note_unknown_game_hook("item_bar:stack unreadable");
                 return;
             };
-            let outcome = loaded.jar.item_bar(
-                &mut loaded.host,
-                &item,
-                &overrides,
-                &value,
-                bar.is_some(),
-                &ExecutionBudget::within(JAR_BUDGET),
-            );
             let Ok(outcome) = outcome else {
                 loaded.host.note_unknown_game_hook("item_bar:failed");
                 return;

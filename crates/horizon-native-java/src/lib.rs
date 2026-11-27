@@ -220,11 +220,13 @@ pub use level_random::{
 mod client_item_parts;
 pub use client_item_parts::{ClientItemOutcome, ItemModelHolder, TooltipComponentSize};
 mod item_parts;
+mod item_stack_cache;
 pub use item_parts::{
     GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick, ItemClickDirection,
     ItemClickOutcome, ItemDestroyed, ItemDestroyedOutcome, ItemHook, ItemOverrides, ItemUse,
     ItemUseOutcome, PlayerDropPlan, player_drop_plan,
 };
+pub use item_stack_cache::ItemStackRequest;
 pub mod level_sound;
 mod library_dispatch;
 mod linked_resources;
@@ -4265,6 +4267,8 @@ pub struct StdHost {
     tooltip_sinks: BTreeMap<String, Vec<Value>>,
     guava_tables: guava_table::Store,
     pub(crate) recipes: recipe_models::RecipeState,
+    /// Java stacks built for client draws, kept while unchanged (`item_stack_cache.rs`).
+    item_stack_cache: item_stack_cache::ItemStackCache,
     /// O(1) `Collections.nCopies` rows: logical length and the repeated value.
     repeated_collections: BTreeMap<String, (usize, Value)>,
     /// Keys of detached `subList` copies (`jdk_model.rs::sub_list`, #496).
@@ -4709,6 +4713,7 @@ impl StdHost {
             tooltip_sinks: BTreeMap::new(),
             guava_tables: guava_table::Store::default(),
             recipes: recipe_models::RecipeState::default(),
+            item_stack_cache: item_stack_cache::ItemStackCache::default(),
             repeated_collections: BTreeMap::new(),
             detached_sub_lists: BTreeSet::new(),
             sub_list_class_names: BTreeMap::new(),

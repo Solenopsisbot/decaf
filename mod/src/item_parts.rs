@@ -96,6 +96,7 @@ pub(crate) fn persistent_jar_types(host: &StdHost) -> Vec<String> {
 
 /// The jar-aware runtime stack for a game stack: jar data components decoded by their own codec,
 /// the prototype values of those types and of [`GAME_PROTOTYPE_COMPONENTS`] read from the game.
+/// A new stack each call, which the caller may keep (the server's click and use paths do).
 pub(crate) fn java_stack(
     host: &dyn mod_api::Host,
     jar: &NativeJar,
@@ -104,6 +105,33 @@ pub(crate) fn java_stack(
     stack: &ItemStack,
     jar_types: &[String],
 ) -> Option<Value> {
+    let request = java_stack_request(host, item_override, stack, jar_types)?;
+    jar.build_item_stack(jar_host, request).ok()
+}
+
+/// [`java_stack`] for a client draw (an item model property, a bar, a tooltip image): the stack
+/// an earlier draw built from the same game stack, while nothing has changed it, as the game
+/// draws one decoded stack every frame (`NativeJar::reusable_item_stack`). The caller uses it
+/// for its own call only, inside `StdHost::with_transient_rows`.
+pub(crate) fn java_draw_stack(
+    host: &dyn mod_api::Host,
+    jar: &NativeJar,
+    jar_host: &mut StdHost,
+    item_override: Option<Value>,
+    stack: &ItemStack,
+    jar_types: &[String],
+) -> Option<Value> {
+    let request = java_stack_request(host, item_override, stack, jar_types)?;
+    jar.reusable_item_stack(jar_host, request).ok()
+}
+
+/// Everything a Java stack for `stack` is built from (`runtime::ItemStackRequest`).
+fn java_stack_request(
+    host: &dyn mod_api::Host,
+    item_override: Option<Value>,
+    stack: &ItemStack,
+    jar_types: &[String],
+) -> Option<runtime::ItemStackRequest> {
     let parts = crate::client::stack_parts(host, stack, jar_types)?;
     let defaults = |item: mod_api::ItemKey| {
         jar_types
@@ -128,27 +156,25 @@ pub(crate) fn java_stack(
             item_ids_in(nbt, &mut named);
         }
     }
-    for id in named {
-        let key = mod_api::Identifier::parse(&id)
-            .ok()
-            .and_then(|parsed| host.item_key(&parsed));
-        if let Some(key) = key {
-            jar.record_item_prototype(jar_host, &id, defaults(key))
-                .ok()?;
-        }
-    }
-    let defaults = defaults(stack.item());
-    jar.make_item_stack(
-        jar_host,
+    let named_prototypes = named
+        .into_iter()
+        .filter_map(|id| {
+            let key = mod_api::Identifier::parse(&id)
+                .ok()
+                .and_then(|parsed| host.item_key(&parsed))?;
+            Some((id, defaults(key)))
+        })
+        .collect();
+    Some(runtime::ItemStackRequest {
         item_override,
-        &parts.id,
-        parts.count,
-        parts.patch,
-        defaults,
-        parts.opaque_components,
-        parts.opaque_keys,
-    )
-    .ok()
+        item_id: parts.id,
+        count: parts.count,
+        patch: parts.patch,
+        defaults: defaults(stack.item()),
+        opaque_components: parts.opaque_components,
+        opaque_keys: parts.opaque_keys,
+        named_prototypes,
+    })
 }
 
 /// Every string in `nbt` that could be an item id (`namespace:path`), at any depth.

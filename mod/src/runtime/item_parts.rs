@@ -430,19 +430,39 @@ impl NativeJar {
         mut opaque_keys: Vec<String>,
     ) -> Result<Value, NativeError> {
         let mut plain = Vec::with_capacity(patch.len());
-        let mut decoded = Vec::new();
+        let mut decoded: Vec<(String, Value)> = Vec::new();
+        // Each decode ends with a store of the heap, which may collect: a value decoded earlier
+        // is held only here until the stack takes it, so it is retained until then.
+        let release = |host: &mut StdHost, decoded: &[(String, Value)]| {
+            decoded.iter().for_each(|(_, value)| host.release(value));
+        };
         for (id, entry) in patch {
             match entry {
                 Some(RuntimeComponentValue::Nbt(nbt)) => {
-                    match self.decode_item_component(host, &id, &nbt)? {
-                        Some(value) => decoded.push((id, value)),
-                        None => opaque_keys.push(id),
+                    match self.decode_item_component(host, &id, &nbt) {
+                        Ok(Some(value)) => {
+                            host.retain(&value);
+                            decoded.push((id, value));
+                        }
+                        Ok(None) => opaque_keys.push(id),
+                        Err(error) => {
+                            release(host, &decoded);
+                            return Err(error);
+                        }
                     }
                 }
                 other => plain.push((id, other)),
             }
         }
-        opaque_keys.extend(self.record_item_prototype(host, item_id, defaults)?);
+        match self.record_item_prototype(host, item_id, defaults) {
+            Ok(keys) => opaque_keys.extend(keys),
+            Err(error) => {
+                release(host, &decoded);
+                return Err(error);
+            }
+        }
+        // Nothing below stores the heap, so the holds can go before the stack takes them.
+        release(host, &decoded);
         let stack = host.make_host_item_stack_with_components(
             item_override,
             item_id,
@@ -486,19 +506,38 @@ impl NativeJar {
                 // A vanilla type's value has no codec Decaf runs here: the prototype stays
                 // unknown and a read of it counts.
                 Some(_) if component_type_value(host, &id).is_none() => None,
-                Some(nbt) => self.decode_item_component(host, &id, &nbt)?.map(Some),
+                Some(nbt) => match self.decode_item_component(host, &id, &nbt) {
+                    Ok(value) => value.map(Some),
+                    Err(error) => {
+                        prototype
+                            .values()
+                            .flatten()
+                            .for_each(|held| host.release(held));
+                        return Err(error);
+                    }
+                },
             };
             match value {
                 Some(value) => {
-                    prototype.insert(id, value);
+                    // Held only here until the host records it; the next decode may collect.
+                    if let Some(held) = &value {
+                        host.retain(held);
+                    }
+                    // A component named twice keeps its last value, as the map does: the hold
+                    // on the one it replaces goes with it.
+                    if let Some(Some(replaced)) = prototype.insert(id, value) {
+                        host.release(&replaced);
+                    }
                 }
                 // A default Decaf can't decode leaves the prototype unknown: reads count.
                 None => opaque_keys.push(id),
             }
         }
+        let held: Vec<Value> = prototype.values().flatten().cloned().collect();
         if !prototype.is_empty() {
             host.recipes.set_game_prototype(item_id, prototype);
         }
+        held.iter().for_each(|value| host.release(value));
         Ok(opaque_keys)
     }
 
