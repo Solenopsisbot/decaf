@@ -745,10 +745,10 @@ fn probe(jar_path: &Path) {
     let counted = host.unknown_host_call_count();
     eprintln!("probe heap: {fields} live fields");
 
-    let mut report = |name: &str,
-                      host: &mut StdHost,
-                      draws: usize,
-                      mut draw: Box<dyn FnMut(&mut StdHost) + '_>| {
+    let report = |name: &str,
+                  host: &mut StdHost,
+                  draws: usize,
+                  mut draw: Box<dyn FnMut(&mut StdHost) + '_>| {
         // Warm up: the first draws initialise classes and fill the heap's garbage.
         for _ in 0..50 {
             host.with_transient_rows(|host| draw(host));
