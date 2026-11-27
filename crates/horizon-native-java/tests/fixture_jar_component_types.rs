@@ -6,9 +6,12 @@
 //! `NbtOps.INSTANCE` on OpenJDK 25.0.5+8 by `fixtures/jar_component_types/NbtOracle.java` (see the
 //! README beside it). The demo classes compile against compile-only stubs, so every DFU and game
 //! call reaches the runtime's models as a real mod's does. The order the bootstrap Mixin callbacks
-//! run in is `bootstrap_clinit_order_26_3.txt`'s, measured on the 26.3 server with JDK 25
-//! (`tools/trace_bootstrap_clinit_order.py`): `DataComponents` finishes its `<clinit>` before
-//! `DataComponentPredicates`.
+//! run in is `bootstrap_clinit_order_26_3.txt`'s on a server and
+//! `bootstrap_clinit_order_26_3_client.txt`'s on a client, each measured on the real 26.3 jar with
+//! JDK 25 (`tools/trace_bootstrap_clinit_order.py`): `DataComponents` finishes its `<clinit>`
+//! before `DataComponentPredicates` on both; the server finishes `ReportType` before `Mth` and
+//! the client `Mth` before `ReportType`; `FireBlock.bootStrap()` ends once on both, before
+//! `BuiltInRegistries.freeze()`, and `Bootstrap.bootStrap()` ends after it.
 
 #[path = "support/javac_fixture.rs"]
 mod javac_fixture;
@@ -687,10 +690,13 @@ fn a_mixin_at_the_end_of_a_game_static_initializer_registers_the_type_before_the
     assert_eq!(unknown(&host).values().sum::<usize>(), 2);
 }
 
-/// On a client the order of two classes' initializers is not measured: callbacks into more than
-/// one class are counted, and none runs, so nothing registers the type.
+/// On a client the callbacks run in the client's own measured order (the client's `Main` up to
+/// `Minecraft.<init>`, where Fabric runs the first entrypoint): `DataComponents`' (Mixin's apply
+/// order: the config's common list, then its client list), then `DataComponentPredicates'`, then
+/// `Minecraft`'s own `<clinit>`, which ends before `Minecraft.<init>`. Only the `HEAD` callback
+/// counts.
 #[test]
-fn on_a_client_callbacks_into_several_game_classes_are_counted_not_run() {
+fn on_a_client_callbacks_run_in_the_clients_measured_order() {
     let fixture = mixin_fixture("jar_component_mixin_client");
     let mut host = fixture
         .jar
@@ -702,25 +708,208 @@ fn on_a_client_callbacks_into_several_game_classes_are_counted_not_run() {
             .run_bootstrap_static_injectors(&mut host, &budget)
             .is_empty()
     );
-    assert!(rows(&host).is_empty(), "{:?}", rows(&host));
-    // DataComponents: the HEAD callback, TypesMixin and ClientMixin; DataComponentPredicates:
-    // PredicatesMixin; Minecraft: not bootstrapped.
+    let pair = |registry: &str, id: &str| (registry.to_owned(), id.to_owned());
+    assert_eq!(
+        rows(&host),
+        vec![
+            pair("minecraft:data_component_type", "fixture:pouch"),
+            pair("minecraft:data_component_predicate_type", "fixture:client"),
+            pair("minecraft:data_component_predicate_type", "fixture:pouch"),
+        ]
+    );
     assert_eq!(
         unknown(&host),
-        BTreeMap::from([
-            ("net/minecraft/client/Minecraft#<clinit>".to_owned(), 1),
-            (
-                "net/minecraft/core/component/DataComponents#<clinit>".to_owned(),
-                3
-            ),
-            (
-                "net/minecraft/core/component/predicates/DataComponentPredicates#<clinit>"
-                    .to_owned(),
-                1
-            ),
-        ])
+        BTreeMap::from([(
+            "net/minecraft/core/component/DataComponents#<clinit>".to_owned(),
+            1
+        )])
     );
 }
+
+/// Each side runs its own list: one mod's callbacks into `ReportType` and `Mth` (listed in that
+/// order in its config) run `ReportType`'s first on a server and `Mth`'s first on a client, as
+/// each side's bootstrap finishes those classes.
+#[test]
+fn each_side_runs_callbacks_in_its_own_measured_order() {
+    let jar = mod_jar(
+        "bootstrap_side_order",
+        "sided",
+        &[
+            (
+                "ReportTail",
+                tail_mixin(
+                    "ReportTail",
+                    "net.minecraft.ReportType",
+                    &register("DATA_COMPONENT_PREDICATE_TYPE", "sided:report"),
+                ),
+            ),
+            (
+                "MthTail",
+                tail_mixin(
+                    "MthTail",
+                    "net.minecraft.util.Mth",
+                    &register("DATA_COMPONENT_PREDICATE_TYPE", "sided:mth"),
+                ),
+            ),
+        ],
+    );
+    let ids = |environment: &str| {
+        let mut host = jar
+            .jar
+            .seed_host(StdHost::new().with_environment_type(environment));
+        assert!(
+            jar.jar
+                .run_bootstrap_static_injectors(&mut host, &ExecutionBudget::UNBOUNDED)
+                .is_empty()
+        );
+        assert!(unknown(&host).is_empty(), "{:?}", unknown(&host));
+        rows(&host)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids("SERVER"), ["sided:report", "sided:mth"]);
+    assert_eq!(ids("CLIENT"), ["sided:mth", "sided:report"]);
+}
+
+/// A `TAIL` into a static `()V` method the bootstrap ends once runs at that method's turn: the
+/// handler selects `FireBlock.bootStrap` by name alone. A `HEAD` into it counts; a `TAIL` into a
+/// static method the bootstrap never reaches is not the pass's (nothing runs, nothing counts).
+#[test]
+fn a_tail_into_a_static_bootstrap_method_runs_at_its_turn() {
+    let jar = mod_jar(
+        "bootstrap_method_tail",
+        "methods",
+        &[
+            (
+                "FireTail",
+                tail_method_mixin(
+                    "FireTail",
+                    "net.minecraft.world.level.block.FireBlock",
+                    "bootStrap",
+                    "TAIL",
+                    &register("DATA_COMPONENT_PREDICATE_TYPE", "methods:fire"),
+                ),
+            ),
+            (
+                "FireHead",
+                tail_method_mixin(
+                    "FireHead",
+                    "net.minecraft.world.level.block.FireBlock",
+                    "bootStrap",
+                    "HEAD",
+                    &register("DATA_COMPONENT_PREDICATE_TYPE", "methods:head"),
+                ),
+            ),
+            (
+                "NeverTail",
+                tail_method_mixin(
+                    "NeverTail",
+                    "net.minecraft.world.level.block.FireBlock",
+                    "neverCalled",
+                    "TAIL",
+                    &register("DATA_COMPONENT_PREDICATE_TYPE", "methods:never"),
+                ),
+            ),
+        ],
+    );
+    for environment in ["SERVER", "CLIENT"] {
+        let mut host = jar
+            .jar
+            .seed_host(StdHost::new().with_environment_type(environment));
+        assert!(
+            jar.jar
+                .run_bootstrap_static_injectors(&mut host, &ExecutionBudget::UNBOUNDED)
+                .is_empty()
+        );
+        let ids: Vec<String> = rows(&host).into_iter().map(|(_, id)| id).collect();
+        assert_eq!(ids, ["methods:fire"], "{environment}");
+        assert_eq!(
+            unknown(&host),
+            BTreeMap::from([(
+                "net/minecraft/world/level/block/FireBlock#bootStrap".to_owned(),
+                1
+            )]),
+            "{environment}"
+        );
+    }
+}
+
+/// Past `BuiltInRegistries.freeze()` a registration throws on a real game ("Registry is already
+/// frozen"): a `TAIL` into `Bootstrap.bootStrap()` (which ends after the freeze) that registers is
+/// the game failing to start.
+#[test]
+fn a_registration_after_the_registries_freeze_fails_the_bootstrap() {
+    let jar = mod_jar(
+        "bootstrap_after_freeze",
+        "late",
+        &[(
+            "LateTail",
+            tail_method_mixin(
+                "LateTail",
+                "net.minecraft.server.Bootstrap",
+                "bootStrap",
+                "TAIL",
+                &register("DATA_COMPONENT_PREDICATE_TYPE", "late:frozen"),
+            ),
+        )],
+    );
+    let mut host = jar
+        .jar
+        .seed_host(StdHost::new().with_environment_type("SERVER"));
+    let failures = jar
+        .jar
+        .run_bootstrap_static_injectors(&mut host, &ExecutionBudget::UNBOUNDED);
+    assert_eq!(
+        failures,
+        [
+            "demo/mixin/LateTail#tail at the end of net/minecraft/server/Bootstrap.bootStrap: java.lang.IllegalStateException: Registry.register after BuiltInRegistries.freeze() (Registry is already frozen)"
+        ]
+    );
+}
+
+/// A Mixin class `demo.mixin.<name>` injecting `at` into static method `method` of `import` (by
+/// name alone, as Mixin selects it), whose handler runs `body`.
+fn tail_method_mixin(name: &str, import: &str, method: &str, at: &str, body: &str) -> String {
+    let simple = import.rsplit('.').next().unwrap();
+    format!(
+        r#"package demo.mixin;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+import {import};
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+@Mixin({simple}.class)
+public class {name} {{
+  @Inject(method = "{method}", at = @At("{at}"))
+  private static void tail(CallbackInfo ci) {{ {body} }}
+}}
+"#
+    )
+}
+
+/// Game classes the order tests inject into, as compile-only stubs.
+const ORDER_STUBS: &[(&str, &str)] = &[
+    (
+        "net/minecraft/util/Mth.java",
+        "package net.minecraft.util; public class Mth {}",
+    ),
+    (
+        "net/minecraft/ReportType.java",
+        "package net.minecraft; public class ReportType {}",
+    ),
+    (
+        "net/minecraft/world/level/block/FireBlock.java",
+        "package net.minecraft.world.level.block; public class FireBlock { public static void bootStrap() {} public static void neverCalled() {} }",
+    ),
+    (
+        "net/minecraft/server/Bootstrap.java",
+        "package net.minecraft.server; public class Bootstrap { public static void bootStrap() {} }",
+    ),
+];
 
 /// A Mixin class `demo.mixin.<name>` injecting at the `TAIL` of `target`'s `<clinit>` (`import`
 /// is the target's binary name), whose handler runs `body`.
@@ -756,6 +945,7 @@ fn register(registry: &str, id: &str) -> String {
 /// A top-level mod jar `mod_id` whose one Mixin config lists `mixins` (`(class, source)`).
 fn mod_jar(test: &str, mod_id: &str, mixins: &[(&str, String)]) -> javac_fixture::Fixture {
     let mut sources = demo_sources();
+    sources.extend_from_slice(ORDER_STUBS);
     let paths: Vec<String> = mixins
         .iter()
         .map(|(name, _)| format!("demo/mixin/{name}.java"))
@@ -862,7 +1052,7 @@ fn two_mods_injecting_one_game_initializer_are_counted_not_run() {
 
 /// Callbacks of two mods into different classes run in the order the server's bootstrap finishes
 /// those classes, across jars and before any entrypoint: the second jar's `DataComponents`
-/// callback (position 601) runs before the first jar's `DataComponentPredicates` one (1499). The
+/// callback (position 595) runs before the first jar's `DataComponentPredicates` one (1498). The
 /// latter throws, so the game does not start: the pass reports it, after the former ran. (Run per
 /// jar, the first jar's callback would throw first and the second's never run.)
 #[test]

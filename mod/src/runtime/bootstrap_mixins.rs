@@ -1,12 +1,15 @@
-//! Mixin callbacks at the end of a game class's static initializer, run before the first
-//! entrypoint of any jar.
+//! Mixin callbacks at the end of a game class's static initializer, or of a static bootstrap
+//! method, run before the first entrypoint of any jar.
 //!
 //! A Mixin `@Inject(method = "<clinit>", at = @At("TAIL"))` into a game class runs once, as the
 //! last thing that class's static initializer does. Bundle API registers its data component type
 //! that way: `DataComponentTypesMixin` into `DataComponents` does
-//! `Registry.register(BuiltInRegistries.DATA_COMPONENT_TYPE, ...)`. The runtime models game classes
-//! on the host, so their initializers never run in it, and nothing else would ever run such a
-//! callback. This pass runs them itself ([`run_bootstrap_injectors`]).
+//! `Registry.register(BuiltInRegistries.DATA_COMPONENT_TYPE, ...)`. A `TAIL` into a static `()V`
+//! method the bootstrap calls once is the same thing at that method's last `return`: Bundle API's
+//! client `NumericPropertiesMixin` adds its item model property with a `TAIL` into
+//! `RangeSelectItemModelProperties.bootstrap()`. The runtime models game classes on the host, so
+//! their initializers and bootstrap methods never run in it, and nothing else would ever run such
+//! a callback. This pass runs them itself ([`run_bootstrap_injectors`]).
 //!
 //! It is one pass over every loaded jar, as Mixin weaves every mod's callbacks into one game
 //! and the game bootstraps once: a loader runs it after seeding every jar's host and before any
@@ -16,16 +19,19 @@
 //!
 //! Exactly when, and in which order:
 //!
-//! * A real Fabric 26.3 server initializes these classes in `Bootstrap.bootStrap()`, before any
-//!   `main` entrypoint: the target must be a class it loads before mods
-//!   ([`crate::runtime::mixin_class_loading::server_loads_before_mods`], measured on Fabric) whose
-//!   initializer returns during the server's bootstrap ([`CLINIT_ORDER`], measured with a JDK 25
-//!   agent: `tools/trace_bootstrap_clinit_order.py`).
-//! * Callbacks into different classes run in the order those classes' initializers return
-//!   ([`CLINIT_ORDER`]), which is when a `TAIL` callback runs, across all jars. The list is the
-//!   server's; on a client the order of two classes is not measured, so when callbacks of the
-//!   pass target more than one class there, every one is counted instead of run.
-//! * Callbacks into one class run in Mixin's apply order (`mixin_plans_in_apply_order`). Two
+//! * A real Fabric 26.3 game reaches these points before any `main` entrypoint: the server in
+//!   `Bootstrap.bootStrap()` ([`SERVER_ORDER`]), the client in its `Main.main` up to
+//!   `Minecraft.<init>`, where Fabric runs the first entrypoint ([`CLIENT_ORDER`]: its
+//!   `Bootstrap.bootStrap()`, then `ClientBootstrap.bootstrap()`). Both lists were measured with a
+//!   JDK 25 agent on the real 26.3 jars (`tools/trace_bootstrap_clinit_order.py`). On the server
+//!   the target must also be a class it loads before mods
+//!   ([`crate::runtime::mixin_class_loading::server_loads_before_mods`], measured on Fabric); on the client,
+//!   reaching the point before `Minecraft.<init>` is that.
+//! * Callbacks into different points run in the order the side's list reaches them, which is when
+//!   a `TAIL` callback runs, across all jars. A point the list reaches more than once, or on
+//!   another thread, has no one turn: its callbacks are counted. A pass whose hosts are not all on
+//!   one side has no one list: every callback is counted.
+//! * Callbacks into one point run in Mixin's apply order (`mixin_plans_in_apply_order`). Two
 //!   different mods' callbacks into one class are ordered by Mixin across their configs, which is
 //!   not modelled: every callback into that class is counted, in every jar. One mod bundled by two
 //!   jars (the same nested mod id) is one mod, whose callbacks run on each of those jars' hosts.
@@ -35,37 +41,96 @@
 //!   a loaded jar of its own there; its callbacks run on its own host only.
 //!
 //! Only the shape Mixin gives a `TAIL` callback on a static `void` target runs: a static handler
-//! taking one `CallbackInfo`, not cancellable, with no selector modifier. Anything else that would
-//! apply on a real server (another anchor, a config plugin that could veto the mixin, a target the
-//! bootstrap does not initialize or initializes at an unmeasured point) is counted under
-//! `<target>#<clinit>` on the declaring jar's host and not run. A callback that throws is the game
-//! failing to start: no later callback runs, and the loader starts no jar's entrypoint (every jar
-//! is refused with that reason).
+//! taking one `CallbackInfo`, not cancellable, with no selector modifier, into `<clinit>` or into a
+//! static method named with no descriptor or `()V` (Mixin's name-only selector: a mod whose
+//! handler takes only a `CallbackInfo` loads on Fabric only if it selects a no-argument `void`
+//! method). Anything else that would apply on a real game (another anchor, a config plugin that
+//! could veto the mixin, a target the bootstrap does not reach or reaches at no one point) is
+//! counted under `<target>#<method>` on the declaring jar's host and not run; a callback into a
+//! static method the side's list never reaches is not this pass's (another tier answers or counts
+//! it). A callback that throws is the game failing to start: no later callback runs, and the
+//! loader starts no jar's entrypoint (every jar is refused with that reason). So is a callback at
+//! a point after `BuiltInRegistries.freeze()` that registers into a built-in registry, where the
+//! game's `Registry.register` throws "Registry is already frozen" (the client's
+//! `RangeSelectItemModelProperties.bootstrap()` is such a point: a `put` into its id mapper is not
+//! a registry write).
 
 use super::*;
 
-/// The game classes whose `<clinit>` returns during the 26.3 server's bootstrap, in the order they
-/// return (`tools/trace_bootstrap_clinit_order.py`).
-const CLINIT_ORDER: &str = crate::runtime::vendored_bootstrap_clinit_order_26_3_txt::VENDORED_DATA;
+/// The `TAIL` points the 26.3 server's bootstrap reaches, in order
+/// (`tools/trace_bootstrap_clinit_order.py`): a class's internal name where its `<clinit>`
+/// returns, `<class>.<name>()V` where a static `()V` method reaches its last `return`.
+const SERVER_ORDER: &str = crate::runtime::vendored_bootstrap_clinit_order_26_3_txt::VENDORED_DATA;
+
+/// The same for the 26.3 client, up to `Minecraft.<init>`
+/// (`tools/trace_bootstrap_clinit_order.py --side client`).
+const CLIENT_ORDER: &str = crate::runtime::vendored_bootstrap_clinit_order_26_3_client_txt::VENDORED_DATA;
 
 /// `CallbackInfo`'s descriptor as a handler's only parameter.
 const TAIL_HANDLER_DESCRIPTOR: &str =
     "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V";
 
-/// Where `class`'s `<clinit>` returns in the server's bootstrap, if it does.
-fn clinit_position(class: &str) -> Option<usize> {
-    static ORDER: std::sync::OnceLock<BTreeMap<&'static str, usize>> = std::sync::OnceLock::new();
-    ORDER
-        .get_or_init(|| {
-            CLINIT_ORDER
-                .lines()
-                .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                .enumerate()
-                .map(|(position, class)| (class, position))
-                .collect()
-        })
-        .get(class)
-        .copied()
+/// A line the tool marks as reached on a thread other than `main`.
+const OTHER_THREAD: &str = " @other-thread";
+
+/// One side's list: each point with its turn, `None` for a point reached more than once or on
+/// another thread (no one turn).
+fn parse_order(text: &'static str) -> BTreeMap<&'static str, Option<usize>> {
+    let mut order: BTreeMap<&'static str, Option<usize>> = BTreeMap::new();
+    for (position, line) in text
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .enumerate()
+    {
+        let (point, main_thread) = match line.strip_suffix(OTHER_THREAD) {
+            Some(point) => (point, false),
+            None => (line, true),
+        };
+        order
+            .entry(point)
+            .and_modify(|turn| *turn = None)
+            .or_insert(main_thread.then_some(position));
+    }
+    order
+}
+
+/// `side`'s list ([`SERVER_ORDER`] or [`CLIENT_ORDER`]).
+fn side_order(side: MixinSide) -> &'static BTreeMap<&'static str, Option<usize>> {
+    static SERVER: std::sync::OnceLock<BTreeMap<&'static str, Option<usize>>> =
+        std::sync::OnceLock::new();
+    static CLIENT: std::sync::OnceLock<BTreeMap<&'static str, Option<usize>>> =
+        std::sync::OnceLock::new();
+    match side {
+        MixinSide::Client => CLIENT.get_or_init(|| parse_order(CLIENT_ORDER)),
+        _ => SERVER.get_or_init(|| parse_order(SERVER_ORDER)),
+    }
+}
+
+/// The list's name for the point a `TAIL` into `target` runs at: the class for `<clinit>`,
+/// `<class>.<name>()V` for a static method selected by name alone or as `()V`, `None` for any
+/// other target.
+fn tail_point(target: &MethodRef) -> Option<String> {
+    if target.name == "<clinit>" {
+        return Some(target.owner.clone());
+    }
+    matches!(target.descriptor.as_str(), "" | "()V")
+        .then(|| format!("{}.{}()V", target.owner, target.name))
+}
+
+/// Where `BuiltInRegistries.freeze()` ends on `side`: after it, `Registry.register` into a
+/// built-in registry throws `IllegalStateException` ("Registry is already frozen").
+fn freeze_turn(side: MixinSide) -> Option<usize> {
+    point_turn(
+        side,
+        "net/minecraft/core/registries/BuiltInRegistries.freeze()V",
+    )
+    .flatten()
+}
+
+/// Where `side`'s bootstrap reaches `point`: `None` when it never does, `Some(None)` when it
+/// does at no one turn.
+fn point_turn(side: MixinSide, point: &str) -> Option<Option<usize>> {
+    side_order(side).get(point).copied()
 }
 
 /// One jar of the pass: the jar whose runtime runs the callbacks, its host, and the jars whose
@@ -79,7 +144,8 @@ pub struct BootstrapUnit<'a> {
 
 /// One callback that would run on a real server, with what decides its turn.
 struct Pending {
-    /// [`clinit_position`] of its target, `None` when it is counted for its own shape.
+    /// Its turn in the side's list ([`point_turn`]), `None` when it is counted for its own shape
+    /// or its point.
     position: Option<usize>,
     /// The unit whose host it runs on.
     unit: usize,
@@ -122,10 +188,15 @@ fn unit_callbacks(index: usize, unit: &BootstrapUnit<'_>) -> Vec<Pending> {
         let config_sides = jar.mixin_config_sides();
         for plan in jar.mixin_plans_in_apply_order() {
             let target = plan.target.owner.as_str();
-            if plan.target.name != "<clinit>"
-                || !target.starts_with("net/minecraft/")
-                || jar_class(target)
-            {
+            if !target.starts_with("net/minecraft/") || jar_class(target) {
+                continue;
+            }
+            // Every `<clinit>` callback is this pass's; a callback into a method only when it is
+            // into a static `()V` method this side's bootstrap reaches (any anchor but `TAIL`
+            // then counts below).
+            let point = tail_point(&plan.target);
+            let turn = point.as_deref().and_then(|point| point_turn(side, point));
+            if plan.target.name != "<clinit>" && turn.is_none() {
                 continue;
             }
             let applies =
@@ -149,9 +220,11 @@ fn unit_callbacks(index: usize, unit: &BootstrapUnit<'_>) -> Vec<Pending> {
                 && plan.shift.is_none()
                 && plan.callback.descriptor == TAIL_HANDLER_DESCRIPTOR
                 && handler;
-            let position = clinit_position(target)
-                .filter(|_| applies && shape)
-                .filter(|_| crate::runtime::mixin_class_loading::server_loads_before_mods(target));
+            // The server's bootstrap loads the class before mods only if Fabric's does; on the
+            // client, the list ends where Fabric runs the first entrypoint.
+            let loaded = side == MixinSide::Client
+                || crate::runtime::mixin_class_loading::server_loads_before_mods(target);
+            let position = turn.flatten().filter(|_| applies && shape && loaded);
             pending.push(Pending {
                 position,
                 unit: index,
@@ -163,8 +236,8 @@ fn unit_callbacks(index: usize, unit: &BootstrapUnit<'_>) -> Vec<Pending> {
     pending
 }
 
-/// Runs every applicable Mixin `@Inject(method = "<clinit>", at = @At("TAIL"))` into a game class
-/// of every unit's mods, as the bootstrap would (see the module documentation): one pass over all
+/// Runs every applicable Mixin `@Inject(method = "<clinit>", at = @At("TAIL"))` into a game class,
+/// and every `TAIL` into a static bootstrap method the side reaches once, of every unit's mods, as the bootstrap would (see the module documentation): one pass over all
 /// the loaded jars, before any of them runs an entrypoint. A unit whose host already had its pass
 /// takes no part. Returns the failures: a callback that threw, after which none runs and the
 /// game does not start.
@@ -190,17 +263,13 @@ pub fn run_bootstrap_injectors(
             .or_default()
             .insert(entry.owner.clone());
     }
-    // On a client, the order of two classes' initializers is not measured: callbacks that would
-    // run into more than one class are all counted.
-    let client = pending
-        .iter()
-        .any(|entry| units[entry.unit].host.mixin_side() == MixinSide::Client);
-    let runnable_targets: BTreeSet<&str> = pending
-        .iter()
-        .filter(|entry| entry.position.is_some())
-        .map(|entry| entry.plan.target.owner.as_str())
-        .collect();
-    let unordered = client && runnable_targets.len() > 1;
+    // The two sides' lists are not one order: a pass over hosts of both sides runs nothing.
+    let on = |side: MixinSide| {
+        pending
+            .iter()
+            .any(|entry| units[entry.unit].host.mixin_side() == side)
+    };
+    let unordered = on(MixinSide::Client) && on(MixinSide::Server);
     let (mut run, counted): (Vec<Pending>, Vec<Pending>) = pending.into_iter().partition(|entry| {
         entry.position.is_some()
             && !unordered
@@ -210,7 +279,10 @@ pub fn run_bootstrap_injectors(
         *units[entry.unit]
             .host
             .unknown_host_calls
-            .entry(format!("{}#<clinit>", entry.plan.target.owner))
+            .entry(format!(
+                "{}#{}",
+                entry.plan.target.owner, entry.plan.target.name
+            ))
             .or_default() += 1;
     }
     // The global finish order; stable, so one class's callbacks keep Mixin's apply order and one
@@ -219,17 +291,34 @@ pub fn run_bootstrap_injectors(
     for entry in run {
         let unit = &mut units[entry.unit];
         let info = host_mixin::callback_info(
-            &host_mixin::callback_info_key(&entry.plan.target.owner, "<clinit>", false),
+            &host_mixin::callback_info_key(
+                &entry.plan.target.owner,
+                &entry.plan.target.name,
+                false,
+            ),
             &entry.plan.callback,
             false,
+        );
+        // Past `BuiltInRegistries.freeze()`, a registration is the game failing to start.
+        let frozen = freeze_turn(unit.host.mixin_side())
+            .is_some_and(|freeze| entry.position.is_some_and(|turn| turn > freeze));
+        let registered = unit.host.registrations().len();
+        let site = format!(
+            "{}#{} at the end of {}.{}",
+            entry.plan.callback.owner,
+            entry.plan.callback.name,
+            entry.plan.target.owner,
+            entry.plan.target.name
         );
         if let Err(error) =
             unit.runner
                 .invoke_persistent(&entry.plan.callback, None, &[info], unit.host, budget)
         {
+            return vec![format!("{site}: {error}")];
+        }
+        if frozen && unit.host.registrations().len() > registered {
             return vec![format!(
-                "{}#{} at the end of {}.<clinit>: {error}",
-                entry.plan.callback.owner, entry.plan.callback.name, entry.plan.target.owner
+                "{site}: java.lang.IllegalStateException: Registry.register after BuiltInRegistries.freeze() (Registry is already frozen)"
             )];
         }
     }
