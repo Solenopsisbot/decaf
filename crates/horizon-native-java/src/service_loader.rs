@@ -97,13 +97,13 @@ impl<H: Host> Runtime<'_, H> {
                 if descriptor.starts_with("(Ljava/lang/Class;") =>
             {
                 let loader = self.host.invoke(r, args)?;
-                let Some((service, _)) = host_services::loader_parts(&loader) else {
+                let Some(service) = host_services::loader_service(&loader) else {
                     return Ok(Some(loader));
                 };
-                // Each load is its own loader object.
-                let loader = host_services::loader(&service, self.next_object);
-                self.next_object = self.next_object.saturating_add(1);
-                Ok(Some(loader))
+                // Each load is its own loader object, numbered by the heap's allocator: never a
+                // number another object of this run has (#669).
+                let serial = self.new_object_number("java/util/ServiceLoader");
+                Ok(Some(host_services::loader(&service, serial)))
             }
             ("java/util/ServiceLoader" | "java/lang/Iterable", _, _)
                 if is(HostKind::ServiceLoader) =>
@@ -154,7 +154,7 @@ impl<H: Host> Runtime<'_, H> {
         handle: &Value,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
-        let (service, _) = host_services::loader_parts(handle).unwrap_or_default();
+        let service = host_services::loader_service(handle).unwrap_or_default();
         let loader = host_services::state_key(handle)
             .unwrap_or_default()
             .to_owned();
@@ -258,8 +258,7 @@ impl<H: Host> Runtime<'_, H> {
     /// `ServiceLoader.iterator()`: a cursor over the loader's cached instances,
     /// then its shared lookup.
     fn new_service_iterator(&mut self, loader: &Value) -> Value {
-        let handle = host_services::iterator(self.next_object);
-        self.next_object = self.next_object.saturating_add(1);
+        let handle = host_services::iterator(self.new_object_number("java/util/Iterator"));
         let iterator = host_services::state_key(&handle)
             .unwrap_or_default()
             .to_owned();
@@ -282,9 +281,9 @@ impl<H: Host> Runtime<'_, H> {
                 "unknown ServiceLoader iterator {iterator}"
             )));
         };
-        let (Some(loader), Some((service, _))) = (
+        let (Some(loader), Some(service)) = (
             host_services::state_key(handle),
-            host_services::loader_parts(handle),
+            host_services::loader_service(handle),
         ) else {
             return Err(NativeError::Metadata(format!(
                 "unknown ServiceLoader iterator {iterator}"

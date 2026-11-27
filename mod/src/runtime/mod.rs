@@ -289,6 +289,9 @@ pub use parked_threads::ParkedThread;
 #[cfg(test)]
 #[path = "allocation_numbers_tests.rs"]
 mod allocation_numbers_tests;
+#[cfg(test)]
+#[path = "host_minted_keys_tests.rs"]
+mod host_minted_keys_tests;
 mod priority_queue;
 mod pure_helpers;
 mod random_source;
@@ -2835,6 +2838,51 @@ pub trait Host {
     /// counts calls counts this one.
     fn note_allocation_numbers_exhausted(&mut self, _class: &str) {}
 
+    /// A host model's static (`receiver` `None`) or instance call that may hand the jar a new
+    /// object keyed as a jar object (`class#n`: an `EntityType` builder, an
+    /// `EntityDataAccessor`), with `next_object`, the running heap's allocator, to number it:
+    /// `n` is taken from it and it advances, as for [`Self::random_new`], so no host object and
+    /// jar object share a number (#669: the models minted keys from counters of their own,
+    /// whose numbers the heap also handed out, and freed). `None` when the model has no answer;
+    /// the runtime then makes the plain [`Self::invoke`] / [`Self::invoke_instance`] call, where
+    /// such a model answers only what needs no new object.
+    ///
+    /// The runtime asks this first wherever it hands a call to the host's models (an
+    /// `invokestatic`/`invokevirtual` of a class the jar does not hold); a call that reaches
+    /// the host another way (reflection, a method handle) has no allocator, and the models
+    /// leave it unanswered.
+    fn allocating_call(
+        &mut self,
+        _r: &MethodRef,
+        _receiver: Option<&Value>,
+        _args: &[Value],
+        _next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        None
+    }
+
+    /// [`Self::allocating_call`] for a `getstatic` of a constant a host model makes on first
+    /// read (`Vec2.ZERO`, `EntityDataSerializers.INT`): one object for the run, numbered by
+    /// `next_object` once.
+    fn allocating_static_field(
+        &mut self,
+        _r: &MethodRef,
+        _next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        None
+    }
+
+    /// The constants of a game enum a host model makes as jar objects (`MobCategory`), for its
+    /// `values()`: the same objects its `getstatic`s answer, numbered by `next_object` on first
+    /// use.
+    fn allocating_enum_values(
+        &mut self,
+        _owner: &str,
+        _next_object: &mut usize,
+    ) -> Option<Result<Vec<Value>, NativeError>> {
+        None
+    }
+
     #[doc(hidden)]
     fn as_std_host(&self) -> Option<&StdHost> {
         None
@@ -2987,6 +3035,13 @@ pub trait Host {
     /// rather than only on [`StdHost`].
     fn mutable_collection_values(&self, _value: &Value) -> Option<Vec<Value>> {
         None
+    }
+
+    /// Whether any element of the collection `value` (a map's keys and values alike) satisfies
+    /// `test`, `None` for no collection: [`Self::mutable_collection_values`] without copying
+    /// the elements where the host can read them in place.
+    fn collection_any(&self, value: &Value, test: &mut dyn FnMut(&Value) -> bool) -> Option<bool> {
+        Some(self.mutable_collection_values(value)?.iter().any(test))
     }
 
     /// The concrete class recorded for a sub-list, or `Some(None)` when the
@@ -3384,13 +3439,33 @@ pub trait Host {
     /// no declaration table ignores it.
     fn note_content_builder(&mut self, _event: ContentBuilderEvent) {}
 
-    /// The runtime constructed `instance`, the object of the entrypoint
-    /// `kind` (`main`, `client`...) whose class is `class` (internal name),
-    /// and runs its method on it: the object a loader's own `getEntrypoints`
-    /// answers for that entry (`host_fabric_runtime.rs`). Fabric makes one
-    /// object per entrypoint key, so a class that is both `main` and `client`
-    /// has two.
-    fn note_entrypoint_constructed(&mut self, _kind: &str, _class: &str, _instance: &Value) {}
+    /// The runtime constructed `instance`, the object of declaration `declaration` (0 for the
+    /// first, counting only `class`'s own declarations of `kind`) of the entrypoint `kind`
+    /// (`main`, `client`...) whose class is `class` (internal name): the object a loader's own
+    /// `getEntrypoints` answers for that entry (`host_fabric_runtime.rs`), and the one the
+    /// runner calls `onInitialize*` on. Fabric makes one object per declaration (a `NewEntry`
+    /// each), so a class that is both `main` and `client`, or declared twice, has two.
+    fn note_entrypoint_constructed(
+        &mut self,
+        _kind: &str,
+        _class: &str,
+        _declaration: usize,
+        _instance: &Value,
+    ) {
+    }
+
+    /// The instance already built for declaration `declaration` of `class` (internal name) in
+    /// `kind`, if one was: by the runner, or by a `getEntrypoints` that reached it first.
+    fn entrypoint_instance(&self, _kind: &str, _class: &str, _declaration: usize) -> Option<Value> {
+        None
+    }
+
+    /// The runner reached the next declaration of `class` in `kind`: its index (0 for the
+    /// first), counted from the runner's own visits, so the runner runs each declaration's own
+    /// instance in declaration order.
+    fn claim_entrypoint_declaration(&mut self, _kind: &str, _class: &str) -> usize {
+        0
+    }
 
     /// The Fabric entrypoint rows the loader host declared for `kind`, in the
     /// loader's invocation order.  A host that does not own loader state
@@ -4121,10 +4196,14 @@ pub struct StdHost {
     /// Entries are seeded by the loaded jar, so this query never scans a host
     /// classpath or invents providers.
     fabric_entrypoint_containers: Vec<FabricEntrypointContainer>,
-    /// The entrypoint classes (internal names) the runtime constructed: their
-    /// instances are the run's own entrypoint objects.
-    /// The entrypoint objects the runtime built, by class (internal name).
-    constructed_entrypoints: BTreeMap<(String, String), Value>,
+    /// The entrypoint objects the runtime built, by kind and class (internal name), in the
+    /// order it built them: one per declaration it ran, so a class declared twice has two
+    /// (Fabric's `EntrypointStorage.add` makes a `NewEntry`, with its own cached instance, per
+    /// declaration).
+    constructed_entrypoints: BTreeMap<(String, String), BTreeMap<usize, Value>>,
+    /// How many declarations of each (kind, class) the entrypoint runner has reached
+    /// (`Host::claim_entrypoint_declaration`).
+    entrypoint_declarations_run: BTreeMap<(String, String), usize>,
     /// Identifiers retained by `CustomPacketPayload.Type` values created by
     /// the bounded networking façade.
     packet_types: BTreeMap<String, String>,
@@ -4593,6 +4672,7 @@ impl StdHost {
             payload_bytes: BTreeMap::new(),
             fabric_entrypoint_containers: Vec::new(),
             constructed_entrypoints: BTreeMap::new(),
+            entrypoint_declarations_run: BTreeMap::new(),
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
             deferred_registers: BTreeMap::new(),
@@ -5062,26 +5142,25 @@ impl StdHost {
         if requested != host_fabric_runtime::invocation_type(kind) {
             return None;
         }
-        // One object per entrypoint key (Fabric Loader 0.19.5's
-        // `EntrypointStorage.add`: a new `NewEntry`, with its own instance
-        // map, per key).
-        let object = self
-            .constructed_entrypoints
-            .get(&(kind.to_owned(), internal.clone()))
-            .cloned()?;
-        if ordinal == 0 {
-            Some(object)
-        } else {
-            // Fabric's storage creates a distinct Entry (and therefore a
-            // distinct cached instance) for every duplicate declaration. The
-            // native entrypoint runner has one constructed object for the
-            // class, so give later duplicate rows distinct handles while
-            // retaining the normal object for the first row.
-            Some(jar_object::handle(format!(
-                "{internal}#{}",
-                1_000_000 + ordinal
-            )))
-        }
+        // One object per declaration (Fabric Loader 0.19.5, javap: `EntrypointStorage.add`
+        // makes a new `NewEntry` per declaration, and `NewEntry.getOrCreate` caches one
+        // instance per requested type in its own `instanceMap`): the `n`th declaration of
+        // `class` in storage order is the `n`th instance the runtime built for it, the one the
+        // loader's `invokeEntrypoints` ran. `ordinal` counts every entry of the kind, so it is
+        // turned into `class`'s own declaration index first.
+        //
+        // #669 review: a later declaration answered a stand-in `<class>#(1_000_000 + ordinal)`,
+        // a number the heap also hands out (so the next jar object could take its key), whose
+        // constructor never ran, and `ordinal` was the kind-wide index, so a second *distinct*
+        // entry class got a stand-in instead of its own instance. A declaration the runtime did
+        // not build has no instance: `None`, counted by the caller. A `getEntrypoints` builds a
+        // missing one first, as `getOrCreate` does (`Runtime::prepare_fabric_entrypoints`).
+        let declaration =
+            host_fabric_runtime::declaration_index(&self.fabric_entrypoints(kind), class, ordinal);
+        self.constructed_entrypoints
+            .get(&(kind.to_owned(), internal))?
+            .get(&declaration)
+            .cloned()
     }
 
     fn empty_collection(&mut self, kind: &str) -> Value {
@@ -9050,9 +9129,34 @@ impl Host for StdHost {
         self.get_static(r)
     }
 
-    fn note_entrypoint_constructed(&mut self, kind: &str, class: &str, instance: &Value) {
+    fn note_entrypoint_constructed(
+        &mut self,
+        kind: &str,
+        class: &str,
+        declaration: usize,
+        instance: &Value,
+    ) {
         self.constructed_entrypoints
-            .insert((kind.to_owned(), class.to_owned()), instance.clone());
+            .entry((kind.to_owned(), class.to_owned()))
+            .or_default()
+            .insert(declaration, instance.clone());
+    }
+
+    fn entrypoint_instance(&self, kind: &str, class: &str, declaration: usize) -> Option<Value> {
+        self.constructed_entrypoints
+            .get(&(kind.to_owned(), class.to_owned()))?
+            .get(&declaration)
+            .cloned()
+    }
+
+    fn claim_entrypoint_declaration(&mut self, kind: &str, class: &str) -> usize {
+        let reached = self
+            .entrypoint_declarations_run
+            .entry((kind.to_owned(), class.to_owned()))
+            .or_default();
+        let declaration = *reached;
+        *reached += 1;
+        declaration
     }
 
     fn fabric_entrypoints(&self, kind: &str) -> Vec<(String, String)> {
@@ -9123,6 +9227,25 @@ impl Host for StdHost {
 
     fn mutable_collection_values(&self, value: &Value) -> Option<Vec<Value>> {
         self.mutable_values(value)
+    }
+
+    fn collection_any(&self, value: &Value, test: &mut dyn FnMut(&Value) -> bool) -> Option<bool> {
+        // A collection's own row, read in place: no view over it and no row of the derived
+        // kinds `mutable_values` tries first (a Guava table's, a `SetFromMap`'s, a repeated
+        // value's). Anything else reads as `mutable_values` does.
+        if let Some(marker) = expect_ref(value)
+            && !jar_object::spells_key(value)
+            && let Some(values) = self.mutable_collections.get(marker)
+            && self.synchronized_target(marker) == marker
+            && !self.unmodifiable_collections.contains_key(marker)
+            && !self.reversed_views.contains_key(marker)
+            && self.set_from_map_values(marker).is_none()
+            && self.repeated_collection(value).is_none()
+            && self.guava_tables.collection_values(value).is_none()
+        {
+            return Some(values.iter().any(test));
+        }
+        Some(self.mutable_values(value)?.iter().any(test))
     }
 
     fn mixin_side(&self) -> MixinSide {
@@ -9952,13 +10075,17 @@ impl Host for StdHost {
         {
             return Ok(Value::Ref(Some("container-level-access/null".into())));
         }
-        if let Some(value) = tool_material::static_field(&mut self.tool_material, r) {
+        if let Some(value) = tool_material::static_field(&mut self.tool_material, r, None) {
             return value;
         }
-        if let Some(value) = vec2::static_field(&mut self.vec2, r) {
+        // The constants already made; a first read needs the heap's allocator
+        // (`Host::allocating_static_field`), so without it they are unanswered here.
+        if let Some(value) = vec2::static_field(&mut self.vec2, r, None) {
             return value;
         }
-        if let Some(value) = entity_registration::static_field(&mut self.entity_registration, r) {
+        if let Some(value) =
+            entity_registration::static_field(&mut self.entity_registration, r, None)
+        {
             return value;
         }
         self.record(r, None, &[]);
@@ -10306,6 +10433,73 @@ impl Host for StdHost {
         });
     }
 
+    fn allocating_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        let mut numbers = jar_object::Numbers::new(next_object);
+        let answer = match receiver {
+            None => entity_registration::static_call(
+                &mut self.entity_registration,
+                r,
+                args,
+                Some(&mut numbers),
+            ),
+            Some(receiver) => entity_registration::instance_call(
+                &mut self.entity_registration,
+                r,
+                receiver,
+                args,
+                Some(&mut numbers),
+            ),
+        };
+        if let Some(class) = numbers.take_exhausted() {
+            self.note_allocation_numbers_exhausted(&class);
+        }
+        answer
+    }
+
+    fn allocating_static_field(
+        &mut self,
+        r: &MethodRef,
+        next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        let mut numbers = jar_object::Numbers::new(next_object);
+        let answer = vec2::static_field(&mut self.vec2, r, Some(&mut numbers))
+            .or_else(|| tool_material::static_field(&mut self.tool_material, r, Some(&mut numbers)))
+            .or_else(|| {
+                entity_registration::static_field(
+                    &mut self.entity_registration,
+                    r,
+                    Some(&mut numbers),
+                )
+            });
+        if let Some(class) = numbers.take_exhausted() {
+            self.note_allocation_numbers_exhausted(&class);
+        }
+        answer
+    }
+
+    fn allocating_enum_values(
+        &mut self,
+        owner: &str,
+        next_object: &mut usize,
+    ) -> Option<Result<Vec<Value>, NativeError>> {
+        let mut numbers = jar_object::Numbers::new(next_object);
+        let answer = entity_registration::enum_values(
+            &mut self.entity_registration,
+            owner,
+            Some(&mut numbers),
+        );
+        if let Some(class) = numbers.take_exhausted() {
+            self.note_allocation_numbers_exhausted(&class);
+        }
+        answer
+    }
+
     fn note_entity_data_hierarchy(&mut self, entries: &[(String, String)]) {
         entity_registration::note_hierarchy(&mut self.entity_registration, entries);
     }
@@ -10467,8 +10661,10 @@ impl Host for StdHost {
         {
             return value;
         }
+        // No allocator on this path (`Host::allocating_call` has it): only what needs no new
+        // object is answered.
         if let Some(value) =
-            entity_registration::static_call(&mut self.entity_registration, r, args)
+            entity_registration::static_call(&mut self.entity_registration, r, args, None)
         {
             return value;
         }
@@ -10699,10 +10895,10 @@ impl Host for StdHost {
                 if !self.merged_service_providers(&service).is_empty()
                     || !host_models_class(&service)
                 {
-                    // The interpreter makes each load its own loader
-                    // (`service_loader.rs`); this host-only one shares its
-                    // iterator counter for a serial.
-                    let loader = host_services::loader(&service, self.next_iterator);
+                    // The interpreter makes each load its own loader, numbered by the
+                    // heap (`service_loader.rs`); this host-only one shares its iterator
+                    // counter for a serial, tagged so it never spells a heap number (#669).
+                    let loader = host_services::host_loader(&service, self.next_iterator);
                     self.next_iterator = self.next_iterator.saturating_add(1);
                     Ok(loader)
                 } else {
@@ -12022,9 +12218,13 @@ impl Host for StdHost {
         {
             return value;
         }
-        if let Some(value) =
-            entity_registration::instance_call(&mut self.entity_registration, r, receiver, args)
-        {
+        if let Some(value) = entity_registration::instance_call(
+            &mut self.entity_registration,
+            r,
+            receiver,
+            args,
+            None,
+        ) {
             return value;
         }
         self.record(r, Some(receiver), args);
@@ -14026,7 +14226,7 @@ impl Host for StdHost {
             };
         }
         if r.owner == "java/util/ServiceLoader"
-            && let Some((service, _)) = host_services::loader_parts(receiver)
+            && let Some(service) = host_services::loader_service(receiver)
         {
             let service = service.as_str();
             if r.name == "iterator" && r.descriptor == "()Ljava/util/Iterator;" {
@@ -17651,6 +17851,16 @@ fn value_marker(value: &Value) -> String {
     }
 }
 
+/// The failure of an allocation the heap has no number left for (`usize::MAX` marks the
+/// numbers exhausted, see `Runtime::new_object_key`): the runtime's own and a host model's
+/// (`jar_object::Numbers`) alike.
+pub(crate) fn allocation_numbers_exhausted(class: &str) -> NativeError {
+    NativeError::Metadata(format!(
+        "the jar's object allocation numbers are exhausted (the next would be {}, the last); a new {class} would reuse a live object's number",
+        usize::MAX
+    ))
+}
+
 /// Open the builder chain a `new` site or static factory just made. The entry
 /// is what makes an otherwise opaque registration inferable: an item built
 /// from default properties is still a declaration, with no properties.
@@ -19652,6 +19862,111 @@ pub(crate) fn same_items(a: &[Value], b: &[Value]) -> bool {
             .all(|(a, b)| collection_item_marker(a) == collection_item_marker(b))
 }
 
+/// What `AbstractCollection.toString` / `AbstractMap.toString` print over, for a collection a
+/// host model holds: the elements (a map's as key, value, key, value, …), whether it prints as
+/// a map, and the receiver an element is compared with for `(this Collection)`. One shape for
+/// the host's printer ([`collection_text`]) and the runtime's ([`Runtime::collection_to_string`],
+/// which can run an element's own `toString`, #670).
+pub(crate) struct CollectionShape {
+    receiver: Value,
+    marker: String,
+    values: Vec<Value>,
+    is_map: bool,
+    checks_itself: bool,
+}
+
+impl CollectionShape {
+    pub(crate) fn of<H: Host + ?Sized>(
+        host: &H,
+        value: &Value,
+        owner_is_map: bool,
+    ) -> Result<Self, NativeError> {
+        let marker = expect_string(value).to_owned();
+        // `Collections.unmodifiable*`'s `toString` is `c.toString()` (Java 25's `javap`): the
+        // view prints the collection it wraps, which is then the receiver `(this Collection)`
+        // compares against, never the view itself.
+        if let Some(source) = host
+            .unmodifiable_view_source(&marker)
+            .map(|source| jar_object::stored_value(&source))
+            .filter(|source| host.mutable_collection_values(source).is_some())
+        {
+            return Self::of(host, &source, false);
+        }
+        let values = host
+            .mutable_collection_values(value)
+            .map_or_else(|| not_a_collection(value), Ok)?;
+        let class = marker.split_once('#').map(|(class, _)| class);
+        let is_map = owner_is_map
+            || class.is_some_and(|class| {
+                is_map_owner(class) || java_immutable::supertypes(class).contains(&"java/util/Map")
+            });
+        // Only a class whose `toString` is `AbstractCollection`'s/`AbstractMap`'s (or checks
+        // the same way: `ConcurrentHashMap`, the reversed views, `Helpers.collectionToString`'s
+        // blocking queues) prints itself as `(this Collection)`. `CopyOnWriteArrayList`
+        // (`Arrays.toString` of its array) and the concurrent linked queues print every
+        // element, so a list holding itself recurses until a `StackOverflowError`, as on the
+        // JVM.
+        let checks_itself = !class.is_some_and(|class| {
+            matches!(
+                class,
+                "java/util/concurrent/CopyOnWriteArrayList"
+                    | "java/util/concurrent/ConcurrentLinkedQueue"
+                    | "java/util/concurrent/ConcurrentLinkedDeque"
+                    | "java/util/concurrent/LinkedTransferQueue"
+            )
+        });
+        Ok(Self {
+            receiver: value.clone(),
+            marker,
+            values,
+            is_map,
+            checks_itself,
+        })
+    }
+
+    pub(crate) fn values(&self) -> &[Value] {
+        &self.values
+    }
+
+    /// `(this Collection)` / `(this Map)` for the receiver itself (`e == this`), else `None`.
+    /// A collection is a handle, so `==` is its identity, not its text (#250: a list holding
+    /// itself recursed until the native stack overflowed). A deeper cycle recurses, as on the
+    /// JVM, until a `StackOverflowError` (`host_recursion.rs`).
+    pub(crate) fn itself(&self, element: &Value) -> Option<String> {
+        let itself = self.checks_itself
+            && match element {
+                Value::Ref(Some(inner)) => *inner == self.marker,
+                element => object_methods::identical(element, &self.receiver),
+            };
+        itself.then(|| {
+            if self.is_map {
+                "(this Map)"
+            } else {
+                "(this Collection)"
+            }
+            .to_owned()
+        })
+    }
+
+    /// The text of the collection whose elements print as `texts` (`String.valueOf` each).
+    pub(crate) fn join(&self, texts: Vec<String>) -> String {
+        if self.is_map {
+            let pairs = texts
+                .chunks(2)
+                .map(|pair| pair.join("="))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{pairs}}}")
+        } else {
+            format!("[{}]", texts.join(", "))
+        }
+    }
+}
+
+/// `AbstractCollection.toString` / `AbstractMap.toString` of a collection a host model holds,
+/// printed by the host: each element is `String.valueOf(element)` as the host knows it
+/// ([`object_text`]: a jar object it cannot print is counted). The runtime prints a collection
+/// holding objects itself ([`Runtime::collection_to_string`]), running their own `toString`.
 fn collection_text(
     host: &mut StdHost,
     value: &Value,
@@ -19659,70 +19974,16 @@ fn collection_text(
 ) -> Result<String, NativeError> {
     // One level of nested printing (#250).
     let _level = host_recursion::enter()?;
-    let marker = expect_string(value).to_owned();
-    // `Collections.unmodifiable*`'s `toString` is `c.toString()` (Java 25's `javap`): the view
-    // prints the collection it wraps, which is then the receiver `(this Collection)` compares
-    // against, never the view itself.
-    if let Some(source) = Host::unmodifiable_view_source(host, &marker)
-        .map(|source| jar_object::stored_value(&source))
-        .filter(|source| host.mutable_values(source).is_some())
-    {
-        return collection_text(host, &source, false);
-    }
-    let values = host_collection_values(host, value)?;
-    let class = marker.split_once('#').map(|(class, _)| class);
-    let is_map = owner_is_map
-        || class.is_some_and(|class| {
-            is_map_owner(class) || java_immutable::supertypes(class).contains(&"java/util/Map")
-        });
-    // `AbstractCollection.toString`/`AbstractMap.toString`: each element is
-    // `String.valueOf(element)`, and the collection itself inside it (`e == this`)
-    // prints `(this Collection)`/`(this Map)`. A collection is a handle, so `==` is
-    // its identity, not its text (#250: a list holding itself recursed until the
-    // native stack overflowed). A deeper cycle recurses, as on the JVM, until a
-    // `StackOverflowError` (`host_recursion.rs`).
-    // Only a class whose `toString` is `AbstractCollection`'s/`AbstractMap`'s (or checks the
-    // same way: `ConcurrentHashMap`, the reversed views, `Helpers.collectionToString`'s blocking
-    // queues) prints itself as `(this Collection)`. `CopyOnWriteArrayList` (`Arrays.toString` of
-    // its array) and the concurrent linked queues print every element, so a list holding itself
-    // recurses until a `StackOverflowError`, as on the JVM.
-    let checks_itself = !class.is_some_and(|class| {
-        matches!(
-            class,
-            "java/util/concurrent/CopyOnWriteArrayList"
-                | "java/util/concurrent/ConcurrentLinkedQueue"
-                | "java/util/concurrent/ConcurrentLinkedDeque"
-                | "java/util/concurrent/LinkedTransferQueue"
-        )
-    });
-    let mut texts = Vec::with_capacity(values.len());
-    for element in &values {
-        let itself = checks_itself
-            && match element {
-                Value::Ref(Some(inner)) => *inner == marker,
-                element => object_methods::identical(element, value),
-            };
-        texts.push(if itself {
-            if is_map {
-                "(this Map)"
-            } else {
-                "(this Collection)"
-            }
-            .to_owned()
-        } else {
-            object_text(host, element)?
+    let shape = CollectionShape::of(&*host, value, owner_is_map)
+        .map_err(|error| host_call_context(host, error))?;
+    let mut texts = Vec::with_capacity(shape.values().len());
+    for element in shape.values() {
+        texts.push(match shape.itself(element) {
+            Some(text) => text,
+            None => object_text(host, element)?,
         });
     }
-    Ok(if is_map {
-        let pairs = texts
-            .chunks(2)
-            .map(|pair| pair.join("="))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{{{pairs}}}")
-    } else {
-        format!("[{}]", texts.join(", "))
-    })
+    Ok(shape.join(texts))
 }
 
 /// `String.valueOf(Object)` of one value a model holds (a collection's
@@ -19829,6 +20090,151 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
+    /// Build declaration `declaration` of the entrypoint `class` (internal name) of `kind`, as
+    /// the loader's language adapter does: a new object of the class, its constructor run with
+    /// `args` (none for Fabric's default adapter), noted for that declaration
+    /// (`Host::note_entrypoint_constructed`). A throw from the constructor is what the default
+    /// Fabric adapter wraps (it reflects through `Constructor.newInstance`): a
+    /// `LanguageAdapterException` retaining an `InvocationTargetException` that retains the
+    /// throw, recorded as the entry's failure; the error is returned. The runner and a
+    /// `getEntrypoints` that reaches an unbuilt declaration first both build through here.
+    pub(crate) fn construct_entrypoint_instance(
+        &mut self,
+        kind: &str,
+        class: &str,
+        descriptor: &str,
+        args: &[Value],
+        declaration: usize,
+    ) -> Result<Value, NativeError> {
+        let instance = self.new_object(class);
+        if let Err(error) = self.invoke(class, "<init>", descriptor, Some(instance.clone()), args) {
+            if let NativeError::UncaughtException {
+                class: thrown_class,
+                message,
+                frame,
+            } = &error
+            {
+                let original =
+                    self.caught_throwable(thrown_class, message.clone(), frame.as_deref());
+                let invocation = self.caught_throwable(
+                    "java/lang/reflect/InvocationTargetException",
+                    None,
+                    None,
+                );
+                if let Some(marker) = jar_object::instance_key(&invocation) {
+                    self.host.record_throwable_cause(marker, original);
+                }
+                let adapter = self.caught_throwable(
+                    "net/fabricmc/loader/api/LanguageAdapterException",
+                    Some(format!(
+                        "Could not instantiate class {}!",
+                        class.replace('/', ".")
+                    )),
+                    None,
+                );
+                if let Some(marker) = jar_object::instance_key(&adapter) {
+                    self.host.record_throwable_cause(marker, invocation);
+                }
+                self.host
+                    .record_fabric_entrypoint_failure(kind, class, adapter);
+            }
+            return Err(error);
+        }
+        self.host
+            .note_entrypoint_constructed(kind, class, declaration, &instance);
+        Ok(instance)
+    }
+
+    /// Fabric Loader's `getOrCreate` for the entries a call is about to answer (all of
+    /// `kind`'s, or the one at `only`), as `requested`: an entry no one built yet is built
+    /// now, its constructor run at this point (javap of Loader 0.20.1's `EntrypointStorage`:
+    /// `getEntrypoints` calls `getOrCreate` on every entry, and `NewEntry.getOrCreate` asks the
+    /// language adapter when its own `instanceMap` lacks the type), and kept as that
+    /// declaration's instance, so the runner later runs this same object instead of building
+    /// another. Only for the kind's initializer type, the one instance per declaration the
+    /// runtime models; any other type stays the host's (counted). A constructor's throw is
+    /// recorded as the entry's failure (`construct_entrypoint_instance`), as the adapter wraps
+    /// it, and the entry answers through the host's failure path.
+    #[inline(never)]
+    fn prepare_fabric_entrypoints(
+        &mut self,
+        kind: &str,
+        requested: &str,
+        only: Option<usize>,
+    ) -> Result<(), NativeError> {
+        if host_fabric_runtime::invocation_type(kind) != Some(requested) {
+            return Ok(());
+        }
+        let rows = self.host.fabric_entrypoints(kind);
+        for (ordinal, (class, _)) in rows.iter().enumerate() {
+            if only.is_some_and(|only| only != ordinal) || class.contains("::") {
+                continue;
+            }
+            let internal = class.replace('.', "/");
+            let declaration = host_fabric_runtime::declaration_index(&rows, class, ordinal);
+            if self
+                .host
+                .entrypoint_instance(kind, &internal, declaration)
+                .is_some()
+                || self.class_known_instance_of(&internal, requested) != Some(true)
+                || self
+                    .class(&internal)
+                    .and_then(|file| file.method("<init>", "()V"))
+                    .is_none()
+            {
+                continue;
+            }
+            let built = self.ensure_initialized(&internal).and_then(|()| {
+                self.construct_entrypoint_instance(kind, &internal, "()V", &[], declaration)
+            });
+            match built {
+                Ok(_) | Err(NativeError::UncaughtException { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// Build what a `getEntrypoints(kind, type)` or a container's `getEntrypoint()` is about
+    /// to answer (`prepare_fabric_entrypoints`); the host then answers the call.
+    #[inline(never)]
+    fn prepare_fabric_entrypoint_query(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<(), NativeError> {
+        match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+            (
+                "net/fabricmc/loader/api/FabricLoader",
+                "getEntrypoints",
+                "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;",
+            ) if matches!(receiver, Some(Value::Host(loader)) if loader.kind() == HostKind::FabricLoaderInstance) =>
+            {
+                let kind = expect_string(args.first().unwrap_or(&Value::Ref(None))).to_owned();
+                if let Some(requested) = args.get(1).and_then(host_class::class_name) {
+                    let requested = requested.to_owned();
+                    self.prepare_fabric_entrypoints(&kind, &requested, None)?;
+                }
+            }
+            (
+                "net/fabricmc/loader/api/EntrypointContainer"
+                | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
+                "getEntrypoint",
+                "()Ljava/lang/Object;",
+            ) => {
+                if let Some(parts) =
+                    receiver.and_then(host_fabric_runtime::entrypoint_container_parts)
+                    && let Some(requested) = parts.requested.as_deref()
+                {
+                    self.prepare_fabric_entrypoints(&parts.kind, requested, Some(parts.ordinal))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// `FabricLoaderImpl.invokeEntrypoints` walks the entrypoint rows in the
     /// same order as `getEntrypointContainers`, obtains each cached instance,
     /// and passes it to the supplied `Consumer`. Fabric catches `Throwable`
@@ -19842,6 +20248,7 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        self.prepare_fabric_entrypoint_query(r, receiver, args)?;
         if r.owner != "net/fabricmc/loader/api/FabricLoader"
             || r.name != "invokeEntrypoints"
             || r.descriptor != "(Ljava/lang/String;Ljava/lang/Class;Ljava/util/function/Consumer;)V"
@@ -19874,6 +20281,8 @@ impl<H: Host> Runtime<'_, H> {
         let mut first_failure: Option<(String, Value)> = None;
         let mut suppressed_failures = Vec::new();
         for (ordinal, (entry_class, provider)) in entries.into_iter().enumerate() {
+            // Each container's `getEntrypoint()` builds its instance as the loop reaches it.
+            self.prepare_fabric_entrypoints(&kind, requested, Some(ordinal))?;
             let object =
                 self.host
                     .fabric_entrypoint_object(&kind, &entry_class, requested, ordinal);
@@ -25141,69 +25550,42 @@ impl NativeJar {
             // The entrypoint object the loader builds: a jar object of the
             // entry class (#156 P13c: its name alone is a `String`). The
             // constructor and the `onInitialize*` call see the same `this`.
-            let instance = runtime.new_object(&class_name);
-            if !is_static {
-                let constructor = file
-                    .methods
-                    .iter()
-                    .find(|candidate| {
-                        candidate.name == "<init>" && (candidate.descriptor == "()V" || is_neoforge)
-                    })
-                    .cloned()
-                    .ok_or_else(|| NativeError::MissingMethod(format!("{class_name}#<init>")))?;
-                let constructor_args = self.entry_constructor_args(&class_name, &constructor);
-                let constructed = runtime.invoke(
-                    &class_name,
-                    "<init>",
-                    &constructor.descriptor,
-                    Some(instance.clone()),
-                    &constructor_args,
-                );
-                if let Err(error) = constructed {
-                    if let NativeError::UncaughtException {
-                        class: thrown_class,
-                        message,
-                        frame,
-                    } = &error
-                    {
-                        // The default Fabric adapter reflects through
-                        // Constructor.newInstance: its LanguageAdapterException
-                        // retains an InvocationTargetException, which in turn
-                        // retains the constructor's original Throwable.
-                        let original = runtime.caught_throwable(
-                            thrown_class,
-                            message.clone(),
-                            frame.as_deref(),
-                        );
-                        let invocation = runtime.caught_throwable(
-                            "java/lang/reflect/InvocationTargetException",
-                            None,
-                            None,
-                        );
-                        if let Some(marker) = jar_object::instance_key(&invocation) {
-                            runtime.host.record_throwable_cause(marker, original);
-                        }
-                        let adapter = runtime.caught_throwable(
-                            "net/fabricmc/loader/api/LanguageAdapterException",
-                            Some(format!(
-                                "Could not instantiate class {}!",
-                                class_name.replace('/', ".")
-                            )),
-                            None,
-                        );
-                        if let Some(marker) = jar_object::instance_key(&adapter) {
-                            runtime.host.record_throwable_cause(marker, invocation);
-                        }
-                        runtime
-                            .host
-                            .record_fabric_entrypoint_failure(kind, &class_name, adapter);
-                    }
-                    return Err(error);
-                }
-                runtime
+            let instance = if is_static {
+                runtime.new_object(&class_name)
+            } else {
+                // This run is the next declaration of the class: its own instance, which a
+                // `getEntrypoints` that reached it first already built (Fabric's
+                // `NewEntry.getOrCreate` runs the constructor then, once).
+                let declaration = runtime.host.claim_entrypoint_declaration(kind, &class_name);
+                match runtime
                     .host
-                    .note_entrypoint_constructed(kind, &class_name, &instance);
-            }
+                    .entrypoint_instance(kind, &class_name, declaration)
+                {
+                    Some(built) => built,
+                    None => {
+                        let constructor = file
+                            .methods
+                            .iter()
+                            .find(|candidate| {
+                                candidate.name == "<init>"
+                                    && (candidate.descriptor == "()V" || is_neoforge)
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                NativeError::MissingMethod(format!("{class_name}#<init>"))
+                            })?;
+                        let constructor_args =
+                            self.entry_constructor_args(&class_name, &constructor);
+                        runtime.construct_entrypoint_instance(
+                            kind,
+                            &class_name,
+                            &constructor.descriptor,
+                            &constructor_args,
+                            declaration,
+                        )?
+                    }
+                }
+            };
             if method != "<init>" {
                 // The loader constructs the entrypoint instance and then calls
                 // its `onInitialize*` on it: the same object, so the
@@ -29035,7 +29417,7 @@ impl<H: Host> Runtime<'_, H> {
                         {
                             self.host.get_field(receiver, &target)?
                         } else {
-                            self.host.get_static(&target)?
+                            self.host_static_field(&target)?
                         };
                         if value != Value::Ref(None) {
                             if plan.static_target {
@@ -29176,7 +29558,7 @@ impl<H: Host> Runtime<'_, H> {
                             self.static_constant(&target.owner, &target.name, &target.descriptor)?
                                 .unwrap_or_else(|| Value::default_for(&target.descriptor))
                         }
-                        None => self.host.get_static(&target)?,
+                        None => self.host_static_field(&target)?,
                     }
                 }
             }
@@ -30213,13 +30595,49 @@ impl<H: Host> Runtime<'_, H> {
     /// ([`Self::refuse_exhausted_allocations`]); a jar `new` is refused before it allocates
     /// ([`Self::allocate_new`]).
     fn new_object_key(&mut self, class: &str) -> String {
+        format!("{class}#{}", self.new_object_number(class))
+    }
+
+    /// A fresh number from the heap's allocator for an object of `class` whose handle is not
+    /// keyed `class#n` (a config builder, a `ServiceLoader`, a `Field` copy): one counter
+    /// numbers every object the jar can see, so no two share a number, and running out is
+    /// counted by name ([`Self::new_object_key`]'s rule) instead of saturating on one number
+    /// for all of them (#669). Never truncate it: after a game hook the numbers start at
+    /// `1 << 40` (`game_hooks.rs`), past every `i32`.
+    pub(crate) fn new_object_number(&mut self, class: &str) -> usize {
         let number = self.next_object;
         if number == usize::MAX {
             self.host.note_allocation_numbers_exhausted(class);
         } else {
             self.next_object = number + 1;
         }
-        format!("{class}#{number}")
+        number
+    }
+
+    /// A static call the runtime hands the host's models (a class the jar does not hold): first
+    /// with this heap's allocator, for a model whose answer is a new jar object
+    /// (`Host::allocating_call`, #669), else the plain call. Out of `invoke_frame`, whose frame
+    /// `fixture_deep_recursion` bounds.
+    #[inline(never)]
+    fn invoke_host_static(&mut self, r: &MethodRef, args: &[Value]) -> Result<Value, NativeError> {
+        if let Some(answer) = self
+            .host
+            .allocating_call(r, None, args, &mut self.next_object)
+        {
+            return answer;
+        }
+        self.host.invoke(r, args)
+    }
+
+    /// A `getstatic` the runtime hands the host's models: first with this heap's allocator, for
+    /// a constant a model makes on first read (`Host::allocating_static_field`, #669), else the
+    /// plain read.
+    #[inline(never)]
+    fn host_static_field(&mut self, r: &MethodRef) -> Result<Value, NativeError> {
+        if let Some(answer) = self.host.allocating_static_field(r, &mut self.next_object) {
+            return answer;
+        }
+        self.host.get_static(r)
     }
 
     /// The `new` opcode's object: the host's model of `class` or a jar object, refused once
@@ -30250,10 +30668,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn allocations_exhausted(class: &str) -> NativeError {
-        NativeError::Metadata(format!(
-            "the jar's object allocation numbers are exhausted (the next would be {}, the last); a new {class} would reuse a live object's number",
-            usize::MAX
-        ))
+        allocation_numbers_exhausted(class)
     }
 
     /// Resolve `Class.forName` against the running jar's classes and the
@@ -32465,8 +32880,18 @@ impl<H: Host> Runtime<'_, H> {
         {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
         }
-        if let Some(values) = crate::runtime::entity_registration::enum_values(&r.owner) {
-            return Some(self.new_array_value(&format!("[L{};", r.owner), values));
+        // A model whose constants are jar objects numbered by the heap (`MobCategory`, #669).
+        // Out of numbers, nothing is made: the frame fails where it returns
+        // (`refuse_exhausted_allocations`), so no answer is given here.
+        match self
+            .host
+            .allocating_enum_values(&r.owner, &mut self.next_object)
+        {
+            Some(Ok(values)) => {
+                return Some(self.new_array_value(&format!("[L{};", r.owner), values));
+            }
+            Some(Err(_)) => return None,
+            None => {}
         }
         if let Some(values) = crate::runtime::vanilla_values::enum_values(r) {
             return Some(self.new_array_value(&format!("[L{};", r.owner), values));
@@ -36066,6 +36491,13 @@ impl<H: Host> Runtime<'_, H> {
         // A `Matcher` call that reaches the host unanswered may have moved the
         // matcher: its position is no longer known (`regex_matcher.rs`).
         regex_matcher::note_host_call(r, receiver);
+        // A model whose answer is a new jar object takes its number from this heap (#669).
+        if let Some(answer) =
+            self.host
+                .allocating_call(r, Some(receiver), args, &mut self.next_object)
+        {
+            return answer.map(|value| self.materialize_host_array(value));
+        }
         let value = if level_sound::needs_block_pos_resolution(r, args) {
             let mut resolved_args = args.to_vec();
             level_sound::resolve_block_pos_arg(self, r, &mut resolved_args);
@@ -36377,11 +36809,15 @@ impl<H: Host> Runtime<'_, H> {
         Ok(Some(result))
     }
 
+    /// `toString()` of a collection a host model holds, when the runtime must print it
+    /// ([`Self::collection_to_string`]).
     #[inline(never)]
-    fn invoke_enum_set_text(
+    fn invoke_collection_text(
         &mut self,
         r: &MethodRef,
         receiver: Option<&Value>,
+        class: &str,
+        method: &str,
     ) -> Result<Option<Value>, NativeError> {
         if r.name != "toString" || r.descriptor != "()Ljava/lang/String;" {
             return Ok(None);
@@ -36389,34 +36825,53 @@ impl<H: Host> Runtime<'_, H> {
         let Some(receiver) = receiver else {
             return Ok(None);
         };
-        let class = match receiver {
-            Value::Host(handle) if handle.kind() == HostKind::Collection => {
-                handle.key().split_once('#').map(|(class, _)| class)
-            }
-            Value::Ref(Some(marker)) => marker.split_once('#').map(|(class, _)| class),
-            _ => None,
-        };
-        if class != Some("java/util/EnumSet") {
+        Ok(self
+            .collection_to_string(receiver, is_map_owner(&r.owner), class, method)?
+            .map(|text| Value::Ref(Some(text))))
+    }
+
+    /// `AbstractCollection.toString` / `AbstractMap.toString` of a collection a host model
+    /// holds whose elements include an object only the runtime can print (a jar object, a
+    /// collection that may hold one): each element is `String.valueOf(element)`, its own
+    /// `toString()` selected virtually (`value_of_text`), as on Java 25. #670: the host printed
+    /// these, and cannot run jar code, so a jar enum constant came out as its handle's key
+    /// (`demo/Probe$Color#1`) and a constant-specific body's or enum's `toString()` override was
+    /// never run (an `EnumSet` printed names). `None` for any other value, and for a collection
+    /// of values the host prints itself (strings, boxes, its own models), which keeps the host's
+    /// path.
+    #[inline(never)]
+    pub(crate) fn collection_to_string(
+        &mut self,
+        receiver: &Value,
+        owner_is_map: bool,
+        class: &str,
+        method: &str,
+    ) -> Result<Option<String>, NativeError> {
+        if self.host_collection_kind(receiver).is_none() {
             return Ok(None);
         }
-        let values = runtime_collection_values(self.host, receiver)?;
-        let mut names = Vec::with_capacity(values.len());
-        for value in values {
-            let name = self
-                .invoke_enum_member(
-                    &MethodRef {
-                        owner: "java/lang/Enum".into(),
-                        name: "toString".into(),
-                        descriptor: "()Ljava/lang/String;".into(),
-                    },
-                    Some(&value),
-                    &[],
-                )?
-                .and_then(|value| expect_ref(&value).cloned())
-                .ok_or_else(|| NativeError::Metadata("EnumSet element is not a jar enum".into()))?;
-            names.push(name);
+        // Scan in place first: a collection of values the host prints itself (strings, boxes,
+        // its own models) goes to the host's printer without a copy of its elements made here.
+        let mut runtime_prints = |element: &Value| {
+            self.jar_object_class(element).is_some()
+                || matches!(element, Value::Host(handle) if handle.kind() == HostKind::Collection)
+        };
+        if self.host.collection_any(receiver, &mut runtime_prints) != Some(true) {
+            return Ok(None);
         }
-        Ok(Some(Value::Ref(Some(format!("[{}]", names.join(", "))))))
+        let Ok(shape) = CollectionShape::of(&*self.host, receiver, owner_is_map) else {
+            return Ok(None);
+        };
+        // One level of nested printing: a cycle ends in a `StackOverflowError` (#250).
+        let _level = host_recursion::enter()?;
+        let mut texts = Vec::with_capacity(shape.values().len());
+        for element in shape.values() {
+            texts.push(match shape.itself(element) {
+                Some(text) => text,
+                None => self.value_of_text(element, "Ljava/lang/Object;", class, method)?,
+            });
+        }
+        Ok(Some(shape.join(texts)))
     }
 
     /// Walk jar superclasses from `class` and return the first non-jar
@@ -38086,7 +38541,7 @@ impl<H: Host> Runtime<'_, H> {
         class: &str,
         method: &str,
     ) -> Result<Option<Value>, NativeError> {
-        if let Some(value) = self.invoke_enum_set_text(r, receiver)? {
+        if let Some(value) = self.invoke_collection_text(r, receiver, class, method)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.invoke_host_object_method(r, op, receiver, args, class, method)? {
@@ -38550,7 +39005,7 @@ impl<H: Host> Runtime<'_, H> {
                         self.note_string_intern(&r, Some(receiver));
                         self.invoke_host_instance(&r, receiver, args)
                     }
-                    None => self.host.invoke(&r, args),
+                    None => self.invoke_host_static(&r, args),
                 };
             }
             (None, None) => {
@@ -38582,7 +39037,7 @@ impl<H: Host> Runtime<'_, H> {
                         {
                             self.prepare_entity_data_hierarchy(args);
                         }
-                        self.host.invoke(&r, args)
+                        self.invoke_host_static(&r, args)
                     }
                 },
                 JarCallRedirect::Jar(r) => {
@@ -38677,7 +39132,7 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         self.prepare_entity_data_hierarchy(args);
                     }
-                    self.host.invoke(&r, args)
+                    self.invoke_host_static(&r, args)
                 }
             };
         };
@@ -41191,7 +41646,7 @@ impl<H: Host> Runtime<'_, H> {
                                             {
                                                 self.prepare_entity_data_hierarchy(&args);
                                             }
-                                            self.host.invoke(&resolved, &args)
+                                            self.invoke_host_static(&resolved, &args)
                                         })
                                     }
                                 } else if let Some(receiver) = receiver.as_ref() {
@@ -41241,7 +41696,7 @@ impl<H: Host> Runtime<'_, H> {
                                         {
                                             self.prepare_entity_data_hierarchy(&args);
                                         }
-                                        self.host.invoke(&resolved, &args)
+                                        self.invoke_host_static(&resolved, &args)
                                     })
                                 }
                             }
@@ -48449,7 +48904,7 @@ mandatory = true
         let loader = host
             .invoke(&load, &[host_class::class_value("demo/Provider")])
             .unwrap();
-        assert_eq!(loader, host_services::loader("demo/Provider", 0));
+        assert_eq!(loader, host_services::host_loader("demo/Provider", 0));
         // The interpreter builds the providers (`service_loader.rs`); the host
         // cannot (a provider's name is a `String`, #156 P13c), so its own
         // iterator is counted and hands out none.
@@ -58121,7 +58576,7 @@ mandatory = true
         // Once it did, the loader's own `ModInitializer` instance is that
         // object; another type is a fresh instance (or a mismatch): counted.
         let instance = jar_object::handle("demo/Main#0".into());
-        host.note_entrypoint_constructed("main", "demo/Main", &instance);
+        host.note_entrypoint_constructed("main", "demo/Main", 0, &instance);
         let main = host
             .invoke_instance(
                 &entries,

@@ -1,5 +1,15 @@
 //! Vanilla entity registration and synchronized-data handles.
-use crate::jar_object;
+//!
+//! Every object this model hands the jar (an `EntityType$Builder`, an `EntityType`, its
+//! `EntityDimensions`, an `EntityDataAccessor`, the `MobCategory` and `EntityDataSerializers`
+//! constants) is keyed as a jar object, `class#n`, with `n` from the running heap's allocator
+//! (`jar_object::Numbers`, lent through `Host::allocating_call` / `allocating_static_field` /
+//! `allocating_enum_values`). #669: they used to count from
+//! `700_000`/`710_000`/`720_000`, and an accessor was keyed by its data id, numbers the heap
+//! also hands out (and frees): two holders' accessors with one id were one object, and a
+//! model's object could be born collected. A call that reaches the model without the
+//! allocator answers only what needs no new object.
+use crate::jar_object::{self, Numbers};
 use crate::{MethodRef, NativeError, Value, expect_float, expect_int, expect_ref};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,18 +47,24 @@ struct Entity {
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct State {
-    next: u64,
     builders: BTreeMap<String, Builder>,
     entities: BTreeMap<String, Entity>,
     dimensions: BTreeMap<String, (f64, f64, f64)>,
     ids: BTreeMap<String, u16>,
     supers: BTreeMap<String, String>,
     registered: BTreeSet<String>,
+    /// Each accessor's data id, by the accessor's key: a new object per `defineId`, so the
+    /// key cannot be the id.
+    accessors: BTreeMap<String, u16>,
+    /// The static constants made so far (`MobCategory.CREATURE`, `EntityDataSerializers.INT`),
+    /// by `<class>.<NAME>`: one object for the run, numbered on first read. Collection roots
+    /// ([`Self::root_texts`]): a static final field is never unreachable.
+    constants: BTreeMap<String, Value>,
 }
 
 impl State {
     pub(crate) fn entry_count(&self) -> usize {
-        self.builders.len() + self.entities.len() + self.dimensions.len()
+        self.builders.len() + self.entities.len() + self.dimensions.len() + self.accessors.len()
     }
 
     pub(crate) fn retain_keys(&mut self, keep: impl Fn(&str) -> bool) {
@@ -56,6 +72,12 @@ impl State {
         self.entities.retain(|key, _| keep(key));
         self.dimensions.retain(|key, _| keep(key));
         self.registered.retain(|key| keep(key));
+        self.accessors.retain(|key, _| keep(key));
+    }
+
+    /// The constants' keys: roots of a collection, so their numbers are never freed.
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        out.extend(self.constants.values().filter_map(jar_object::object_key));
     }
 
     pub(crate) fn register_entity_type(&mut self, value: &Value) -> bool {
@@ -75,10 +97,45 @@ const BUILDER: &str = "net/minecraft/world/entity/EntityType$Builder";
 const ENTITY: &str = "net/minecraft/world/entity/EntityType";
 const ACCESSOR: &str = "net/minecraft/network/syncher/EntityDataAccessor";
 const SERIALIZER: &str = "net/minecraft/network/syncher/EntityDataSerializer";
+const MOB_CATEGORY: &str = "net/minecraft/world/entity/MobCategory";
+/// `MobCategory`'s constants, in ordinal order (26.3).
+const CATEGORIES: [&str; 8] = [
+    "MONSTER",
+    "CREATURE",
+    "AMBIENT",
+    "AXOLOTLS",
+    "UNDERGROUND_WATER_CREATURE",
+    "WATER_CREATURE",
+    "WATER_AMBIENT",
+    "MISC",
+];
 
-fn handle(state: &mut State, class: &str) -> Value {
-    state.next += 1;
-    jar_object::handle(format!("{class}#{}", 700_000 + state.next))
+/// A new object of `class` numbered by the heap; `None` (unanswered) with no allocator.
+fn new_object(
+    numbers: Option<&mut Numbers<'_>>,
+    class: &str,
+) -> Option<Result<Value, NativeError>> {
+    Some(numbers?.handle(class))
+}
+
+/// The static constant `class.name`: the object made on its first read, numbered by the heap
+/// then. `None` (unanswered) when it is not made yet and there is no allocator.
+fn constant(
+    state: &mut State,
+    numbers: Option<&mut Numbers<'_>>,
+    class: &str,
+    name: &str,
+) -> Option<Result<Value, NativeError>> {
+    let slot = format!("{class}.{name}");
+    if let Some(value) = state.constants.get(&slot) {
+        return Some(Ok(value.clone()));
+    }
+    let value = match numbers?.handle(class) {
+        Ok(value) => value,
+        Err(error) => return Some(Err(error)),
+    };
+    state.constants.insert(slot, value.clone());
+    Some(Ok(value))
 }
 fn class(value: &Value) -> Option<&str> {
     jar_object::value_marker_class(value)
@@ -91,62 +148,48 @@ fn arg_string(v: &Value) -> Option<String> {
         .map(str::to_owned)
         .or_else(|| expect_ref(v).cloned())
 }
-pub(crate) fn enum_values(owner: &str) -> Option<Vec<Value>> {
-    (owner == "net/minecraft/world/entity/MobCategory").then(|| {
-        [
-            "MONSTER",
-            "CREATURE",
-            "AMBIENT",
-            "AXOLOTLS",
-            "UNDERGROUND_WATER_CREATURE",
-            "WATER_CREATURE",
-            "WATER_AMBIENT",
-            "MISC",
-        ]
-        .into_iter()
-        .filter_map(category_constant)
-        .collect()
+/// `MobCategory.values()`: its constants, in ordinal order, made on first use.
+pub(crate) fn enum_values(
+    state: &mut State,
+    owner: &str,
+    mut numbers: Option<&mut Numbers<'_>>,
+) -> Option<Result<Vec<Value>, NativeError>> {
+    if owner != MOB_CATEGORY {
+        return None;
+    }
+    let constants = CATEGORIES
+        .iter()
+        .map(|name| category_constant(state, numbers.as_deref_mut(), name))
+        .collect::<Option<Vec<_>>>()?;
+    Some(constants.into_iter().collect())
+}
+
+/// The `MobCategory` constant `name`.
+pub(crate) fn category_constant(
+    state: &mut State,
+    numbers: Option<&mut Numbers<'_>>,
+    name: &str,
+) -> Option<Result<Value, NativeError>> {
+    CATEGORIES.contains(&name).then_some(())?;
+    constant(state, numbers, MOB_CATEGORY, name)
+}
+
+/// The name of the `MobCategory` constant `value` is, if it is one this model made.
+fn category_name(state: &State, value: &Value) -> Option<&'static str> {
+    CATEGORIES.iter().copied().find(|name| {
+        state
+            .constants
+            .get(&format!("{MOB_CATEGORY}.{name}"))
+            .is_some_and(|constant| constant == value)
     })
 }
 
-pub(crate) fn category_constant(name: &str) -> Option<Value> {
-    let names = [
-        "MONSTER",
-        "CREATURE",
-        "AMBIENT",
-        "AXOLOTLS",
-        "UNDERGROUND_WATER_CREATURE",
-        "WATER_CREATURE",
-        "WATER_AMBIENT",
-        "MISC",
-    ];
-    let id = names.iter().position(|n| *n == name)?;
-    Some(jar_object::handle(format!(
-        "net/minecraft/world/entity/MobCategory#{}",
-        710_000 + id
-    )))
-}
-fn category_name(value: &Value) -> Option<&'static str> {
-    let id: usize = jar_object::instance_key(value)?
-        .rsplit_once('#')?
-        .1
-        .parse::<usize>()
-        .ok()?
-        .checked_sub(710_000)?;
-    [
-        "MONSTER",
-        "CREATURE",
-        "AMBIENT",
-        "AXOLOTLS",
-        "UNDERGROUND_WATER_CREATURE",
-        "WATER_CREATURE",
-        "WATER_AMBIENT",
-        "MISC",
-    ]
-    .get(id)
-    .copied()
-}
-fn serializer_handle(name: &str) -> Option<Value> {
+/// The `EntityDataSerializers` constant `name`, if 26.3 declares it.
+fn serializer_handle(
+    state: &mut State,
+    numbers: Option<&mut Numbers<'_>>,
+    name: &str,
+) -> Option<Result<Value, NativeError>> {
     let names = [
         "BYTE",
         "INT",
@@ -189,38 +232,27 @@ fn serializer_handle(name: &str) -> Option<Value> {
         "VILLAGER_DATA",
         "OPTIONAL_UNSIGNED_INT",
     ];
-    let id = names.iter().position(|n| *n == name)?;
-    Some(jar_object::handle(format!("{SERIALIZER}#{}", 720_000 + id)))
+    names.contains(&name).then_some(())?;
+    constant(state, numbers, SERIALIZER, name)
 }
 
-fn category(v: &Value) -> Option<String> {
-    category_name(v).map(str::to_owned).or_else(|| {
+fn category(state: &State, v: &Value) -> Option<String> {
+    category_name(state, v).map(str::to_owned).or_else(|| {
         expect_ref(v)
             .and_then(|s| s.strip_prefix("enum/net/minecraft/world/entity/MobCategory/"))
             .map(str::to_owned)
     })
 }
 
+/// A `getstatic` of a `MobCategory` or `EntityDataSerializers` constant: the one object for
+/// it, made (with `numbers`) on its first read.
 pub(crate) fn static_field(
-    _state: &mut State,
+    state: &mut State,
     r: &MethodRef,
+    numbers: Option<&mut Numbers<'_>>,
 ) -> Option<Result<Value, NativeError>> {
-    if r.owner == "net/minecraft/world/entity/MobCategory"
-        && r.descriptor == "Lnet/minecraft/world/entity/MobCategory;"
-    {
-        let names = [
-            "MONSTER",
-            "CREATURE",
-            "AMBIENT",
-            "AXOLOTLS",
-            "UNDERGROUND_WATER_CREATURE",
-            "WATER_CREATURE",
-            "WATER_AMBIENT",
-            "MISC",
-        ];
-        if names.contains(&r.name.as_str()) {
-            return category_constant(&r.name).map(Ok);
-        }
+    if r.owner == MOB_CATEGORY && r.descriptor == "Lnet/minecraft/world/entity/MobCategory;" {
+        return category_constant(state, numbers, &r.name);
     }
     if r.owner == "net/minecraft/network/syncher/EntityDataSerializers"
         && r.descriptor == "Lnet/minecraft/network/syncher/EntityDataSerializer;"
@@ -270,25 +302,34 @@ pub(crate) fn static_field(
             "OPTIONAL_UNSIGNED_INT",
         ];
         if names.iter().any(|n| *n == r.name) {
-            return serializer_handle(&r.name).map(Ok);
+            return serializer_handle(state, numbers, &r.name);
         }
     }
     None
 }
 
+/// `SynchedEntityData.defineId` and `EntityType.Builder.of`/`createNothing`: each a new object,
+/// numbered by `numbers`; unanswered without it.
 pub(crate) fn static_call(
     state: &mut State,
     r: &MethodRef,
     args: &[Value],
+    numbers: Option<&mut Numbers<'_>>,
 ) -> Option<Result<Value, NativeError>> {
     if r.owner == "net/minecraft/network/syncher/SynchedEntityData" && r.name == "defineId" {
         let class_name = args.first().and_then(crate::host_class::class_name)?;
-        return define_id(state, class_name);
+        return define_id(state, class_name, numbers);
     }
     if r.owner == BUILDER && (r.name == "of" || r.name == "createNothing") {
-        let cat = args.get(1).or_else(|| args.first()).and_then(category)?;
+        let cat = args
+            .get(1)
+            .or_else(|| args.first())
+            .and_then(|arg| category(state, arg))?;
         let far_from_player = matches!(cat.as_str(), "CREATURE" | "MISC");
-        let v = handle(state, BUILDER);
+        let v = match new_object(numbers, BUILDER)? {
+            Ok(v) => v,
+            Err(error) => return Some(Err(error)),
+        };
         let k = key(&v).unwrap();
         state.builders.insert(
             k,
@@ -312,26 +353,37 @@ pub(crate) fn static_call(
     None
 }
 
+/// An instance call on one of this model's objects. `build`, `getDimensions` and
+/// `getCategory` hand out an object, numbered by `numbers`; without it they are unanswered.
 pub(crate) fn instance_call(
     state: &mut State,
     r: &MethodRef,
     receiver: &Value,
     args: &[Value],
+    numbers: Option<&mut Numbers<'_>>,
 ) -> Option<Result<Value, NativeError>> {
     let marker = class(receiver)?;
     let k = key(receiver)?;
     if marker == ACCESSOR && r.name == "id" && r.descriptor == "()I" {
-        return Some(Ok(Value::Int(accessor_id(receiver)?)));
+        return Some(Ok(Value::Int(accessor_id(state, receiver)?)));
     }
     if marker == BUILDER {
         if r.name == "build" {
-            let mut b = state.builders.remove(&k)?;
+            // No allocator: unanswered, and the builder stays.
+            let numbers = numbers?;
+            if !state.builders.contains_key(&k) {
+                return None;
+            }
             let id = args
                 .first()
                 .and_then(crate::host_ids::key_location)
                 .and_then(|v| crate::host_ids::identifier_key(&v).map(str::to_owned))
                 .or_else(|| args.first().and_then(arg_string))?;
-            let v = handle(state, ENTITY);
+            let v = match numbers.handle(ENTITY) {
+                Ok(v) => v,
+                Err(error) => return Some(Err(error)),
+            };
+            let mut b = state.builders.remove(&k)?;
             let ek = key(&v).unwrap();
             b.width = b.width.max(0.0);
             b.height = b.height.max(0.0);
@@ -385,8 +437,8 @@ pub(crate) fn instance_call(
             _ => return None,
         }));
     }
-    if marker == "net/minecraft/world/entity/MobCategory" {
-        let name = category_name(receiver)?;
+    if marker == MOB_CATEGORY {
+        let name = category_name(state, receiver)?;
         let (max, friendly, persistent, despawn) = match name {
             "MONSTER" => (70, false, false, 128),
             "CREATURE" => (10, true, true, 128),
@@ -429,8 +481,11 @@ pub(crate) fn instance_call(
         }
         let e = state.entities.get(&k)?;
         let (entity_width, entity_height, entity_eye_height) = (e.width, e.height, e.eye_height);
+        if r.name == "getCategory" {
+            let category = e.category.clone();
+            return category_constant(state, numbers, &category);
+        }
         let out = match (r.name.as_str(), r.descriptor.as_str()) {
-            ("getCategory", _) => category_constant(&e.category)?,
             ("canSerialize", "()Z") => Value::Int(e.serialize as i32),
             ("canSpawnFarFromPlayer", "()Z") => Value::Int(e.far_from_player as i32),
             ("isAllowedInPeaceful", "()Z") => Value::Int(e.peaceful as i32),
@@ -443,7 +498,10 @@ pub(crate) fn instance_call(
                 Value::Ref(Some(e.description.clone()))
             }
             ("getDimensions", _) => {
-                let v = handle(state, "net/minecraft/world/entity/EntityDimensions");
+                let v = match new_object(numbers, "net/minecraft/world/entity/EntityDimensions")? {
+                    Ok(v) => v,
+                    Err(error) => return Some(Err(error)),
+                };
                 let dk = key(&v).unwrap();
                 state
                     .dimensions
@@ -471,7 +529,13 @@ pub(crate) fn note_hierarchy(state: &mut State, entries: &[(String, String)]) {
     state.supers.extend(entries.iter().cloned());
 }
 
-pub(crate) fn define_id(state: &mut State, class_name: &str) -> Option<Result<Value, NativeError>> {
+/// `SynchedEntityData.defineId(class, …)`: the next data id of `class`, on a new
+/// `EntityDataAccessor` (numbered by `numbers`; unanswered without it, and no id is taken).
+pub(crate) fn define_id(
+    state: &mut State,
+    class_name: &str,
+    numbers: Option<&mut Numbers<'_>>,
+) -> Option<Result<Value, NativeError>> {
     let mut current = class_name.to_owned();
     let id = loop {
         if let Some(last) = pool_last(state, &current) {
@@ -499,20 +563,23 @@ pub(crate) fn define_id(state: &mut State, class_name: &str) -> Option<Result<Va
             frame: None,
         }));
     }
+    // A new object per call, as `new EntityDataAccessor<>(id, serializer)` is on 26.3: two
+    // holders' accessors with one id are two objects.
+    let accessor = match new_object(numbers, ACCESSOR)? {
+        Ok(accessor) => accessor,
+        Err(error) => return Some(Err(error)),
+    };
     state.ids.insert(class_name.to_owned(), id);
-    Some(Ok(jar_object::handle(format!("{ACCESSOR}#{id}"))))
+    state.accessors.insert(key(&accessor).unwrap(), id);
+    Some(Ok(accessor))
 }
 
-pub(crate) fn accessor_id(value: &Value) -> Option<i32> {
+/// The data id of an accessor this model made.
+pub(crate) fn accessor_id(state: &State, value: &Value) -> Option<i32> {
     (class(value) == Some(ACCESSOR))
-        .then(|| {
-            jar_object::instance_key(value)?
-                .rsplit_once('#')?
-                .1
-                .parse()
-                .ok()
-        })
+        .then(|| state.accessors.get(jar_object::instance_key(value)?))
         .flatten()
+        .map(|id| i32::from(*id))
 }
 
 #[cfg(test)]
@@ -556,11 +623,15 @@ mod tests {
             ("pathfinder", "demo/PathfinderChild"),
             ("tamable", "demo/TamableChild"),
         ];
+        let mut next = 0;
+        let mut numbers = Numbers::new(&mut next);
         let captured = rows
             .iter()
             .map(|(label, class)| {
-                let id = define_id(&mut state, class).unwrap().unwrap();
-                format!("{label}={}", accessor_id(&id).unwrap())
+                let id = define_id(&mut state, class, Some(&mut numbers))
+                    .unwrap()
+                    .unwrap();
+                format!("{label}={}", accessor_id(&state, &id).unwrap())
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -578,14 +649,26 @@ mod tests {
                 "net/minecraft/world/entity/Unknown".into(),
             )],
         );
-        assert!(define_id(&mut state, "demo/Unknown").is_none());
+        let mut next = 0;
+        assert!(
+            define_id(
+                &mut state,
+                "demo/Unknown",
+                Some(&mut Numbers::new(&mut next))
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn builder_and_accessor_surface_keeps_vanilla_defaults() {
         let mut state = State::default();
-        let category = category_constant("CREATURE").unwrap();
-        let b = static_call(&mut state, &MethodRef { owner: BUILDER.into(), name: "of".into(), descriptor: "(Lnet/minecraft/world/entity/EntityType$EntityFactory;Lnet/minecraft/world/entity/MobCategory;)Lnet/minecraft/world/entity/EntityType$Builder;".into() }, &[Value::Ref(Some("factory".into())), category]).unwrap().unwrap();
+        let mut next = 0;
+        let mut numbers = Numbers::new(&mut next);
+        let category = category_constant(&mut state, Some(&mut numbers), "CREATURE")
+            .unwrap()
+            .unwrap();
+        let b = static_call(&mut state, &MethodRef { owner: BUILDER.into(), name: "of".into(), descriptor: "(Lnet/minecraft/world/entity/EntityType$EntityFactory;Lnet/minecraft/world/entity/MobCategory;)Lnet/minecraft/world/entity/EntityType$Builder;".into() }, &[Value::Ref(Some("factory".into())), category], Some(&mut numbers)).unwrap().unwrap();
         instance_call(
             &mut state,
             &MethodRef {
@@ -595,12 +678,19 @@ mod tests {
             },
             &b,
             &[Value::Float(1.25), Value::Float(2.5)],
+            None,
         )
         .unwrap()
         .unwrap();
-        let id = define_id(&mut state, "net/minecraft/world/entity/Entity")
-            .unwrap()
-            .unwrap();
-        assert_eq!(accessor_id(&id), Some(8));
+        let id = define_id(
+            &mut state,
+            "net/minecraft/world/entity/Entity",
+            Some(&mut numbers),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(accessor_id(&state, &id), Some(8));
+        // Every object is numbered by the one allocator, from where it stood.
+        assert_eq!(next, 3);
     }
 }

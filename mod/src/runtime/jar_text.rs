@@ -22,9 +22,12 @@
 //!
 //! Any other object (`new Object()`, a platform class's instance) goes to the
 //! host's `Object.toString`, which prints the objects it models and counts the
-//! rest. A jar object inside a host collection or optional is printed by the
-//! host, which cannot run jar code: it is counted there too, never passed off
-//! as Java's text.
+//! rest. A host collection holding a jar object is printed by the runtime
+//! (`Runtime::collection_to_string`), each element by its own `toString()`, as
+//! `AbstractCollection.toString` does (#670); the host prints the collections
+//! that hold only values it knows. A jar object inside a host optional is
+//! printed by the host, which cannot run jar code: counted there, never passed
+//! off as Java's text.
 
 use super::*;
 
@@ -110,7 +113,7 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// The jar class of an object this run built from a jar's own class.
-    fn jar_object_class(&self, value: &Value) -> Option<String> {
+    pub(crate) fn jar_object_class(&self, value: &Value) -> Option<String> {
         let class = crate::runtime::jar_object::packaged_object_class(value)?;
         (!self.host.models_class(class) && self.class(class).is_some()).then(|| class.to_owned())
     }
@@ -261,15 +264,9 @@ impl<H: Host> Runtime<'_, H> {
                 crate::runtime::stream_pipeline::STREAM_TEXT.into(),
             ))));
         }
-        if let Some(text) = self.invoke_enum_set_text(
-            &crate::runtime::MethodRef {
-                owner: "java/util/EnumSet".into(),
-                name: "toString".into(),
-                descriptor: "()Ljava/lang/String;".into(),
-            },
-            Some(value),
-        )? {
-            return Ok(Some(text));
+        // A host collection holding objects only the runtime can print (#670).
+        if let Some(text) = self.collection_to_string(value, false, class, method)? {
+            return Ok(Some(Value::Ref(Some(text))));
         }
         // A host map entry prints `key=value` (`host_entry.rs`).
         if let Some(text) = self.host_entry_text(value, class, method)? {
