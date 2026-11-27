@@ -144,11 +144,27 @@ methods, and nothing in it names a mod.
    (`NativeJar::tooltip_component_size`) and draws it once in its own box, and answers a custom
    `TooltipComponent` only when all of that was exact (otherwise vanilla's answer, no image,
    stands: never an empty box). The factory's `draw_image` runs `extractImage`
-   (`NativeJar::draw_tooltip_component_image`) and paints its recorded draws. Still counted, so
-   a pouch's tooltip shows no image yet: an empty pouch's height wraps its description with
-   `Font.split` (the client surface's `Font` answers only `width`), and the slots are drawn with
-   26.3's `blitSprite(RenderPipeline, ...)` (`com.mojang.renderpearl`), which the client surface
-   counts because a nine-slice GUI sprite is not a stretched `DrawOp::Sprite`.
+   (`NativeJar::draw_tooltip_component_image`) and paints its recorded draws.
+   *The pouch's own draws* (`client_font.rs`, `client_surface.rs`; tests `fixture_client_font`
+   against a JDK 25 / client 26.3 oracle, and `fixture_runes_client_items`, whose empty, partly
+   full and full pouches now answer images with every draw exact against Bundle API's own
+   component on the 26.3 client): `Font.split` is 26.3's `StringSplitter.splitLines` over the
+   frame's glyph table for plain text, else the embedder's answer for that exact text, else
+   counted with its question recorded; `Font.width` likewise in a screen frame; `textWithWordWrap`
+   splits and draws each line; the 26.3 whole-sprite `blitSprite` overloads on `GUI_TEXTURED`
+   record `DrawOp::Sprite`, which Sunrise's `GuiDraw::Sprite` paints as the sprite's
+   `gui.scaling` says (`hud_layout.rs` `paint_with` → `ui::draw_whole_sprite`, at the pin);
+   `item` / `itemDecorations` of a runtime stack record `DrawOp::Stack`.
+   *In Sunrise* the tooltip's font is the game's: Sunrise has no glyph table, so the mod asks
+   each text the component measures or wraps of `ClientTextClientHost::text_width` /
+   `text_split` (vanilla's `Font.width` / `Font.split`) and runs it again with the answers
+   (`NativeJar::tooltip_image_with_font`). A discarded run's counts are rewound only when all it
+   counted was the font's refusals (`ClientFrameOutput::font_refusals`); a run that counted
+   anything else keeps its counts and the image is refused, since a counted call's placeholder
+   can outlive the run (a `<clinit>` storing it in a static). A rune slot paints as 26.3's
+   `itemDecorations` does (offsets 16-40: `itemBar`, `itemCooldown`, then `itemCount`):
+   `DrawContext::item_stack` draws the model, bar and cooldown, and the count text follows at
+   `itemCount`'s place, `x + 19 - 2 - font.width(s)`, `y + 9`, white with a shadow.
    An embedder hands the game's prototype values of every item a jar component's stored contents
    name (`NativeJar::record_item_prototype`; the mod seeds each registered item id in the NBT),
    since the type's codec reads them while it decodes.
@@ -186,6 +202,39 @@ answered by the slot the click resolved.
 
 The upstream gap these bugs did show is the unread `fabric:load_conditions` key
 ([mod-plan.md](mod-plan.md), "Fork seams needed").
+
+### A tooltip image's stacks
+
+No addition is needed at the pin. 26.3's `itemDecorations(font, stack, x, y, text)` draws the
+bar, then the cooldown, then the count (offsets 16-40), and `DrawContext::item_stack` (SDK
+`host/draw.rs:106`, at the pin Sunrise's `native_item_stack`,
+`sunrise-client/src/game/native_hooks/base.rs:4394`) draws the model, the bar and the cooldown with
+an empty count into the batch the GUI ops share, so the count text drawn after it is vanilla's
+order.
+
+The pin also has `DrawContext::gui_draw_item_with(stack, at, text)` (SDK `host/draw.rs:291`,
+Sunrise's `native_gui_draw_item_with`): the model and the whole of `itemDecorations`, count
+included. The mod keeps `item_stack` and its own count text because `item_stack` answers whether
+it drew (false for an unknown item or an empty stack), which the mod counts and refuses on;
+`gui_draw_item_with` answers nothing. The cost: both end in Sunrise's `draw_item_decorations`,
+which draws another Sunrise mod's item decorator (`native_item_decorations`) last, after the
+count; with `item_stack` that decorator is drawn before the mod's count text, so where the two
+overlap the count lands on top of it. Vanilla has no such decorator, so this only differs with
+another Sunrise mod's slot decorations on a stack in a jar's tooltip image.
+
+Sunrise main has since added `GuiCanvas::item_decorations(stack, at, count)` through
+`DrawContext::draw_gui` (`sunrise-mod-vocab/src/client/gui_canvas.rs:214`), the path once
+the pin moves past it: one call for the whole of `itemDecorations`, count included, that can refuse.
+
+### Widths Sunrise answers
+
+A `FontQuestion::Width` carries no summing order (`client_font.rs` `WidthOrder`), and the mod
+answers each with `ClientTextClientHost::text_width`, the game's `Font.width(FormattedText)`,
+which sums in the text's own order. A width the runtime takes in visual order (a split line's,
+`centeredText` of a component's `getVisualOrderText()`) is answered by that logical sum too, so on
+Sunrise's path the glyph model's refusal of a rounding visual sum doesn't apply. The two sums
+differ only for bidirectional text whose advances round when added, which the default font's
+(whole and half pixels) never do.
 
 ### Settled: the clicked slot's rules from `item_stacked_on_other`
 

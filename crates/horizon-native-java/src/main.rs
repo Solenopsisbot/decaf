@@ -1333,8 +1333,8 @@ fn frame_census(
         render_distance: 12,
         metrics: Arc::new(TextMetrics {
             advances: vec![6.0; 128],
-            fallback: 6.0,
             translations: Default::default(),
+            answers: Default::default(),
         }),
         ..ClientSnapshot::default()
     });

@@ -1,0 +1,31 @@
+pouch empty width=96 height=39
+  draw at 8,8 box 96x39
+  text "Can hold mixed" 8 8 -5592406 true
+  text "stacks of runes" 8 17 -5592406 true
+  sprite gui_textured minecraft:container/bundle/bundle_progressbar_fill 9 30 0 13 -1
+  sprite gui_textured minecraft:container/bundle/bundle_progressbar_border 8 30 96 13 -1
+  text "Empty" 42 33 -1 true
+pouch partly width=96 height=45
+  draw at 8,8 box 96x45
+  sprite gui_textured minecraft:container/bundle/slot_background 80 8 24 24 -1
+  item runes:fire_stone 10 84 12 1
+  decorations runes:fire_stone 10 84 12
+  sprite gui_textured minecraft:container/bundle/bundle_progressbar_fill 9 36 3 13 -1
+  sprite gui_textured minecraft:container/bundle/bundle_progressbar_border 8 36 96 13 -1
+pouch full width=96 height=45
+  draw at 8,8 box 96x45
+  sprite gui_textured minecraft:container/bundle/slot_background 80 8 24 24 -1
+  item runes:fire_stone 64 84 12 1
+  decorations runes:fire_stone 64 84 12
+  sprite gui_textured minecraft:container/bundle/slot_background 56 8 24 24 -1
+  item runes:fire_stone 64 60 12 2
+  decorations runes:fire_stone 64 60 12
+  sprite gui_textured minecraft:container/bundle/slot_background 32 8 24 24 -1
+  item runes:fire_stone 64 36 12 3
+  decorations runes:fire_stone 64 36 12
+  sprite gui_textured minecraft:container/bundle/slot_background 8 8 24 24 -1
+  item runes:fire_stone 64 12 12 4
+  decorations runes:fire_stone 64 12 12
+  sprite gui_textured minecraft:container/bundle/bundle_progressbar_full 9 36 94 13 -1
+  sprite gui_textured minecraft:container/bundle/bundle_progressbar_border 8 36 96 13 -1
+  text "Full" 47 39 -1 true

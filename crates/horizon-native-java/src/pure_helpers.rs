@@ -116,6 +116,14 @@ fn mth_static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value, Native
         ("lfloor", "(D)J", [Value::Float(v)]) => Some(Ok(Value::Long(v.floor() as i64))),
         ("abs", "(F)F", [Value::Float(v)]) => Some(Ok(Value::Float(f64::from((*v as f32).abs())))),
         ("abs", "(I)I", [Value::Int(v)]) => Some(Ok(Value::Int(v.wrapping_abs()))),
+        // 26.3 `Mth.clamp(int, int, int)` and `clamp(long, long, long)`:
+        // `Math.min(Math.max(value, min), max)` (offsets 0-9), so a `min` above `max` answers `max`.
+        ("clamp", "(III)I", [Value::Int(v), Value::Int(lo), Value::Int(hi)]) => {
+            Some(Ok(Value::Int((*v).max(*lo).min(*hi))))
+        }
+        ("clamp", "(JJJ)J", [Value::Long(v), Value::Long(lo), Value::Long(hi)]) => {
+            Some(Ok(Value::Long((*v).max(*lo).min(*hi))))
+        }
         // 26.3 `Mth.positiveCeilDiv(int, int)`: `-Math.floorDiv(-a, b)` (`ineg` wraps).
         ("positiveCeilDiv", "(II)I", [Value::Int(a), Value::Int(b)]) => {
             if *b == 0 {

@@ -1,0 +1,36 @@
+split "ab cd" 20 2 [ab|cd]
+split "ab cd" 28 1 [ab cd]
+split "abcd" 13 2 [ab|cd]
+split "a\nb" 100 2 [a|b]
+split "a\n" 100 2 [a|]
+split "a\n\n" 100 3 [a||]
+split "" 100 0 []
+split "ab" 0 2 [a|b]
+split "ab" -5 2 [a|b]
+split "qqqqqqq qq" 40 2 [qqqqqqq|qq]
+split "  lead" 10 4 [ |le|a|d]
+split "i i i i i i" 7 6 [i|i|i|i|i|i]
+split "trailing   " 30 2 [trailin|g   ]
+split "one\n\ntwo\n" 40 4 [one||two|]
+split "Can hold mixed stacks of runes" 96 2 [Can hold mixed|stacks of runes]
+split "Can hold mixed stacks of runes" 40 6 [Can|hold|mixed|stacks|of|runes]
+split "wrap supercalifragilistic words" 40 5 [wrap|superc|alifragil|istic|words]
+split "\n" 5 2 [|]
+split " " 1 1 [ ]
+split "ab  cd" 12 3 [ab||cd]
+width "a" 6
+width "q" 6
+width "qq" 11
+width "qqq" 17
+width "Iq6" 16
+width "" 0
+width "Pouch Label" 61
+width "  " 8
+width "Full" 18
+ceil 38.5 39
+ceil 39.0 39
+ceil 3.0E9 2147483647
+ceil Infinity 2147483647
+ceil NaN 0
+ceil -0.5 0
+ceil -3.0E9 -2147483648
