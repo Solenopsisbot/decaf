@@ -192,36 +192,71 @@ fn game_stack(
     crate::client::api_stack_from_components(host, parts).map(Some)
 }
 
+/// How [`plain_inventory_slot`] classified the clicked menu slot.
+enum ClickedSlot {
+    /// A plain vanilla `Slot` backed by `Inventory.items` index `0..36`, whose backing agrees
+    /// with `click.container_slot` and whose Sunrise slot rules agree with a plain slot.
+    PlainInventory(usize),
+    /// A slot this bridge does not model (non-vanilla menu, non-player backing, armor/offhand,
+    /// custom slot rules, or `container_menu` unavailable): counted as `clicked slot rules` and
+    /// left to Sunrise's vanilla click.
+    Declined,
+    /// `menu.slot_backing(click.slot)` answered `Player(backing)` that disagrees with
+    /// `click.container_slot` (for example Sunrise `3d34bbe63d` lifting `crafting.table` /
+    /// `station` during `lan_crafting_click` / `lan_stations`, causing `player.container_menu` to
+    /// fall back to `InventoryMenu` window 0 while `click.slot` is a `CraftingMenu` index off by
+    /// one): counted and refused so nothing is overwritten or duplicated.
+    Mismatch { backing: usize, event: usize },
+}
+
 /// The player-inventory index the clicked menu slot shows, when it is a plain vanilla `Slot`
 /// whose rules this hook can read: the player's open menu is their inventory menu or a vanilla
-/// menu type, the slot is backed by `Inventory.items`, and Sunrise's own slot rules
-/// (`MenuRef::slot_gives` / `slot_holds`, which a menu part may change) agree with a plain
-/// slot's for the stacks the click holds. `None` otherwise: the click counts.
+/// menu type, the slot is backed by `Inventory.items`, the backing agrees with
+/// `click.container_slot`, and Sunrise's own slot rules (`MenuRef::slot_gives` / `slot_holds`,
+/// which a menu part may change) agree with a plain slot's for the stacks the click holds.
 fn plain_inventory_slot(
     host: &dyn ServerHost,
     player: PlayerRef,
-    slot: usize,
-    stacks: [Option<&ItemStack>; 2],
-) -> Option<usize> {
-    let menu = player.container_menu(host)?;
-    match menu.kind(host)? {
-        None => {}
-        Some(kind) if kind.starts_with("minecraft:") => {}
-        Some(_) => return None,
-    }
-    let MenuSlotBacking::Player(index) = menu.slot_backing(host, slot)? else {
-        return None;
+    click: &StackedOnOther,
+) -> ClickedSlot {
+    let Some(menu) = player.container_menu(host) else {
+        return ClickedSlot::Declined;
     };
-    if index >= PLAIN_INVENTORY_SLOTS || !menu.slot_gives(host, slot)? {
-        return None;
+    match menu.kind(host) {
+        Some(None) => {}
+        Some(Some(kind)) if kind.starts_with("minecraft:") => {}
+        _ => return ClickedSlot::Declined,
     }
-    for stack in stacks.into_iter().flatten() {
-        let item_max = host.max_stack_size(stack.item())?;
-        if menu.slot_holds(host, slot, stack)? != item_max.min(INVENTORY_MAX_STACK_SIZE) {
-            return None;
+    let Some(MenuSlotBacking::Player(index)) = menu.slot_backing(host, click.slot) else {
+        return ClickedSlot::Declined;
+    };
+    // Cross-check before rejecting armor/offhand (`>= 36`): in `InventoryMenu`, armor slots 5..9
+    // report `Player(39..=36)` matching `container_slot` 39..=36 and offhand slot 45 reports
+    // `Player(40)` matching `container_slot` 40, whereas a shifted `CraftingMenu` slot 45 (hotbar
+    // 8, `container_slot` 8) or grid slots 5..9 (`container_slot` 4..=7) disagree and are caught
+    // here as a mismatch.
+    if index != click.container_slot {
+        return ClickedSlot::Mismatch {
+            backing: index,
+            event: click.container_slot,
+        };
+    }
+    if index >= PLAIN_INVENTORY_SLOTS || !menu.slot_gives(host, click.slot).unwrap_or(false) {
+        return ClickedSlot::Declined;
+    }
+    for stack in [click.carried.as_ref(), click.clicked.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        let Some(item_max) = host.max_stack_size(stack.item()) else {
+            return ClickedSlot::Declined;
+        };
+        if menu.slot_holds(host, click.slot, stack) != Some(item_max.min(INVENTORY_MAX_STACK_SIZE))
+        {
+            return ClickedSlot::Declined;
         }
     }
-    Some(index)
+    ClickedSlot::PlainInventory(index)
 }
 
 /// One Java call of this bridge that failed: an exception Java didn't catch, a budget, a
@@ -338,210 +373,302 @@ impl JavaItemPart {
             ItemClickDirection::CarriedOnOther => ItemHook::StackedOnOther,
             ItemClickDirection::OtherStackedOnMe => ItemHook::OtherStackedOnMe,
         };
-        let mut guard = self.lock();
-        let Some((jar_index, item, owner)) = jar_item(&guard, &self.item_id, hook) else {
-            // `Item`'s own `false`: nothing to run.
-            return Flow::Continue;
-        };
-        let incarnation = click
-            .player
-            .and_then(|uuid| guard.lives.get(&uuid).copied());
-        // Every stack this builds (the inventory, the carried stack, the held one, drops) is
-        // turned into a game stack before the handler returns: none outlives the scope, so
-        // what the call made is collectable once it closes (a long-lived server ran up one
-        // permanent row per stack per click before). While it is open its rows are roots.
-        let scope = guard.jars[jar_index].host.begin_transient_rows();
-        let flow = (|| -> Flow {
-            let jar = &mut guard.jars[jar_index];
-            let label = format!("{} item {} {hook:?}", jar.row.id, self.item_id);
-            let Some(player) = click.player.and_then(|uuid| host.player(uuid)) else {
-                jar.host
-                    .note_unknown_game_hook("item_stacked_on_other:no player");
+        struct PendingClickSounds {
+            jar_index: usize,
+            jar_id: String,
+            sounds: Vec<runtime::SoundRecord>,
+            sound_streams: std::collections::BTreeSet<String>,
+        }
+        let (flow, pending_sounds) = {
+            let mut guard = self.lock();
+            let Some((jar_index, item, owner)) = jar_item(&guard, &self.item_id, hook) else {
+                // `Item`'s own `false`: nothing to run.
                 return Flow::Continue;
             };
-            let Some(inventory_slot) = plain_inventory_slot(
-                &*host,
-                player,
-                click.slot,
-                [click.carried.as_ref(), click.clicked.as_ref()],
-            ) else {
-                jar.host
-                    .note_unknown_game_hook("item_stacked_on_other:clicked slot rules");
-                return Flow::Continue;
-            };
-            let native = Arc::clone(&jar.jar);
-            let jar_types = persistent_jar_types(&jar.host);
-            let container = crate::block_use::player_container(&*host, Some(player));
-            let mut read = crate::live_menu::read_player(
-                &*host,
-                &mut jar.host,
-                incarnation,
-                player,
-                None,
-                container,
-                None,
-            );
-            // The inventory again, jar-aware: a stack with a jar data component (a pouch's
-            // contents) crosses with it decoded, not opaque.
-            read.facts.inventory = player
-                .with_inventory(&*host, |view| {
-                    (0..crate::live_menu::INVENTORY_SLOTS)
-                        .map(|slot| match view.get(slot) {
-                            None => Some(StdHost::empty_item_stack()),
-                            Some(stack) => java_stack(
-                                &*host,
-                                &native,
-                                &mut jar.host,
-                                None,
-                                &stack.project()?,
-                                &jar_types,
-                            ),
-                        })
-                        .collect::<Option<Vec<Value>>>()
-                })
-                .flatten();
-            let carried = match &click.carried {
-                None => Some(StdHost::empty_item_stack()),
-                Some(stack) => java_stack(&*host, &native, &mut jar.host, None, stack, &jar_types),
-            };
-            let (Some(carried), Some(_), Some(dimension)) = (
-                carried,
-                read.facts.inventory.as_ref(),
-                read.dimension.clone(),
-            ) else {
-                jar.host
-                    .note_unknown_game_hook("item_stacked_on_other:stacks unreadable");
-                return Flow::Continue;
-            };
-            let item_click = ItemClick {
-                direction,
-                inventory_slot: inventory_slot as i32,
-                carried,
-                primary: click.primary,
-            };
-            let level = player.entity().level(&*host);
-            jar.host.set_host_deferred_server_sound_seeds(true);
-            let budget = ExecutionBudget::within(JAR_BUDGET);
-            let outcome =
-                run_with_level_random(host, level, &dimension, &mut jar.host, |jar_host| {
-                    caught(&label, || {
-                        native.item_click_override(
-                            jar_host,
-                            &read.data,
-                            &dimension,
-                            &read.facts,
-                            &item,
-                            &owner,
-                            &item_click,
-                            &budget,
-                        )
+            let incarnation = click
+                .player
+                .and_then(|uuid| guard.lives.get(&uuid).copied());
+            // Every stack this builds (the inventory, the carried stack, the held one, drops) is
+            // turned into a game stack before the handler returns: none outlives the scope, so
+            // what the call made is collectable once it closes (a long-lived server ran up one
+            // permanent row per stack per click before). While it is open its rows are roots.
+            let scope = guard.jars[jar_index].host.begin_transient_rows();
+            let mut pending_sounds = None;
+            let flow = (|| -> Flow {
+                let jar = &mut guard.jars[jar_index];
+                let jar_id = jar.row.id.clone();
+                let label = format!("{jar_id} item {} {hook:?}", self.item_id);
+                let Some(player) = click.player.and_then(|uuid| host.player(uuid)) else {
+                    jar.host
+                        .note_unknown_game_hook("item_stacked_on_other:no player");
+                    return Flow::Continue;
+                };
+                let inventory_slot = match plain_inventory_slot(&*host, player, click) {
+                    ClickedSlot::PlainInventory(index) => index,
+                    ClickedSlot::Declined => {
+                        jar.host
+                            .note_unknown_game_hook("item_stacked_on_other:clicked slot rules");
+                        return Flow::Continue;
+                    }
+                    ClickedSlot::Mismatch { backing, event } => {
+                        log::warn!(
+                            "{LOG}: {jar_id}: {label}: menu slot {} backing Player({backing}) disagrees with event container_slot {event}; refusing click",
+                            click.slot
+                        );
+                        jar.host
+                            .note_unknown_game_hook("item_stacked_on_other:slot backing mismatch");
+                        return refuse_click(result);
+                    }
+                };
+                let native = Arc::clone(&jar.jar);
+                let jar_types = persistent_jar_types(&jar.host);
+                let container = crate::block_use::player_container(&*host, Some(player));
+                let mut read = crate::live_menu::read_player(
+                    &*host,
+                    &mut jar.host,
+                    incarnation,
+                    player,
+                    None,
+                    container,
+                    None,
+                );
+                // The inventory again, jar-aware: a stack with a jar data component (a pouch's
+                // contents) crosses with it decoded, not opaque. Capture the exact stack read from
+                // `inventory_slot` to cross-check against `click.clicked` before running Java and
+                // to compare against what Java leaves afterwards.
+                let mut slot_before: Option<Option<ItemStack>> = None;
+                read.facts.inventory = player
+                    .with_inventory(&*host, |view| {
+                        (0..crate::live_menu::INVENTORY_SLOTS)
+                            .map(|slot| {
+                                let projected = match view.get(slot) {
+                                    None => Some(None),
+                                    Some(stack) => stack.project().map(Some),
+                                }?;
+                                if slot as usize == inventory_slot {
+                                    slot_before = Some(projected.clone());
+                                }
+                                match projected {
+                                    None => Some(StdHost::empty_item_stack()),
+                                    Some(stack) => java_stack(
+                                        &*host,
+                                        &native,
+                                        &mut jar.host,
+                                        None,
+                                        &stack,
+                                        &jar_types,
+                                    ),
+                                }
+                            })
+                            .collect::<Option<Vec<Value>>>()
                     })
-                });
-            jar.host.set_host_deferred_server_sound_seeds(false);
-            jar.host.clear_entity_sound_facts();
-            let sounds = jar.host.take_sound_records();
-            const FAILED: &str = "item_stacked_on_other:failed";
-            let no_counts = std::collections::BTreeMap::new();
-            let outcome = match outcome {
-                Ok(Ok(outcome)) => outcome,
-                Ok(Err(error)) => {
-                    note_failed(jar, &label, FAILED, &error.to_string(), &no_counts);
+                    .flatten();
+                let Some(slot_before) = slot_before else {
+                    jar.host
+                        .note_unknown_game_hook("item_stacked_on_other:stacks unreadable");
+                    return Flow::Continue;
+                };
+                if slot_before != click.clicked {
+                    log::warn!(
+                        "{LOG}: {jar_id}: {label}: inventory slot {inventory_slot} stack disagrees with clicked event stack; refusing click"
+                    );
+                    jar.host
+                        .note_unknown_game_hook("item_stacked_on_other:clicked slot mismatch");
                     return refuse_click(result);
                 }
-                Err(panic) => {
+                let carried = match &click.carried {
+                    None => Some(StdHost::empty_item_stack()),
+                    Some(stack) => {
+                        java_stack(&*host, &native, &mut jar.host, None, stack, &jar_types)
+                    }
+                };
+                let (Some(carried), Some(_), Some(dimension)) = (
+                    carried,
+                    read.facts.inventory.as_ref(),
+                    read.dimension.clone(),
+                ) else {
+                    jar.host
+                        .note_unknown_game_hook("item_stacked_on_other:stacks unreadable");
+                    return Flow::Continue;
+                };
+                let item_click = ItemClick {
+                    direction,
+                    inventory_slot: inventory_slot as i32,
+                    carried,
+                    primary: click.primary,
+                };
+                let level = player.entity().level(&*host);
+                let sound_streams = jar.host.unknown_sound_streams().clone();
+                jar.host.set_host_deferred_server_sound_seeds(true);
+                let budget = ExecutionBudget::within(JAR_BUDGET);
+                let outcome =
+                    run_with_level_random(host, level, &dimension, &mut jar.host, |jar_host| {
+                        caught(&label, || {
+                            native.item_click_override(
+                                jar_host,
+                                &read.data,
+                                &dimension,
+                                &read.facts,
+                                &item,
+                                &owner,
+                                &item_click,
+                                &budget,
+                            )
+                        })
+                    });
+                jar.host.set_host_deferred_server_sound_seeds(false);
+                jar.host.clear_entity_sound_facts();
+                let sounds = jar.host.take_sound_records();
+                const FAILED: &str = "item_stacked_on_other:failed";
+                let no_counts = std::collections::BTreeMap::new();
+                let outcome = match outcome {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(error)) => {
+                        note_failed(jar, &label, FAILED, &error.to_string(), &no_counts);
+                        return refuse_click(result);
+                    }
+                    Err(panic) => {
+                        note_failed(
+                            jar,
+                            &label,
+                            FAILED,
+                            &format!("panicked: {panic}"),
+                            &no_counts,
+                        );
+                        return refuse_click(result);
+                    }
+                };
+                if let Some(failure) = &outcome.report.failure {
+                    // Java didn't return: neither its `true` nor its `false` is known, and what it
+                    // changed before failing is no answer either.
                     note_failed(
                         jar,
                         &label,
                         FAILED,
-                        &format!("panicked: {panic}"),
-                        &no_counts,
+                        failure,
+                        &outcome.report.unknown_host_calls,
                     );
                     return refuse_click(result);
                 }
-            };
-            if let Some(failure) = &outcome.report.failure {
-                // Java didn't return: neither its `true` nor its `false` is known, and what it
-                // changed before failing is no answer either.
-                note_failed(
-                    jar,
-                    &label,
-                    FAILED,
-                    failure,
-                    &outcome.report.unknown_host_calls,
-                );
-                return refuse_click(result);
-            }
-            if !outcome.report.exact() || !outcome.effects.is_empty() {
-                // A counted call's placeholder may have steered it: vanilla's answer stands, and
-                // the sounds it would have made don't play.
-                crate::level_random::note_call_counts(
-                    &mut jar.row,
-                    &label,
-                    &outcome.report.unknown_host_calls,
-                );
-                if !outcome.effects.is_empty() {
-                    jar.host
-                        .note_unknown_game_hook("item_stacked_on_other:side effects");
-                }
-                return Flow::Continue;
-            }
-            let carried_after = game_stack(&*host, &native, &mut jar.host, &outcome.carried);
-            let slot_after = game_stack(&*host, &native, &mut jar.host, &outcome.slot);
-            let (Some(carried_after), Some(slot_after)) = (carried_after, slot_after) else {
-                jar.host
-                    .note_unknown_game_hook("item_stacked_on_other:unconvertible stack");
-                return Flow::Continue;
-            };
-            let clicked = match (outcome.takes, &click.clicked) {
-                (0, before) if *before == slot_after => ClickedStackResult::Keep,
-                (0, _) => ClickedStackResult::Set(slot_after),
-                // `Slot.safeTake` on a plain inventory slot splits its stack: what is left is the
-                // same item and components, fewer of them.
-                (_, Some(before))
-                    if slot_after.as_ref().is_none_or(|after| {
-                        after.same_item(before)
-                            && after.same_components(before)
-                            && after.count() < before.count()
-                    }) =>
-                {
-                    let left = slot_after.as_ref().map_or(0, ItemStack::count);
-                    ClickedStackResult::Take(before.count() - left)
-                }
-                _ => {
-                    jar.host
-                        .note_unknown_game_hook("item_stacked_on_other:take shape");
+                if !outcome.report.exact() || !outcome.effects.is_empty() {
+                    // A counted call's placeholder may have steered it: vanilla's answer stands, and
+                    // the sounds it would have made don't play.
+                    crate::level_random::note_call_counts(
+                        &mut jar.row,
+                        &label,
+                        &outcome.report.unknown_host_calls,
+                    );
+                    if !outcome.effects.is_empty() {
+                        jar.host
+                            .note_unknown_game_hook("item_stacked_on_other:side effects");
+                    }
                     return Flow::Continue;
                 }
-            };
-            if outcome.takes > 1 {
-                jar.host
-                    .note_unknown_game_hook("item_stacked_on_other:several takes");
-                return Flow::Continue;
-            }
-            let carried = if carried_after == click.carried {
-                StackResult::Keep
-            } else {
-                StackResult::Set(carried_after)
-            };
-            let mut streams = std::collections::BTreeSet::new();
-            crate::sound::apply_server_sounds(host, &sounds, &mut streams, |reason| {
-                jar.host.note_unknown_game_hook(reason);
+                if outcome.takes > 1 {
+                    jar.host
+                        .note_unknown_game_hook("item_stacked_on_other:several takes");
+                    return Flow::Continue;
+                }
+                // Never write back a slot or the cursor when Java didn't change it: compare with
+                // what was read from the slot/cursor, and send Keep.
+                let clicked = if outcome.takes == 0 && outcome.slot_unchanged {
+                    ClickedStackResult::Keep
+                } else {
+                    let Some(slot_after) =
+                        game_stack(&*host, &native, &mut jar.host, &outcome.slot)
+                    else {
+                        jar.host
+                            .note_unknown_game_hook("item_stacked_on_other:unconvertible stack");
+                        return Flow::Continue;
+                    };
+                    match (outcome.takes, &slot_before) {
+                        (0, before) if *before == slot_after => ClickedStackResult::Keep,
+                        (0, _) => ClickedStackResult::Set(slot_after),
+                        // `Slot.safeTake` on a plain inventory slot splits its stack: what is left
+                        // is the same item and components, fewer of them.
+                        (_, Some(before))
+                            if slot_after.as_ref().is_none_or(|after| {
+                                after.same_item(before)
+                                    && after.same_components(before)
+                                    && after.count() < before.count()
+                            }) =>
+                        {
+                            let left = slot_after.as_ref().map_or(0, ItemStack::count);
+                            ClickedStackResult::Take(before.count() - left)
+                        }
+                        _ => {
+                            jar.host
+                                .note_unknown_game_hook("item_stacked_on_other:take shape");
+                            return Flow::Continue;
+                        }
+                    }
+                };
+                let carried = if outcome.carried_unchanged {
+                    StackResult::Keep
+                } else {
+                    let Some(carried_after) =
+                        game_stack(&*host, &native, &mut jar.host, &outcome.carried)
+                    else {
+                        jar.host
+                            .note_unknown_game_hook("item_stacked_on_other:unconvertible stack");
+                        return Flow::Continue;
+                    };
+                    if carried_after == click.carried {
+                        StackResult::Keep
+                    } else {
+                        StackResult::Set(carried_after)
+                    }
+                };
+                if !sounds.is_empty() {
+                    pending_sounds = Some(PendingClickSounds {
+                        jar_index,
+                        jar_id,
+                        sounds,
+                        sound_streams,
+                    });
+                }
+                result.carried = carried;
+                result.clicked = clicked;
+                result.handled = outcome.handled;
+                if outcome.handled {
+                    Flow::Cancel
+                } else {
+                    Flow::Continue
+                }
+            })();
+            guard.jars[jar_index].host.end_transient_rows(scope);
+            (flow, pending_sounds)
+        };
+        if let Some(pending) = pending_sounds {
+            let mut streams = pending.sound_streams;
+            let streams_before = streams.len();
+            let mut sound_counted = Vec::new();
+            crate::sound::apply_server_sounds(host, &pending.sounds, &mut streams, |reason| {
+                sound_counted.push(reason.to_owned());
             });
-            crate::sound::share_unknown_sound_streams([&mut jar.host], &streams);
-            result.carried = carried;
-            result.clicked = clicked;
-            result.handled = outcome.handled;
-            if outcome.handled {
-                Flow::Cancel
-            } else {
-                Flow::Continue
+            if !sound_counted.is_empty() || streams.len() != streams_before {
+                let mut guard = self.lock();
+                if let Some(jar) = guard
+                    .jars
+                    .get_mut(pending.jar_index)
+                    .filter(|jar| jar.row.id == pending.jar_id)
+                {
+                    for reason in &sound_counted {
+                        jar.host.note_unknown_game_hook(reason);
+                    }
+                    crate::sound::share_unknown_sound_streams([&mut jar.host], &streams);
+                }
             }
-        })();
-        guard.jars[jar_index].host.end_transient_rows(scope);
+        }
         flow
     }
 
     /// `use_item` on the server: `player` uses `stack`, held in `hand`.
+    ///
+    /// Java runs under the state lock and collects its effects (held stack update, drops, stats,
+    /// sounds). The lock is dropped before any mutating host call runs: `player.drop_stack` spawns
+    /// the item entity synchronously on the same thread and dispatches `Hooks::entity_join_level`,
+    /// which takes the same state lock.
     pub(crate) fn server_use(
         &self,
         host: &mut dyn ServerHost,
@@ -549,259 +676,358 @@ impl JavaItemPart {
         hand: Hand,
         stack: &ItemStack,
     ) -> Option<InteractionResult> {
-        let mut guard = self.lock();
-        let (jar_index, item, owner) = jar_item(&guard, &self.item_id, ItemHook::Use)?;
-        let incarnation = guard.lives.get(&player_uuid).copied();
-        // Every stack this builds (the inventory, the carried stack, the held one, drops) is
-        // turned into a game stack before the handler returns: none outlives the scope, so
-        // what the call made is collectable once it closes (a long-lived server ran up one
-        // permanent row per stack per click before). While it is open its rows are roots.
-        let scope = guard.jars[jar_index].host.begin_transient_rows();
-        let answer = (|| -> Option<InteractionResult> {
-            let jar = &mut guard.jars[jar_index];
-            let label = format!("{} item {} use", jar.row.id, self.item_id);
-            let Some(player) = host.player(player_uuid) else {
-                jar.host.note_unknown_game_hook("use_item:no player");
-                return None;
-            };
-            let native = Arc::clone(&jar.jar);
-            let jar_types = persistent_jar_types(&jar.host);
-            let container = crate::block_use::player_container(&*host, Some(player));
-            let mut read = crate::live_menu::read_player(
-                &*host,
-                &mut jar.host,
-                incarnation,
-                player,
-                None,
-                container,
-                None,
-            );
-            let Some(held) = java_stack(
-                &*host,
-                &native,
-                &mut jar.host,
-                Some(item.clone()),
-                stack,
-                &jar_types,
-            ) else {
-                jar.host
-                    .note_unknown_game_hook("use_item:held stack unreadable");
-                return None;
-            };
-            let hand_name = match hand {
-                Hand::Main => {
-                    read.data.main_hand = Some(held.clone());
-                    "MAIN_HAND"
-                }
-                Hand::Off => {
-                    read.data.off_hand = Some(held.clone());
-                    "OFF_HAND"
-                }
-            };
-            let dimension = read.dimension.clone()?;
-            let level = player.entity().level(&*host);
-            jar.host.set_host_deferred_server_sound_seeds(true);
-            let budget = ExecutionBudget::within(JAR_BUDGET);
-            let request = ItemUse {
-                hand: hand_name.to_owned(),
-            };
-            let outcome =
-                run_with_level_random(host, level, &dimension, &mut jar.host, |jar_host| {
-                    caught(&label, || {
-                        native.item_use(
-                            jar_host,
-                            &read.data,
-                            &dimension,
-                            &read.facts,
-                            &item,
-                            &owner,
-                            &request,
-                            &budget,
-                        )
-                    })
-                });
-            jar.host.set_host_deferred_server_sound_seeds(false);
-            jar.host.clear_entity_sound_facts();
-            let sounds = jar.host.take_sound_records();
-            // A use whose Java failed is refused (`FAIL`: nothing happens, the click ends), never
-            // handed to Sunrise's vanilla `Item.use` as if the item had no override.
-            const FAILED: &str = "use_item:failed";
-            let no_counts = std::collections::BTreeMap::new();
-            let outcome = match outcome {
-                Ok(Ok(outcome)) => outcome,
-                Ok(Err(error)) => {
-                    note_failed(jar, &label, FAILED, &error.to_string(), &no_counts);
-                    return Some(InteractionResult::Fail);
-                }
-                Err(panic) => {
+        enum PreparedUseEffect {
+            Drop {
+                stack: ItemStack,
+                thrower: bool,
+                stats_when_dropped: Vec<(String, String, i32)>,
+            },
+            AwardStat {
+                stat_type: String,
+                value: String,
+                amount: i32,
+            },
+        }
+        struct PreparedUse {
+            jar_index: usize,
+            jar_id: String,
+            player: PlayerRef,
+            result: InteractionResult,
+            set_hand: Option<Option<ItemStack>>,
+            effects: Vec<PreparedUseEffect>,
+            sounds: Vec<runtime::SoundRecord>,
+            sound_streams: std::collections::BTreeSet<String>,
+        }
+        enum UsePlan {
+            Immediate(Option<InteractionResult>),
+            Apply(PreparedUse),
+        }
+
+        let plan = {
+            let mut guard = self.lock();
+            let (jar_index, item, owner) = jar_item(&guard, &self.item_id, ItemHook::Use)?;
+            let incarnation = guard.lives.get(&player_uuid).copied();
+            // Every stack this builds (the inventory, the carried stack, the held one, drops) is
+            // turned into a game stack before the handler returns: none outlives the scope, so
+            // what the call made is collectable once it closes (a long-lived server ran up one
+            // permanent row per stack per click before). While it is open its rows are roots.
+            let scope = guard.jars[jar_index].host.begin_transient_rows();
+            let plan = (|| -> UsePlan {
+                let jar = &mut guard.jars[jar_index];
+                let jar_id = jar.row.id.clone();
+                let label = format!("{jar_id} item {} use", self.item_id);
+                let Some(player) = host.player(player_uuid) else {
+                    jar.host.note_unknown_game_hook("use_item:no player");
+                    return UsePlan::Immediate(None);
+                };
+                let native = Arc::clone(&jar.jar);
+                let jar_types = persistent_jar_types(&jar.host);
+                let container = crate::block_use::player_container(&*host, Some(player));
+                let mut read = crate::live_menu::read_player(
+                    &*host,
+                    &mut jar.host,
+                    incarnation,
+                    player,
+                    None,
+                    container,
+                    None,
+                );
+                let Some(held) = java_stack(
+                    &*host,
+                    &native,
+                    &mut jar.host,
+                    Some(item.clone()),
+                    stack,
+                    &jar_types,
+                ) else {
+                    jar.host
+                        .note_unknown_game_hook("use_item:held stack unreadable");
+                    return UsePlan::Immediate(None);
+                };
+                let hand_name = match hand {
+                    Hand::Main => {
+                        read.data.main_hand = Some(held.clone());
+                        "MAIN_HAND"
+                    }
+                    Hand::Off => {
+                        read.data.off_hand = Some(held.clone());
+                        "OFF_HAND"
+                    }
+                };
+                let Some(dimension) = read.dimension.clone() else {
+                    return UsePlan::Immediate(None);
+                };
+                let level = player.entity().level(&*host);
+                let sound_streams = jar.host.unknown_sound_streams().clone();
+                jar.host.set_host_deferred_server_sound_seeds(true);
+                let budget = ExecutionBudget::within(JAR_BUDGET);
+                let request = ItemUse {
+                    hand: hand_name.to_owned(),
+                };
+                let outcome =
+                    run_with_level_random(host, level, &dimension, &mut jar.host, |jar_host| {
+                        caught(&label, || {
+                            native.item_use(
+                                jar_host,
+                                &read.data,
+                                &dimension,
+                                &read.facts,
+                                &item,
+                                &owner,
+                                &request,
+                                &budget,
+                            )
+                        })
+                    });
+                jar.host.set_host_deferred_server_sound_seeds(false);
+                jar.host.clear_entity_sound_facts();
+                let sounds = jar.host.take_sound_records();
+                // A use whose Java failed is refused (`FAIL`: nothing happens, the click ends),
+                // never handed to Sunrise's vanilla `Item.use` as if the item had no override.
+                const FAILED: &str = "use_item:failed";
+                let no_counts = std::collections::BTreeMap::new();
+                let outcome = match outcome {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(error)) => {
+                        note_failed(jar, &label, FAILED, &error.to_string(), &no_counts);
+                        return UsePlan::Immediate(Some(InteractionResult::Fail));
+                    }
+                    Err(panic) => {
+                        note_failed(
+                            jar,
+                            &label,
+                            FAILED,
+                            &format!("panicked: {panic}"),
+                            &no_counts,
+                        );
+                        return UsePlan::Immediate(Some(InteractionResult::Fail));
+                    }
+                };
+                if let Some(failure) = &outcome.report.failure {
                     note_failed(
                         jar,
                         &label,
                         FAILED,
-                        &format!("panicked: {panic}"),
-                        &no_counts,
+                        failure,
+                        &outcome.report.unknown_host_calls,
                     );
-                    return Some(InteractionResult::Fail);
+                    return UsePlan::Immediate(Some(InteractionResult::Fail));
                 }
-            };
-            if let Some(failure) = &outcome.report.failure {
-                note_failed(
-                    jar,
-                    &label,
-                    FAILED,
-                    failure,
-                    &outcome.report.unknown_host_calls,
-                );
-                return Some(InteractionResult::Fail);
-            }
-            // Rule (b) of the level-stream lend, as the altar's take settled it (#665): a use whose
-            // only counted calls are lent level-stream draws, the first of them after an effect
-            // that may draw the stream (a bundle's `use` drops its contents, then draws its
-            // drop-contents sound's pitch), stops at that draw. What Java did before it still
-            // applies (the held stack, the drops and their stats, in order), the draw counts, and
-            // nothing after it is carried out: no sound, no later stat, no result (`FAIL` ends the
-            // click: the use did act, so the other hand isn't tried). Only when the held stack is
-            // the one it was at the draw; otherwise, as for any other counted call, a counted
-            // call's placeholder may have steered it: vanilla's answer stands and nothing Java
-            // recorded is carried out.
-            let stop = if outcome.report.exact() {
-                None
-            } else {
-                crate::level_random::note_call_counts(
-                    &mut jar.row,
-                    &label,
-                    &outcome.report.unknown_host_calls,
-                );
-                let only_draws = outcome
-                    .report
-                    .unknown_host_calls
-                    .keys()
-                    .all(|key| crate::runtime::is_counted_level_stream_draw(key));
-                match &outcome.counted_draw_stop {
-                    Some(stop) if only_draws && stop.first_counted && stop.held_unchanged => {
-                        log::info!(
-                            "{LOG}: {}: {label} stopped at its first counted level-stream draw: the {} effect(s) and {} sound(s) before it apply, the {} after it don't",
-                            jar.row.id,
-                            stop.effects,
-                            stop.sounds,
-                            outcome.effects.len().saturating_sub(stop.effects)
-                                + sounds.len().saturating_sub(stop.sounds),
-                        );
-                        Some(stop.clone())
-                    }
-                    _ => return None,
-                }
-            };
-            let effects = match &stop {
-                Some(stop) => &outcome.effects[..stop.effects.min(outcome.effects.len())],
-                None => &outcome.effects[..],
-            };
-            let sounds = match &stop {
-                Some(stop) => &sounds[..stop.sounds.min(sounds.len())],
-                None => &sounds[..],
-            };
-            let result = match &stop {
-                Some(_) => Some(InteractionResult::Fail),
-                None => outcome
-                    .result
-                    .as_ref()
-                    .map(crate::block_use::map_interaction_result),
-            };
-            let Some(result) = result else {
-                // `use` returned null or an `InteractionResult` the runtime doesn't model.
-                jar.host
-                    .note_unknown_game_hook("use_item:unmodelled interaction result");
-                log::warn!(
-                    "{LOG}: {}: {label} returned null or an unmodelled InteractionResult",
-                    jar.row.id
-                );
-                return None;
-            };
-            // The held stack Java changed in place (`ItemStack.set`, `shrink`).
-            if let Some(held_after) = outcome
-                .held
-                .as_ref()
-                .and_then(|value| game_stack(&*host, &native, &mut jar.host, value))
-                && held_after.as_ref() != Some(stack)
-                && !host.living(player.entity()).is_some_and(|living| {
-                    living
-                        .set_hand_item(host, hand, held_after)
-                        .unwrap_or(false)
-                })
-            {
-                jar.host
-                    .note_unknown_game_hook("use_item:held stack write refused");
-            }
-            for effect in effects {
-                match effect {
-                    LiveMenuEffect::Drop {
-                        stack: components,
-                        retain_ownership,
-                        prediction,
-                    } => {
-                        // `ServerPlayer.drop` as the runtime spells it out (`player_drop_plan`).
-                        // `drop_stack`'s `thrown_by_player` is `createItemStackToDrop`'s
-                        // `retainOwnership` (Sunrise's `drop_stack_from_eyes` names the player as
-                        // thrower); it awards no stats, so the plan's are awarded here once the item
-                        // entity is in the world, in `ServerPlayer.drop`'s order.
-                        let plan = crate::runtime::player_drop_plan(
-                            components,
-                            *retain_ownership,
-                            *prediction,
-                        );
-                        // The SDK's drop takes no `Prediction`: whether the swing reaches the
-                        // dropping player's own client (`swing(.., updateSelf)`) isn't in its
-                        // contract, so that part counts.
-                        jar.host.note_unknown_game_hook("use_item:drop prediction");
-                        let stack =
-                            crate::client::api_stack_from_components(&*host, components.clone());
-                        let Some(stack) = stack else {
-                            jar.host
-                                .note_unknown_game_hook("use_item:drop unconvertible");
-                            continue;
-                        };
-                        // `Ok(None)`: the item entity is in the world; a stack handed back was refused
-                        // (vanilla's `Player.drop` answered `null`: no stats).
-                        if !matches!(player.drop_stack(host, stack, plan.thrower), Ok(None)) {
-                            jar.host.note_unknown_game_hook("use_item:drop refused");
-                            continue;
-                        }
-                        for (stat_type, value, amount) in &plan.stats_when_dropped {
-                            let awarded = crate::live_menu::stat_type_of(stat_type).is_some_and(
-                                |stat_type| player.award_stat(host, stat_type, value, *amount),
+                // Rule (b) of the level-stream lend, as the altar's take settled it (#665): a use
+                // whose only counted calls are lent level-stream draws, the first of them after an
+                // effect that may draw the stream (a bundle's `use` drops its contents, then draws
+                // its drop-contents sound's pitch), stops at that draw. What Java did before it
+                // still applies (the held stack, the drops and their stats, in order), the draw
+                // counts, and nothing after it is carried out: no sound, no later stat, no result
+                // (`FAIL` ends the click: the use did act, so the other hand isn't tried). Only
+                // when the held stack is the one it was at the draw; otherwise, as for any other
+                // counted call, a counted call's placeholder may have steered it: vanilla's answer
+                // stands and nothing Java recorded is carried out.
+                let stop = if outcome.report.exact() {
+                    None
+                } else {
+                    crate::level_random::note_call_counts(
+                        &mut jar.row,
+                        &label,
+                        &outcome.report.unknown_host_calls,
+                    );
+                    let only_draws = outcome
+                        .report
+                        .unknown_host_calls
+                        .keys()
+                        .all(|key| crate::runtime::is_counted_level_stream_draw(key));
+                    match &outcome.counted_draw_stop {
+                        Some(stop) if only_draws && stop.first_counted && stop.held_unchanged => {
+                            log::info!(
+                                "{LOG}: {}: {label} stopped at its first counted level-stream draw: the {} effect(s) and {} sound(s) before it apply, the {} after it don't",
+                                jar.row.id,
+                                stop.effects,
+                                stop.sounds,
+                                outcome.effects.len().saturating_sub(stop.effects)
+                                    + sounds.len().saturating_sub(stop.sounds),
                             );
-                            if !awarded {
-                                jar.host
-                                    .note_unknown_game_hook("use_item:drop stat refused");
-                            }
+                            Some(stop.clone())
                         }
+                        _ => return UsePlan::Immediate(None),
                     }
-                    LiveMenuEffect::AwardStat {
-                        stat_type,
-                        value,
-                        amount,
-                    } => {
+                };
+                let effects = match &stop {
+                    Some(stop) => &outcome.effects[..stop.effects.min(outcome.effects.len())],
+                    None => &outcome.effects[..],
+                };
+                let sounds = match &stop {
+                    Some(stop) => sounds[..stop.sounds.min(sounds.len())].to_vec(),
+                    None => sounds,
+                };
+                let result = match &stop {
+                    Some(_) => Some(InteractionResult::Fail),
+                    None => outcome
+                        .result
+                        .as_ref()
+                        .map(crate::block_use::map_interaction_result),
+                };
+                let Some(result) = result else {
+                    // `use` returned null or an `InteractionResult` the runtime doesn't model.
+                    jar.host
+                        .note_unknown_game_hook("use_item:unmodelled interaction result");
+                    log::warn!(
+                        "{LOG}: {}: {label} returned null or an unmodelled InteractionResult",
+                        jar.row.id
+                    );
+                    return UsePlan::Immediate(None);
+                };
+                // The held stack Java changed in place (`ItemStack.set`, `shrink`).
+                let set_hand = outcome
+                    .held
+                    .as_ref()
+                    .and_then(|value| game_stack(&*host, &native, &mut jar.host, value))
+                    .filter(|held_after| held_after.as_ref() != Some(stack));
+                let mut prepared_effects = Vec::with_capacity(effects.len());
+                for effect in effects {
+                    match effect {
+                        LiveMenuEffect::Drop {
+                            stack: components,
+                            retain_ownership,
+                            prediction,
+                        } => {
+                            // `ServerPlayer.drop` as the runtime spells it out
+                            // (`player_drop_plan`). `drop_stack`'s `thrown_by_player` is
+                            // `createItemStackToDrop`'s `retainOwnership` (Sunrise's
+                            // `drop_stack_from_eyes` names the player as thrower); it awards no
+                            // stats, so the plan's are awarded here once the item entity is in the
+                            // world, in `ServerPlayer.drop`'s order.
+                            let plan = crate::runtime::player_drop_plan(
+                                components,
+                                *retain_ownership,
+                                *prediction,
+                            );
+                            // The SDK's drop takes no `Prediction`: whether the swing reaches the
+                            // dropping player's own client (`swing(.., updateSelf)`) isn't in its
+                            // contract, so that part counts.
+                            jar.host.note_unknown_game_hook("use_item:drop prediction");
+                            let Some(stack) = crate::client::api_stack_from_components(
+                                &*host,
+                                components.clone(),
+                            ) else {
+                                jar.host
+                                    .note_unknown_game_hook("use_item:drop unconvertible");
+                                continue;
+                            };
+                            prepared_effects.push(PreparedUseEffect::Drop {
+                                stack,
+                                thrower: plan.thrower,
+                                stats_when_dropped: plan.stats_when_dropped,
+                            });
+                        }
+                        LiveMenuEffect::AwardStat {
+                            stat_type,
+                            value,
+                            amount,
+                        } => {
+                            prepared_effects.push(PreparedUseEffect::AwardStat {
+                                stat_type: stat_type.clone(),
+                                value: value.clone(),
+                                amount: *amount,
+                            });
+                        }
+                        _ => jar.host.note_unknown_game_hook("use_item:side effect"),
+                    }
+                }
+                UsePlan::Apply(PreparedUse {
+                    jar_index,
+                    jar_id,
+                    player,
+                    result,
+                    set_hand,
+                    effects: prepared_effects,
+                    sounds,
+                    sound_streams,
+                })
+            })();
+            guard.jars[jar_index].host.end_transient_rows(scope);
+            plan
+        };
+
+        let prepared = match plan {
+            UsePlan::Immediate(answer) => return answer,
+            UsePlan::Apply(prepared) => prepared,
+        };
+
+        // Apply every mutating host effect without holding the state lock so synchronous hooks
+        // such as `entity_join_level` (fired inside `drop_stack`) can lock state without
+        // deadlocking.
+        let mut post_counted: Vec<&'static str> = Vec::new();
+        if let Some(held_after) = prepared.set_hand
+            && !host.living(prepared.player.entity()).is_some_and(|living| {
+                living
+                    .set_hand_item(host, hand, held_after)
+                    .unwrap_or(false)
+            })
+        {
+            post_counted.push("use_item:held stack write refused");
+        }
+        for effect in prepared.effects {
+            match effect {
+                PreparedUseEffect::Drop {
+                    stack,
+                    thrower,
+                    stats_when_dropped,
+                } => {
+                    // `Ok(None)`: the item entity is in the world; a stack handed back was refused
+                    // (vanilla's `Player.drop` answered `null`: no stats).
+                    if !matches!(prepared.player.drop_stack(host, stack, thrower), Ok(None)) {
+                        post_counted.push("use_item:drop refused");
+                        continue;
+                    }
+                    for (stat_type, value, amount) in &stats_when_dropped {
                         let awarded =
                             crate::live_menu::stat_type_of(stat_type).is_some_and(|stat_type| {
-                                player.award_stat(host, stat_type, value, *amount)
+                                prepared.player.award_stat(host, stat_type, value, *amount)
                             });
                         if !awarded {
-                            jar.host
-                                .note_unknown_game_hook("use_item:award stat refused");
+                            post_counted.push("use_item:drop stat refused");
                         }
                     }
-                    _ => jar.host.note_unknown_game_hook("use_item:side effect"),
+                }
+                PreparedUseEffect::AwardStat {
+                    stat_type,
+                    value,
+                    amount,
+                } => {
+                    let awarded =
+                        crate::live_menu::stat_type_of(&stat_type).is_some_and(|stat_type| {
+                            prepared.player.award_stat(host, stat_type, &value, amount)
+                        });
+                    if !awarded {
+                        post_counted.push("use_item:award stat refused");
+                    }
                 }
             }
-            let mut streams = std::collections::BTreeSet::new();
-            crate::sound::apply_server_sounds(host, sounds, &mut streams, |reason| {
-                jar.host.note_unknown_game_hook(reason);
-            });
-            crate::sound::share_unknown_sound_streams([&mut jar.host], &streams);
-            Some(result)
-        })();
-        guard.jars[jar_index].host.end_transient_rows(scope);
-        answer
+        }
+        let mut streams = prepared.sound_streams;
+        let streams_before = streams.len();
+        let mut sound_counted = Vec::new();
+        crate::sound::apply_server_sounds(host, &prepared.sounds, &mut streams, |reason| {
+            sound_counted.push(reason.to_owned());
+        });
+        if !post_counted.is_empty() || !sound_counted.is_empty() || streams.len() != streams_before
+        {
+            let mut guard = self.lock();
+            if let Some(jar) = guard
+                .jars
+                .get_mut(prepared.jar_index)
+                .filter(|jar| jar.row.id == prepared.jar_id)
+            {
+                for tag in post_counted {
+                    jar.host.note_unknown_game_hook(tag);
+                }
+                for reason in &sound_counted {
+                    jar.host.note_unknown_game_hook(reason);
+                }
+                crate::sound::share_unknown_sound_streams([&mut jar.host], &streams);
+            }
+        }
+        Some(prepared.result)
     }
 
     /// `item_destroyed` on the server: the item entity `item`, holding `stack`, is destroyed;
