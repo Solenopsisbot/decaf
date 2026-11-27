@@ -11,7 +11,8 @@
 //! * the **`ItemStack`** is the runtime's live stack model (`recipe_models::LiveStack`), with a
 //!   jar's own data component types decoded from, and encoded back to, the NBT the game stores
 //!   through the type's own persistent codec ([`NativeJar::decode_item_component`],
-//!   [`NativeJar::item_stack_components`]);
+//!   [`NativeJar::item_stack_components`]), and a jar item's prototype values the ones its
+//!   `Item.Properties.component` calls set (`jar_components.rs`, the objects themselves);
 //! * the **`Slot`** is a vanilla `Slot` over the player's `Inventory` (`live_menu.rs` runs its
 //!   26.3 bodies): the embedder says which inventory index the clicked slot shows and vouches that
 //!   it is a plain `Slot` (no subclass, no rule a menu part changes);
@@ -372,28 +373,6 @@ impl NativeJar {
         out
     }
 
-    /// The jar data component types this jar registered with a persistent codec
-    /// (`DataComponentType.builder().persistent(codec)...build()` registered into
-    /// `minecraft:data_component_type`): the ones whose values cross to the game as NBT.
-    pub fn jar_component_types(&self, host: &mut StdHost) -> Vec<String> {
-        let ids: Vec<(String, Value)> = host
-            .registrations()
-            .iter()
-            .filter(|entry| entry.registry == "minecraft:data_component_type")
-            .map(|entry| (entry.id.clone(), entry.value.clone()))
-            .collect();
-        let mut out = Vec::new();
-        let _ = self.with_persistent_runtime(host, &[], |rt| {
-            for (id, value) in &ids {
-                if component_codec(rt, value).is_some() && !out.contains(id) {
-                    out.push(id.clone());
-                }
-            }
-            Ok(Value::Void)
-        });
-        out
-    }
-
     /// Decode `nbt`, a value of the jar data component type `component`, with the type's own
     /// persistent codec, as `NbtOps` would. `Ok(None)` (counted) when the type has no codec
     /// Decaf runs, the codec's NBT shape is unknown, or decoding failed.
@@ -465,6 +444,11 @@ impl NativeJar {
         }
         let mut prototype = BTreeMap::new();
         for (id, nbt) in defaults {
+            // The item's own recorded `Item.Properties.component` value answers its prototype
+            // (`recipe_models::prototype_component`): the game's copy isn't decoded over it.
+            if crate::jar_components::recorded_item_default(host, item_id, &id).is_some() {
+                continue;
+            }
             let value = match nbt {
                 None => Some(None),
                 // A vanilla type's value has no codec Decaf runs here: the prototype stays
@@ -598,22 +582,17 @@ fn encode_component<H: Host>(
             .unknown_operand_call(&component_unknown(component, "encode"))?;
         return Ok(None);
     };
-    let json = match crate::dfu_codec::encode_value_json(rt, &codec, value)? {
-        crate::DfuCodecResult::Ok(json) => json,
+    // `codec.encodeStart(NbtOps.INSTANCE, value)` (`dfu_codec::encode_value_nbt`, #671).
+    match crate::dfu_codec::encode_value_nbt(rt, &codec, value)? {
+        crate::DfuCodecResult::Ok(nbt) => Ok(Some(nbt)),
         crate::DfuCodecResult::Error { .. } => {
             rt.host
                 .unknown_operand_call(&component_unknown(component, "encode error"))?;
-            return Ok(None);
+            Ok(None)
         }
-        crate::DfuCodecResult::Unmodelled(_) => return Ok(None),
-    };
-    let nbt = crate::dfu_codec::codec_nbt_shape(&codec)
-        .and_then(|shape| crate::dfu_codec::nbt_from_codec_json(&shape, &json));
-    if nbt.is_none() {
-        rt.host
-            .unknown_operand_call(&component_unknown(component, "encode shape"))?;
+        // Counted by the encode itself (`Codec#encodeStart`).
+        crate::DfuCodecResult::Unmodelled(_) => Ok(None),
     }
-    Ok(nbt)
 }
 
 // ---------------------------------------------------------------------------

@@ -845,6 +845,11 @@ pub(crate) fn prototype_component(
     if item_id == "minecraft:air" || !is_known_item_id(host, item_id) {
         return None;
     }
+    // A jar item's own `Item.Properties.component(jarType, value)`: the object it set.
+    if let Some(value) = crate::runtime::jar_components::recorded_item_default(host, item_id, comp_id) {
+        return value;
+    }
+    // What the game holds for the item, as the item-part bridge read it (`item_parts.rs`).
     if let Some(value) = host
         .recipes
         .game_prototypes

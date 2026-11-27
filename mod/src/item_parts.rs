@@ -83,6 +83,16 @@ fn jar_item(state: &State, item_id: &str, hook: ItemHook) -> Option<(usize, Valu
     })
 }
 
+/// The jar data component types whose values cross as NBT: the ones the jar built and
+/// registered with a persistent codec (`StdHost::jar_component_types`).
+pub(crate) fn persistent_jar_types(host: &StdHost) -> Vec<String> {
+    host.jar_component_types()
+        .into_iter()
+        .filter(|kind| kind.persistent)
+        .map(|kind| kind.id)
+        .collect()
+}
+
 /// The jar-aware runtime stack for a game stack: jar data components decoded by their own codec,
 /// the prototype values of those types and of [`GAME_PROTOTYPE_COMPONENTS`] read from the game.
 pub(crate) fn java_stack(
@@ -258,7 +268,7 @@ impl JavaItemPart {
             return Flow::Continue;
         };
         let native = Arc::clone(&jar.jar);
-        let jar_types = native.jar_component_types(&mut jar.host);
+        let jar_types = persistent_jar_types(&jar.host);
         let container = crate::block_use::player_container(&*host, Some(player));
         let mut read = crate::live_menu::read_player(
             &*host,
@@ -424,7 +434,7 @@ impl JavaItemPart {
             return None;
         };
         let native = Arc::clone(&jar.jar);
-        let jar_types = native.jar_component_types(&mut jar.host);
+        let jar_types = persistent_jar_types(&jar.host);
         let container = crate::block_use::player_container(&*host, Some(player));
         let mut read = crate::live_menu::read_player(
             &*host,
@@ -600,7 +610,7 @@ impl JavaItemPart {
         let jar = &mut guard.jars[jar_index];
         let label = format!("{} item {} onDestroyed", jar.row.id, self.item_id);
         let native = Arc::clone(&jar.jar);
-        let jar_types = native.jar_component_types(&mut jar.host);
+        let jar_types = persistent_jar_types(&jar.host);
         let entity = event.item.entity();
         let (Some(level), Some(position)) = (entity.level(&*host), entity.position(&*host)) else {
             jar.host

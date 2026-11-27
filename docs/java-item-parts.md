@@ -1,9 +1,11 @@
-# Java item parts: a jar `Item`'s own overrides in Sunrise (design, not built)
+# Java item parts: a jar `Item`'s own overrides in Sunrise
 
 Status: design for BUGS-3d34-round2 #2 (Runes' rune pouches act as plain items). Steps 3-6 are
 built (`crates/horizon-native-java/src/item_parts.rs`, `mod/src/item_parts.rs`; tests
 `fixture_item_parts` against a JDK 25 oracle and `fixture_item_parts_runes` on the real jar);
-steps 1-2 and 7-8 are not yet. Bugs #3 (pouch recipes) and #4 (pouch lore) are fixed separately, in the bake and
+steps 1-2 are built by #671 (`jar_components.rs`, `bootstrap_mixins.rs`), whose recorded
+`Item.Properties.component` objects are the item parts' jar-item prototypes; steps 7-8 are not
+yet. Bugs #3 (pouch recipes) and #4 (pouch lore) are fixed separately, in the bake and
 in the runtime's `Item.Properties` model.
 
 ## What the jar defines

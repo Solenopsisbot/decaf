@@ -640,7 +640,7 @@ impl State {
             };
             let item = entry.value.clone();
             let overrides = loaded.jar.item_overrides(&item, &loaded.host);
-            let jar_types = loaded.jar.jar_component_types(&mut loaded.host);
+            let jar_types = crate::item_parts::persistent_jar_types(&loaded.host);
             let Some(value) = crate::item_parts::java_stack(
                 host,
                 &loaded.jar,

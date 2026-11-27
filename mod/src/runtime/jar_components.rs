@@ -125,6 +125,35 @@ impl StdHost {
     }
 }
 
+/// The prototype value of the jar-built type `component` on the jar item `item_id`, as its
+/// `Item.Properties.component(type, value)` call set it: `Some(Some(Some(object)))` for the very
+/// object the jar built (vanilla's `Item.components()` holds that object, so `ItemStack.get`
+/// answers it by identity), `Some(Some(None))` for a `null` (the type removed), `Some(None)`
+/// (unknown: a read counts) for a value the host did not build as an object, and `None` when
+/// the item's builder recorded no such call (the caller's other prototype sources answer).
+pub(crate) fn recorded_item_default(
+    host: &StdHost,
+    item_id: &str,
+    component: &str,
+) -> Option<Option<Option<Value>>> {
+    let item = host
+        .registrations
+        .iter()
+        .rev()
+        .find(|entry| entry.registry == "minecraft:item" && entry.id == item_id)?;
+    let builder = host.item_property_builders.get(expect_ref(&item.value)?)?;
+    let kind =
+        host.registrations.iter().rev().find(|entry| {
+            entry.registry == "minecraft:data_component_type" && entry.id == component
+        })?;
+    let value = builder.get(&format!("{SETTING_PREFIX}{}", expect_ref(&kind.value)?))?;
+    Some(match value.as_str() {
+        "" => Some(None),
+        VALUE_UNKNOWN => None,
+        marker => Some(Some(jar_object::stored_value(marker))),
+    })
+}
+
 impl NativeJar {
     /// Adds each registered item's jar-typed default components to its declaration
     /// (`component:<type id>`, the JSON [`content_json`] gives the value's NBT), encoding each with

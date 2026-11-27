@@ -3681,12 +3681,11 @@ fn encode_value_depth<H: Host>(
 
 /// The NBT shape `NbtOps` gives a value a modelled codec encodes, read from the codec's node
 /// tree alone. A jar's data component value is stored as the NBT its own codec encodes with
-/// `NbtOps` (`DataComponentType.codec()` through the item's `DataComponentPatch` codec); Decaf
-/// runs the codec with its JSON interpreter (`encode_value_json` / `decode_value_json`) and
-/// moves between the two forms through this shape, so every number keeps the tag type
-/// `NbtOps.createInt`/`createByte`/... would give it (`server-26.3.jar`: `createBoolean` is a
-/// `ByteTag`, `createList` and DFU's `ListCodec` builder a `ListTag` through
-/// `GenericListCollector`, a record a `CompoundTag` through `NbtRecordBuilder`).
+/// `NbtOps` (encoded by [`encode_value_nbt`]); Decaf decodes it with its JSON interpreter
+/// (`decode_value_json`) through this shape, which says which tag type each value must have
+/// for `NbtOps` and the JSON reading to agree (`server-26.3.jar`: `createBoolean` is a
+/// `ByteTag`, DFU's `ListCodec` builder a `ListTag` through `GenericListCollector`, a record a
+/// `CompoundTag` through `NbtRecordBuilder`).
 ///
 /// A node kind with no shape here (a dispatch, an `either`, `orElse`, a codec Decaf runs but
 /// cannot type, an `ItemStackTemplate` with components) has none: the caller counts the value
@@ -3827,44 +3826,6 @@ fn map_shape(node: &Value, fields: &mut Vec<(String, NbtShape)>, depth: usize) -
         }
         _ => None,
     }
-}
-
-/// The NBT `NbtOps` builds for `json`, a value the codec of `shape` encoded with the JSON
-/// interpreter. `None` when `json` does not fit `shape` (the caller counts it).
-pub(crate) fn nbt_from_codec_json(shape: &NbtShape, json: &serde_json::Value) -> Option<Nbt> {
-    nbt_from_json_depth(shape, json, 0)
-}
-
-fn nbt_from_json_depth(shape: &NbtShape, json: &serde_json::Value, depth: usize) -> Option<Nbt> {
-    if depth > crate::runtime::java_nbt::MAX_DEPTH {
-        return None;
-    }
-    Some(match shape {
-        NbtShape::Compound(fields) => {
-            let object = json.as_object()?;
-            let mut out = crate::runtime::NbtCompound::new();
-            for (key, value) in object {
-                let (_, field) = fields.iter().find(|(name, _)| name == key)?;
-                out.insert(key.clone(), nbt_from_json_depth(field, value, depth + 1)?);
-            }
-            Nbt::Compound(out)
-        }
-        NbtShape::List(element) => Nbt::List(
-            json.as_array()?
-                .iter()
-                .map(|value| nbt_from_json_depth(element, value, depth + 1))
-                .collect::<Option<_>>()?,
-        ),
-        NbtShape::Bool => Nbt::Byte(i8::from(json.as_bool()?)),
-        NbtShape::Byte => Nbt::Byte(i8::try_from(json.as_i64()?).ok()?),
-        NbtShape::Short => Nbt::Short(i16::try_from(json.as_i64()?).ok()?),
-        NbtShape::Int => Nbt::Int(i32::try_from(json.as_i64()?).ok()?),
-        NbtShape::Long => Nbt::Long(json.as_i64()?),
-        NbtShape::Float => Nbt::Float((json.as_f64()? as f32).to_bits()),
-        NbtShape::Double => Nbt::Double(json.as_f64()?.to_bits()),
-        NbtShape::String => Nbt::String(json.as_str()?.to_owned()),
-        NbtShape::Untyped => return None,
-    })
 }
 
 /// The JSON the codec of `shape` decodes exactly as it would decode `nbt` with `NbtOps`, or

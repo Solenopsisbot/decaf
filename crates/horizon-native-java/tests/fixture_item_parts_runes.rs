@@ -96,15 +96,6 @@ fn facts(inventory: &[Value]) -> MenuPlayerFacts {
     }
 }
 
-/// The pouch's prototype value, as the item's `Item.Properties` sets it and the game stores it
-/// (`{content: [], size_multiplier: 4}` for the small pouch, `CustomBundleContentsComponent.CODEC`).
-fn small_pouch_default() -> Nbt {
-    Nbt::Compound(NbtCompound::from([
-        ("content".to_owned(), Nbt::List(Vec::new())),
-        ("size_multiplier".to_owned(), Nbt::Int(4)),
-    ]))
-}
-
 fn item(host: &StdHost, id: &str) -> Value {
     host.registrations()
         .iter()
@@ -117,26 +108,30 @@ fn item(host: &StdHost, id: &str) -> Value {
 fn run(jar_path: &Path) {
     let jar = NativeJar::from_path(jar_path).expect("load RUNES_JAR");
     let mut host = jar
-        .try_seed_host(StdHost::new().with_game_version("26.3"))
+        // The server's runtime, as the mod seeds a server jar's host (`mod/src/lib.rs`).
+        .try_seed_host(
+            StdHost::new()
+                .with_game_version("26.3")
+                .with_environment_type("SERVER"),
+        )
         .expect("seed Runes host");
+    // The game's bootstrap runs Bundle API's Mixin at the tail of `DataComponents.<clinit>`
+    // (`DataComponentTypesMixin`), which registers its contents type, before any entrypoint.
+    assert_eq!(
+        jar.run_bootstrap_static_injectors(&mut host, &ExecutionBudget::UNBOUNDED),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        host.unknown_host_call_count(),
+        0,
+        "{:?}",
+        host.unknown_host_calls()
+    );
     for entry in jar.discover_entrypoints("main") {
         jar.execute(&entry.class, entry.method.as_deref(), "main", &mut host)
             .expect("run Runes main");
     }
     host.server_player_created(UUID, 1, 0);
-    // Bundle API registers its contents type from a Mixin at the tail of
-    // `DataComponents.<clinit>` (`DataComponentTypesMixin.static_init_TAIL_BundleAPI`), which
-    // the game runs at bootstrap. Registering jar component types with the game is the bridge's
-    // step 1 (`docs/java-item-parts.md`); here the handler runs directly, as the weave would.
-    jar.invoke_method_with_args(
-        "com/github/theredbrain/bundleapi/mixin/registry/DataComponentTypesMixin",
-        "static_init_TAIL_BundleAPI",
-        "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
-        None,
-        &[Value::Ref(None)],
-        &mut host,
-    )
-    .expect("register the contents type");
 
     let pouch_item = item(&host, POUCH);
     let overrides = jar.item_overrides(&pouch_item, &host);
@@ -152,13 +147,17 @@ fn run(jar_path: &Path) {
         Some("net/minecraft/world/item/Item")
     );
     assert!(
-        jar.jar_component_types(&mut host)
-            .contains(&CONTENTS.to_owned()),
+        host.jar_component_types()
+            .iter()
+            .any(|kind| kind.id == CONTENTS && kind.persistent),
         "the contents type has a persistent codec"
     );
 
-    // The game's prototype values for the components the façade asks it about: the pouch's
-    // contents default, and none of the vanilla container components on either item.
+    // The game's prototype values for the components the façade asks it about: none of the
+    // vanilla container components on either item. The pouch's contents default is its own
+    // `Item.Properties.component` object, which the runtime recorded and which answers its
+    // prototype ahead of any game copy: none is handed over here, so the insert below works
+    // only through that recorded object.
     let defaults = |contents: Option<Nbt>| {
         let mut out: Vec<(String, Option<Nbt>)> = GAME_PROTOTYPE_COMPONENTS
             .iter()
@@ -174,7 +173,7 @@ fn run(jar_path: &Path) {
             POUCH,
             1,
             Vec::new(),
-            defaults(Some(small_pouch_default())),
+            defaults(None),
             false,
             Vec::new(),
         )
