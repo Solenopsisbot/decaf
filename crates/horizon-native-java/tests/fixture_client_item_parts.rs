@@ -703,3 +703,75 @@ fn ten_thousand_property_draws_over_a_large_heap_stay_exact_and_fast() {
         .join()
         .unwrap();
 }
+
+/// A client call's answer lives through the store that ends its own invocation: `getTooltipImage`'s
+/// data until `create` takes it, `create`'s component until it is measured. The embedder retains
+/// each only once the call returned, so a collection landing on that store used to free it, and
+/// the next call read a "collected while still reachable" object (#609 round 4, once the draws'
+/// garbage made collections frequent). A thousand makes on a small heap, a fresh stack each in a
+/// transient scope, put collections on every kind of store.
+#[test]
+fn a_client_call_answer_survives_its_own_store() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let fixture = fixture("client_item_parts_answer_roots", MIXINS_JSON);
+            let jar = &fixture.jar;
+            let mut host = client_host(&fixture);
+            let budget = ExecutionBudget::UNBOUNDED;
+            let meter = item(&host, "demo:meter");
+            let owner = jar.item_overrides(&meter, &host).owners[&ItemHook::TooltipImage].clone();
+            let request = ItemStackRequest {
+                item_override: Some(meter.clone()),
+                item_id: "demo:meter".to_owned(),
+                count: 3,
+                ..ItemStackRequest::default()
+            };
+            // The oracle's size line for the meter of three.
+            let lines: Vec<&str> = JAVA25.lines().collect();
+            let at = lines
+                .iter()
+                .position(|line| *line == "tooltip_image count=3 -> present")
+                .unwrap();
+            let expected = lines[at + 1];
+            let counted = host.unknown_host_call_count();
+            for make in 0..1_000 {
+                let size = host.with_transient_rows(|host| {
+                    let stack = jar.build_item_stack(host, request.clone()).unwrap();
+                    let image = jar.item_tooltip_image(host, &meter, &owner, &stack, &budget);
+                    let data = image
+                        .clone()
+                        .exact()
+                        .flatten()
+                        .unwrap_or_else(|| panic!("make {make}: {:?}", image.report));
+                    let created = jar.client_tooltip_component(host, &data, &budget);
+                    host.release(&data);
+                    let component = created
+                        .clone()
+                        .exact()
+                        .unwrap_or_else(|| panic!("make {make}: {:?}", created.report));
+                    host.begin_client_frame(frame(), &[]);
+                    let size = jar.tooltip_component_size(host, &component, &budget);
+                    host.end_client_frame();
+                    host.release(&component);
+                    size.clone()
+                        .exact()
+                        .unwrap_or_else(|| panic!("make {make}: {:?}", size.report))
+                });
+                assert_eq!(
+                    format!("  component width={} height={}", size.width, size.height),
+                    expected,
+                    "make {make}"
+                );
+            }
+            assert_eq!(
+                host.unknown_host_call_count(),
+                counted,
+                "{:?}",
+                host.unknown_host_calls()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

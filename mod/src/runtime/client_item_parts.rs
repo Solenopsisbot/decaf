@@ -64,6 +64,37 @@ pub struct ClientItemOutcome<T> {
     pub report: ItemCallReport,
 }
 
+/// The value of a client call's answer that names jar objects: the result its invocation's store
+/// keeps ([`NativeJar::run_client_item_call`]). Plain answers name none.
+trait AnswerRoot {
+    fn root(&self) -> Value {
+        Value::Void
+    }
+}
+
+impl AnswerRoot for f32 {}
+impl AnswerRoot for TooltipComponentSize {}
+impl AnswerRoot for Vec<DrawOp> {}
+impl AnswerRoot for () {}
+
+impl AnswerRoot for Value {
+    fn root(&self) -> Value {
+        self.clone()
+    }
+}
+
+impl AnswerRoot for Option<Value> {
+    fn root(&self) -> Value {
+        self.clone().unwrap_or(Value::Void)
+    }
+}
+
+impl AnswerRoot for Result<Value, String> {
+    fn root(&self) -> Value {
+        self.clone().unwrap_or(Value::Void)
+    }
+}
+
 impl<T> ClientItemOutcome<T> {
     /// The value, only when the call was exact.
     pub fn exact(self) -> Option<T> {
@@ -131,7 +162,7 @@ impl StdHost {
 
 impl NativeJar {
     /// Run `run` on the persistent client runtime with `roots`, and report its counted calls.
-    fn run_client_item_call<T>(
+    fn run_client_item_call<T: AnswerRoot>(
         &self,
         host: &mut StdHost,
         roots: &[Value],
@@ -142,9 +173,13 @@ impl NativeJar {
             host.unknown_host_calls().into_iter().collect();
         let mark = host.call_log_mark();
         let mut out = None;
+        // The answer is handed back as the invocation's result, so the store that ends it keeps
+        // what the answer names: the caller retains a value only after this returns, and a
+        // collection in that store would otherwise free the object it was handed (a tooltip
+        // image's data, a client component: #609 round 4, seen once draws collected garbage).
         let result = self.with_persistent_runtime_with_budget(host, roots, budget, |rt| {
             out = run(rt)?;
-            Ok(Value::Void)
+            Ok(out.as_ref().map_or(Value::Void, AnswerRoot::root))
         });
         host.rewind_call_log(mark);
         let (unknown_host_calls, unknown_host_call_count) =

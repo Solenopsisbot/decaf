@@ -574,4 +574,72 @@ fn run(jar_path: &Path) {
     );
     assert_eq!(host.item_stack_cache_counts(), (1, 1_999, 1));
     assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+
+    // Its tooltip, made as the bridge makes it on every frame it shows: one transient scope over
+    // the stack, `getTooltipImage`, `create` and every font pass of `tooltip_image_with_font`
+    // (the probes it rewinds included). Each make answers the first's size and draws, nothing
+    // counts, and the rows the passes made don't outlive them.
+    // A partly filled pouch draws counts only; an empty one wraps its description with
+    // `Font.split`, which the passes ask the game's font about (a probe rewound each make).
+    let empty_request = ItemStackRequest {
+        patch: Vec::new(),
+        named_prototypes: Vec::new(),
+        ..request.clone()
+    };
+    let mut first: [Option<(i32, i32, Vec<String>)>; 2] = [None, None];
+    let mut probed = false;
+    for make in 0..200 {
+        let request = if make % 2 == 0 {
+            &request
+        } else {
+            &empty_request
+        };
+        let (component, image) = host.with_transient_rows(|host| {
+            let stack = jar
+                .reusable_item_stack(host, request.clone())
+                .expect("pouch stack");
+            let component = make_component(host, &stack);
+            let image = jar.tooltip_image_with_font(
+                host,
+                &component,
+                &answered_frame,
+                8,
+                &mut game_font,
+                &budget,
+            );
+            (component, image)
+        });
+        let image = image
+            .unwrap_or_else(|| panic!("make {make}: no image: {:?}", host.unknown_host_calls()));
+        probed |= image.runs > 1;
+        let made = (
+            image.size.width,
+            image.size.height,
+            image.draws.iter().map(print).collect::<Vec<_>>(),
+        );
+        match &first[make % 2] {
+            None => first[make % 2] = Some(made),
+            Some(first) => assert_eq!(&made, first, "make {make}"),
+        }
+        host.release(&component);
+    }
+    assert!(probed, "the font passes ran (a probe was rewound)");
+    eprintln!(
+        "200 pouch tooltip makes: cache {:?}; rows {:?}; fields {}",
+        host.item_stack_cache_counts(),
+        host.recipe_row_counts(),
+        host.resident_heap().instance_fields()
+    );
+    assert_eq!(
+        host.unknown_host_call_count(),
+        counted,
+        "{:?}",
+        host.unknown_host_calls()
+    );
+    assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+    assert!(
+        host.recipe_row_counts().0 <= 2048,
+        "{:?}",
+        host.recipe_row_counts()
+    );
 }
