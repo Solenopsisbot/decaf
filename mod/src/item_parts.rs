@@ -289,7 +289,7 @@ impl ItemPart for JavaItemPart {
     }
 
     fn item_destroyed(&self, host: &mut dyn ServerHost, event: &mut ItemDestroyedEvent<'_>) {
-        self.server_destroyed(host, event);
+        self.server_destroyed(host, event.item, event.stack, event.drops);
     }
 
     fn tooltip_image(
@@ -626,23 +626,60 @@ impl JavaItemPart {
             );
             return Some(InteractionResult::Fail);
         }
-        if !outcome.report.exact() {
-            // A counted call's placeholder may have steered it: vanilla's answer stands and
-            // nothing Java recorded is carried out. (A bundle's drop-contents sound, drawn
-            // after its drops, is exact: a drop draws nothing of the level stream,
-            // `live_menu::draws_no_level_random`.)
+        // Rule (b) of the level-stream lend, as the altar's take settled it (#665): a use whose
+        // only counted calls are lent level-stream draws, the first of them after an effect
+        // that may draw the stream (a bundle's `use` drops its contents, then draws its
+        // drop-contents sound's pitch), stops at that draw. What Java did before it still
+        // applies (the held stack, the drops and their stats, in order), the draw counts, and
+        // nothing after it is carried out: no sound, no later stat, no result (`FAIL` ends the
+        // click: the use did act, so the other hand isn't tried). Only when the held stack is
+        // the one it was at the draw; otherwise, as for any other counted call, a counted
+        // call's placeholder may have steered it: vanilla's answer stands and nothing Java
+        // recorded is carried out.
+        let stop = if outcome.report.exact() {
+            None
+        } else {
             crate::level_random::note_call_counts(
                 &mut jar.row,
                 &label,
                 &outcome.report.unknown_host_calls,
             );
-            return None;
-        }
-        let Some(result) = outcome
-            .result
-            .as_ref()
-            .map(crate::block_use::map_interaction_result)
-        else {
+            let only_draws = outcome
+                .report
+                .unknown_host_calls
+                .keys()
+                .all(|key| crate::runtime::is_counted_level_stream_draw(key));
+            match &outcome.counted_draw_stop {
+                Some(stop) if only_draws && stop.first_counted && stop.held_unchanged => {
+                    log::info!(
+                        "{LOG}: {}: {label} stopped at its first counted level-stream draw: the {} effect(s) and {} sound(s) before it apply, the {} after it don't",
+                        jar.row.id,
+                        stop.effects,
+                        stop.sounds,
+                        outcome.effects.len().saturating_sub(stop.effects)
+                            + sounds.len().saturating_sub(stop.sounds),
+                    );
+                    Some(stop.clone())
+                }
+                _ => return None,
+            }
+        };
+        let effects = match &stop {
+            Some(stop) => &outcome.effects[..stop.effects.min(outcome.effects.len())],
+            None => &outcome.effects[..],
+        };
+        let sounds = match &stop {
+            Some(stop) => &sounds[..stop.sounds.min(sounds.len())],
+            None => &sounds[..],
+        };
+        let result = match &stop {
+            Some(_) => Some(InteractionResult::Fail),
+            None => outcome
+                .result
+                .as_ref()
+                .map(crate::block_use::map_interaction_result),
+        };
+        let Some(result) = result else {
             // `use` returned null or an `InteractionResult` the runtime doesn't model.
             jar.host
                 .note_unknown_game_hook("use_item:unmodelled interaction result");
@@ -667,7 +704,7 @@ impl JavaItemPart {
             jar.host
                 .note_unknown_game_hook("use_item:held stack write refused");
         }
-        for effect in &outcome.effects {
+        for effect in effects {
             match effect {
                 LiveMenuEffect::Drop {
                     stack: components,
@@ -730,16 +767,26 @@ impl JavaItemPart {
             }
         }
         let mut streams = std::collections::BTreeSet::new();
-        crate::sound::apply_server_sounds(host, &sounds, &mut streams, |reason| {
+        crate::sound::apply_server_sounds(host, sounds, &mut streams, |reason| {
             jar.host.note_unknown_game_hook(reason);
         });
         crate::sound::share_unknown_sound_streams([&mut jar.host], &streams);
         Some(result)
     }
 
-    fn server_destroyed(&self, host: &mut dyn ServerHost, event: &mut ItemDestroyedEvent<'_>) {
+    /// `item_destroyed` on the server: the item entity `item`, holding `stack`, is destroyed;
+    /// `drops` is Sunrise's baseline of what it spills, which the item's own `onDestroyed`
+    /// replaces.
+    pub(crate) fn server_destroyed(
+        &self,
+        host: &mut dyn ServerHost,
+        item: mod_api::ItemEntityRef,
+        stack: &ItemStack,
+        drops: &mut Vec<ItemStack>,
+    ) {
         let mut guard = self.lock();
-        let Some((jar_index, item, owner)) = jar_item(&guard, &self.item_id, ItemHook::Destroyed)
+        let Some((jar_index, item_value, owner)) =
+            jar_item(&guard, &self.item_id, ItemHook::Destroyed)
         else {
             return;
         };
@@ -747,7 +794,7 @@ impl JavaItemPart {
         let label = format!("{} item {} onDestroyed", jar.row.id, self.item_id);
         let native = Arc::clone(&jar.jar);
         let jar_types = persistent_jar_types(&jar.host);
-        let entity = event.item.entity();
+        let entity = item.entity();
         let (Some(level), Some(position)) = (entity.level(&*host), entity.position(&*host)) else {
             jar.host
                 .note_unknown_game_hook("item_destroyed:entity unreadable");
@@ -757,8 +804,8 @@ impl JavaItemPart {
             &*host,
             &native,
             &mut jar.host,
-            Some(item.clone()),
-            event.stack,
+            Some(item_value.clone()),
+            stack,
             &jar_types,
         ) else {
             jar.host
@@ -772,7 +819,7 @@ impl JavaItemPart {
         };
         let budget = ExecutionBudget::within(JAR_BUDGET);
         let outcome = caught(&label, || {
-            native.item_destroyed(&mut jar.host, &item, &owner, &request, &budget)
+            native.item_destroyed(&mut jar.host, &item_value, &owner, &request, &budget)
         });
         // A failed `onDestroyed` leaves Sunrise's vanilla container baseline in place (the
         // stacks the item's vanilla container component holds), counted and logged: an item
@@ -816,10 +863,10 @@ impl JavaItemPart {
         }
         // The drops Java spawned replace the vanilla container baseline Sunrise filled in: the
         // jar's `onDestroyed` is the item's, and it spawned exactly these.
-        let mut drops = Vec::with_capacity(outcome.drops.len());
+        let mut spilled = Vec::with_capacity(outcome.drops.len());
         for value in &outcome.drops {
             match game_stack(&*host, &native, &mut jar.host, value) {
-                Some(Some(stack)) => drops.push(stack),
+                Some(Some(stack)) => spilled.push(stack),
                 Some(None) => {}
                 None => {
                     jar.host
@@ -828,6 +875,6 @@ impl JavaItemPart {
                 }
             }
         }
-        *event.drops = drops;
+        *drops = spilled;
     }
 }

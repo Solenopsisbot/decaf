@@ -223,9 +223,9 @@ pub use client_item_parts::{
 };
 mod item_parts;
 pub use item_parts::{
-    GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick, ItemClickDirection,
-    ItemClickOutcome, ItemDestroyed, ItemDestroyedOutcome, ItemHook, ItemOverrides, ItemUse,
-    ItemUseOutcome, PlayerDropPlan, player_drop_plan,
+    CountedDrawStop, GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick,
+    ItemClickDirection, ItemClickOutcome, ItemDestroyed, ItemDestroyedOutcome, ItemHook,
+    ItemOverrides, ItemUse, ItemUseOutcome, PlayerDropPlan, player_drop_plan,
 };
 pub mod level_sound;
 mod library_dispatch;

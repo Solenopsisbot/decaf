@@ -2459,14 +2459,15 @@ fn a_disconnect_drops_the_inputs_in_slot_order() {
 
 /// A Java `removed` that draws `level.getRandom()` after vanilla's `removed` has handed the
 /// inputs on (`clearContainer`, `dropOrPlaceInInventory`). On a disconnect they drop: a drop is
-/// an effect Sunrise carries out after the call, but in 26.3 it draws nothing of the level
-/// stream (`ServerPlayer.drop` → `LivingEntity.drop`: the player's own and the item entity's
-/// own randoms, `runtime/live_menu.rs` `draws_no_level_random`), so Java's draw sits where
-/// vanilla's would in either order, and is exact. A live close puts them back into the
-/// inventory instead, which draws nothing of the level's before Java's draw in vanilla either
-/// (`INVENTORY_CHANGED` waits for `broadcastChanges`), and the same draw is exact too.
+/// an effect Sunrise carries out after the call, and Sunrise's drop runs other mods' listeners
+/// (`item_toss`, `entity_join_level`, the swing) that may draw the level stream, after Java's
+/// draw where vanilla runs them before it (`runtime/live_menu.rs` `draws_no_level_random`), so
+/// vanilla's order of the two isn't claimed: the draw is still Sunrise's live stream, but
+/// counted. A live close puts them back into the inventory instead, which draws nothing of the
+/// level's before Java's draw in vanilla either (`INVENTORY_CHANGED` waits for
+/// `broadcastChanges`), and the same draw is exact.
 #[test]
-fn a_level_random_draw_after_a_deferred_drop_is_exact() {
+fn a_level_random_draw_after_a_deferred_drop_is_counted() {
     use mod_api::RandomSource as _;
     on_a_big_stack("live-menu-draw-after-drop", || {
         let jar = Arc::new(NativeJar::from_bytes(&bench_jar()).expect("load the fixture jar"));
@@ -2518,10 +2519,10 @@ fn a_level_random_draw_after_a_deferred_drop_is_exact() {
                     0,
                     "{how}"
                 );
+                let after = (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1);
                 match how {
                     "disconnect" => {
                         assert_eq!(host.world.spawned.len(), 1);
-                        // The drop's own counted tags (no player to throw it), and no draw.
                         assert_eq!(
                             counted,
                             [
@@ -2531,6 +2532,7 @@ fn a_level_random_draw_after_a_deferred_drop_is_exact() {
                                         .to_owned(),
                                     1
                                 ),
+                                after,
                             ]
                         );
                     }
@@ -2866,8 +2868,11 @@ fn real_runes_altar_crafts_arcane_stones_through_the_sunrise_hooks() {
     });
 }
 
-/// A jar item whose own `overrideStackedOnOther` throws, against stubs of the 26.3 signatures
-/// the item-part bridge looks up (`runtime/item_parts.rs` `ItemHook::method`).
+/// Jar items with overrides of their own, against stubs of the 26.3 signatures the item-part
+/// bridge looks up (`runtime/item_parts.rs` `ItemHook::method`): `demo:thrower`, whose
+/// `overrideStackedOnOther` throws; `demo:fitter`, whose `overrideStackedOnOther` answers the
+/// clicked slot's item's `canFitInsideContainerItems()`; `demo:breaker`, whose `onDestroyed`
+/// throws.
 const ITEM_PART_SOURCES: &[(&str, &str)] = &[
     (
         "net/fabricmc/api/ModInitializer.java",
@@ -2923,15 +2928,23 @@ const ITEM_PART_SOURCES: &[(&str, &str)] = &[
            }\n\
            public Item(Properties p) {}\n\
            public boolean overrideStackedOnOther(ItemStack me, Slot s, ClickAction a, Player p) { return false; }\n\
+           public boolean canFitInsideContainerItems() { return true; }\n\
+           public void onDestroyed(net.minecraft.world.entity.item.ItemEntity entity) {}\n\
          }",
     ),
     (
         "net/minecraft/world/item/ItemStack.java",
-        "package net.minecraft.world.item; public final class ItemStack {}",
+        "package net.minecraft.world.item; public final class ItemStack { public Item getItem() { return null; } }",
     ),
     (
         "net/minecraft/world/inventory/Slot.java",
-        "package net.minecraft.world.inventory; public class Slot {}",
+        "package net.minecraft.world.inventory;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         public class Slot { public ItemStack getItem() { return null; } }",
+    ),
+    (
+        "net/minecraft/world/entity/item/ItemEntity.java",
+        "package net.minecraft.world.entity.item; public class ItemEntity {}",
     ),
     (
         "net/minecraft/world/inventory/ClickAction.java",
@@ -2956,6 +2969,12 @@ const ITEM_PART_SOURCES: &[(&str, &str)] = &[
              Identifier id = Identifier.fromNamespaceAndPath(\"demo\", \"thrower\");\n\
              Registry.register(BuiltInRegistries.ITEM, id,\n\
                  new Thrower(new Item.Properties().setId(ResourceKey.create(Registries.ITEM, id))));\n\
+             Identifier fitter = Identifier.fromNamespaceAndPath(\"demo\", \"fitter\");\n\
+             Registry.register(BuiltInRegistries.ITEM, fitter,\n\
+                 new Fitter(new Item.Properties().setId(ResourceKey.create(Registries.ITEM, fitter))));\n\
+             Identifier breaker = Identifier.fromNamespaceAndPath(\"demo\", \"breaker\");\n\
+             Registry.register(BuiltInRegistries.ITEM, breaker,\n\
+                 new Breaker(new Item.Properties().setId(ResourceKey.create(Registries.ITEM, breaker))));\n\
            }\n\
          }",
     ),
@@ -2972,6 +2991,35 @@ const ITEM_PART_SOURCES: &[(&str, &str)] = &[
            public Thrower(Properties properties) { super(properties); }\n\
            @Override public boolean overrideStackedOnOther(ItemStack me, Slot slot, ClickAction action, Player player) {\n\
              throw new IllegalStateException(\"the override threw\");\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/Fitter.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ClickAction;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         import net.minecraft.world.item.Item;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         /** Handles a click exactly when the clicked slot's item fits inside a container item. */\n\
+         public class Fitter extends Item {\n\
+           public Fitter(Properties properties) { super(properties); }\n\
+           @Override public boolean overrideStackedOnOther(ItemStack me, Slot slot, ClickAction action, Player player) {\n\
+             return slot.getItem().getItem().canFitInsideContainerItems();\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/Breaker.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.item.ItemEntity;\n\
+         import net.minecraft.world.item.Item;\n\
+         /** An item whose `onDestroyed` throws. */\n\
+         public class Breaker extends Item {\n\
+           public Breaker(Properties properties) { super(properties); }\n\
+           @Override public void onDestroyed(ItemEntity entity) {\n\
+             throw new IllegalStateException(\"onDestroyed threw\");\n\
            }\n\
          }",
     ),
@@ -3053,10 +3101,13 @@ fn a_failing_click_override_refuses_the_click_instead_of_swapping() {
 /// BUGS-3d34-round4 #2 end to end: a filled Runes pouch used in the air, through the mod's
 /// `use_item` bridge on the real jar. Bundle API's `use` clears the contents, drops each stack
 /// (`Player.drop(stack, true, PREDICTED)`), then draws `level.getRandom().nextFloat()` for its
-/// drop-contents sound's pitch, and counts the use. A drop draws nothing of the level stream in
-/// 26.3, so that draw is exact and the whole use applies (round 4 saw none of it: the draw was
-/// counted and the bridge threw the use away). Expected values: `javap -c -p` of
-/// `CustomBundleItem.use` / `dropAllBundledItems` / `playDropContentsSound` and 26.3's
+/// drop-contents sound's pitch, then counts the use. Sunrise carries the drops out after the
+/// call, through listeners that may draw the level stream (`runtime/live_menu.rs`
+/// `draws_no_level_random`), so that draw counts, and the use stops there (rule (b),
+/// `item_parts.rs` `server_use`): the pouch empties, the stacks drop with their stats, in
+/// order, and the sound, the `ITEM_USED` stat and the result after the draw aren't carried out
+/// (round 4 saw none of it: the bridge threw the whole use away). Expected values: `javap -c
+/// -p` of `CustomBundleItem.use` / `dropAllBundledItems` / `playDropContentsSound` and 26.3's
 /// `ServerPlayer.drop` (`fixture_item_parts_runes.rs` spells them out).
 #[test]
 fn real_runes_pouch_use_drops_its_contents_through_the_sunrise_hooks() {
@@ -3097,7 +3148,8 @@ fn real_runes_pouch_use_drops_its_contents_through_the_sunrise_hooks() {
         );
 
         let result = part.server_use(&mut host, UUID, Hand::Main, &pouch);
-        assert_eq!(result, Some(InteractionResult::SuccessServer));
+        // Stopped before `use` answered: the click ends.
+        assert_eq!(result, Some(InteractionResult::Fail));
         // Thrown by the player, in the contents' order.
         let thrown: Vec<String> = host
             .world
@@ -3106,7 +3158,7 @@ fn real_runes_pouch_use_drops_its_contents_through_the_sunrise_hooks() {
             .map(|stack| host.text(&Some(stack.clone())))
             .collect();
         assert_eq!(thrown, ["10 runes:frost_stone", "40 runes:fire_stone"]);
-        // `ServerPlayer.drop`'s stats after each throw, then `ITEM_USED`.
+        // `ServerPlayer.drop`'s stats after each throw; `ITEM_USED` came after the draw.
         assert_eq!(
             host.world.stats,
             [
@@ -3114,18 +3166,13 @@ fn real_runes_pouch_use_drops_its_contents_through_the_sunrise_hooks() {
                 (StatType::Custom, "minecraft:drop".to_owned(), 1),
                 (StatType::Dropped, FIRE.to_owned(), 40),
                 (StatType::Custom, "minecraft:drop".to_owned(), 1),
-                (StatType::Used, POUCH.to_owned(), 1),
             ]
         );
-        // The sound, its pitch the lent stream's first draw (`0.8f + nextFloat() * 0.4f`), and
-        // the live stream moved by exactly that draw.
+        // No sound: its pitch was the counted draw. The live stream still moved by exactly that
+        // one draw, which Java made.
+        assert_eq!(host.sounds, []);
         let mut level_random = mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED);
-        let pitch = 0.8f32 + level_random.next_float() * 0.4f32;
-        assert_eq!(host.sounds.len(), 1, "{:?}", host.sounds);
-        let (sound, _, volume, played_pitch, _) = host.sounds[0].clone();
-        assert_eq!(sound, "minecraft:item.bundle.drop_contents");
-        assert_eq!(volume, 0.8);
-        assert_eq!(played_pitch.to_bits(), pitch.to_bits());
+        level_random.next_float();
         assert_eq!(
             host.level_random.as_mut().unwrap().next_long(),
             level_random.next_long()
@@ -3137,12 +3184,116 @@ fn real_runes_pouch_use_drops_its_contents_through_the_sunrise_hooks() {
             .expect("the pouch is still held");
         assert_eq!(host.text(&Some(held.clone())), "1 runes:small_rune_pouch");
         assert!(held.components().is_none(), "{:?}", held.components());
-        // Counted: only that the SDK's `drop_stack` takes no `Prediction` (each throw). The
-        // draw is exact.
+        // Counted: the SDK's `drop_stack` takes no `Prediction` (each throw), and the draw.
         assert_eq!(
             counted(&java),
-            [("bridge: use_item:drop prediction".to_owned(), 2)]
+            [
+                ("bridge: use_item:drop prediction".to_owned(), 2),
+                (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1),
+            ]
         );
         assert_eq!(take_failures(&java), []);
+    });
+}
+
+/// The item-part fixture jar's `HorizonJava` and the `JavaItemPart` of its item `id`.
+fn item_part(id: &str) -> (Arc<HorizonJava>, crate::item_parts::JavaItemPart) {
+    let jar = Arc::new(
+        NativeJar::from_bytes(&javac_jar(&[ITEM_PART_SOURCES], "demo.ItemProbe"))
+            .expect("load the fixture jar"),
+    );
+    let java = java_with(jar);
+    let part = crate::item_parts::JavaItemPart::new(
+        Arc::clone(&java.state),
+        Arc::clone(&java.client),
+        id.to_owned(),
+    );
+    (java, part)
+}
+
+/// BUGS-3d34-round4 #3's missing call, through the real dispatch: a jar override that answers
+/// the clicked slot's vanilla item's `Item.canFitInsideContainerItems()` (`invoke_helper`,
+/// `runtime/item_parts.rs`). 26.3 answers `true` for cobblestone (`Item`'s `iconst_1`) and
+/// `false` for a shulker box (`BlockItem`'s `getBlock() instanceof ShulkerBoxBlock`), as the
+/// Java 25 capture over every registered item has it
+/// (`vanilla_can_fit_inside_container_items_java25.txt`). `true` handles the click (nothing
+/// moves: the fitter changes nothing); `false` leaves Sunrise's vanilla click to run. Nothing
+/// counts either way.
+#[test]
+fn a_click_override_reads_a_vanilla_items_can_fit_inside_container_items() {
+    use mod_api::{ClickedStackResult, Flow, StackResult, StackedOnOther, StackedOnOtherResult};
+    on_a_big_stack("item-part-can-fit", || {
+        let (java, part) = item_part("demo:fitter");
+        with_bridge(&java, &[], || {
+            // One host: the load's item table is resolved once.
+            let mut host = MenuTestHost::new(
+                &[
+                    "demo:fitter",
+                    "minecraft:cobblestone",
+                    "minecraft:shulker_box",
+                ],
+                &[],
+            );
+            for (target, fits) in [
+                ("minecraft:cobblestone", true),
+                ("minecraft:shulker_box", false),
+            ] {
+                host.world.inventory[7] = Some(host.stack(target, 1));
+                let carried = host.stack("demo:fitter", 1);
+                // Hotbar slot 7 of the player's own inventory menu (window 0): menu slot 43.
+                let click = StackedOnOther::new(
+                    Some(UUID),
+                    Some(ENTITY_ID as i32),
+                    43,
+                    0,
+                    7,
+                    false,
+                    Some(carried),
+                    host.world.inventory[7].clone(),
+                );
+                let mut result = StackedOnOtherResult::default();
+                let flow = part.server_click(
+                    &mut host,
+                    &click,
+                    &mut result,
+                    crate::runtime::ItemClickDirection::CarriedOnOther,
+                );
+                assert_eq!(matches!(flow, Flow::Cancel), fits, "{target}");
+                assert_eq!(result.handled, fits, "{target}");
+                assert_eq!(result.carried, StackResult::Keep, "{target}");
+                assert_eq!(result.clicked, ClickedStackResult::Keep, "{target}");
+                assert_eq!(counted(&java), [], "{target}");
+            }
+        });
+    });
+}
+
+/// A jar item's `onDestroyed` that throws (`mod/src/item_parts.rs` `server_destroyed`): logged,
+/// kept with what Java said, counted as `item_destroyed:failed`, and Sunrise's baseline of what
+/// the destroyed item spills is left as it was (the item entity is gone either way).
+#[test]
+fn a_failing_on_destroyed_keeps_sunrises_baseline_and_counts() {
+    on_a_big_stack("item-part-failing-on-destroyed", || {
+        let (java, part) = item_part("demo:breaker");
+        with_bridge(&java, &[], || {
+            let mut host = MenuTestHost::new(&["demo:breaker", "minecraft:cobblestone"], &[]);
+            let stack = host.stack("demo:breaker", 1);
+            let baseline = vec![host.stack("minecraft:cobblestone", 3)];
+            let mut drops = baseline.clone();
+            let item = mod_api::ItemEntityRef::new(EntityRef::new(WorldEpoch::new(1), 77));
+            part.server_destroyed(&mut host, item, &stack, &mut drops);
+            assert_eq!(drops, baseline);
+            assert_eq!(
+                counted(&java),
+                [("bridge: item_destroyed:failed".to_owned(), 1)]
+            );
+            let failures = take_failures(&java);
+            assert_eq!(failures.len(), 1, "{failures:?}");
+            assert!(
+                failures[0].failure.contains("IllegalStateException")
+                    && failures[0].failure.contains("onDestroyed threw"),
+                "{failures:?}"
+            );
+        });
     });
 }

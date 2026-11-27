@@ -2458,26 +2458,33 @@ fn record(rt: &mut Runtime<'_, impl Host>, effect: LiveMenuEffect) -> R<()> {
 }
 
 /// The allow-list of recorded effects whose carrying out draws no level's
-/// `Level.random`: packets, stats, notices and drops (`level_random.rs`).
-///
-/// A drop is on it because vanilla's draws nothing of the level stream, so
-/// Java's later draw sits at the same position whether the drop runs before it
-/// (vanilla) or after the call (Decaf): 26.3's `ServerPlayer.drop` is
-/// `LivingEntity.drop` (`swing`, which sends a packet; `createItemStackToDrop`,
-/// whose spread draws the player's own `Entity.random`; `addFreshEntity`, whose
-/// entity-manager callbacks draw nothing) and the dropped stats, and
-/// `new ItemEntity(level, x, y, z, stack)` draws its motion, bob and yaw from
-/// its own `Entity.random` (`RandomSource.create()`, not the level's), all
-/// read with `javap -c -p` of `server-26.3.jar`. The embedder's drop runs after
-/// the call: whatever it draws comes after Java's draw in either order. (Sunrise
-/// at the pinned `3d34bbe63d` draws the player's and the item's own randoms
-/// there too: `throw_from_eyes` / `player_drop_motion`, `push_item_entity`.)
-///
-/// Not on it: `InventoryChangedCriterion`, `RecipeCrafted` and `AwardRecipes`:
-/// a criterion (a recipe unlock fires `RECIPE_UNLOCKED`) can complete an
-/// advancement at once, and `AdvancementRewards.grant` rolls its loot with
-/// `LootContext$Builder.create(Optional.empty())`, which falls back to
-/// `ServerLevel.getRandom()`.
+/// `Level.random`: packets, stats and notices (`level_random.rs`). Not on it:
+/// - `InventoryChangedCriterion`, `RecipeCrafted` and `AwardRecipes`: a
+///   criterion (a recipe unlock fires `RECIPE_UNLOCKED`) can complete an
+///   advancement at once, and `AdvancementRewards.grant` rolls its loot with
+///   `LootContext$Builder.create(Optional.empty())`, which falls back to
+///   `ServerLevel.getRandom()`;
+/// - `Drop`. Vanilla 26.3's own drop draws only entity randoms
+///   (`ServerPlayer.drop` -> `LivingEntity.drop`: `createItemStackToDrop`
+///   the player's `Entity.random`, `new ItemEntity(level, x, y, z, stack)`
+///   the item's own; javap), but the embedder's drop runs other mods' code
+///   after the Java call returned, where vanilla would run it during
+///   `Player.drop`, before Java's later draw. Sunrise's `drop_stack`
+///   (SDK `host/player_inventory.rs` 46-55: "the main hand swinging and
+///   `item_toss` asked first") swings through `try_swing_hand` (the held
+///   item's `on_entity_swing` part and the swing event, `game/items/hand.rs`
+///   250-262 at `3d34bbe63d`), fires `item_toss`
+///   (`game/native_hooks/item_toss.rs` 37-43) and joins (56) the entity through
+///   `native_joins_flush`, which tells `entity_join_level`
+///   (`game/items/item_entity_spawn.rs` 46-73). A listener of any of them
+///   can draw the level stream through `LevelRef::with_random` (SDK
+///   `world/types.rs` 349), and the SDK can't say none does: its only
+///   query, the engine's `__private::enabled_listened(HookId)`, answers
+///   whether *any* enabled mod listens, and this mod's own
+///   `entity_join_level` (Fabric's `ENTITY_LOAD`, `mod/src/lib.rs`) always
+///   does. So a draw after a drop is counted, and an embedder that stops
+///   there (`mod/src/item_parts.rs` `server_use`) carries out only what came
+///   before it ([`crate::level_random::DrawStop`]).
 ///
 /// A new effect must take a side here.
 fn draws_no_level_random(effect: &LiveMenuEffect) -> bool {
@@ -2489,11 +2496,11 @@ fn draws_no_level_random(effect: &LiveMenuEffect) -> bool {
         | LiveMenuEffect::AwardStat { .. }
         | LiveMenuEffect::InventorySlotSent { .. }
         | LiveMenuEffect::Closed { .. }
-        | LiveMenuEffect::SlotTaken { .. }
-        | LiveMenuEffect::Drop { .. } => true,
+        | LiveMenuEffect::SlotTaken { .. } => true,
         LiveMenuEffect::InventoryChangedCriterion { .. }
         | LiveMenuEffect::RecipeCrafted { .. }
-        | LiveMenuEffect::AwardRecipes { .. } => false,
+        | LiveMenuEffect::AwardRecipes { .. }
+        | LiveMenuEffect::Drop { .. } => false,
     }
 }
 

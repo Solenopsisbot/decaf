@@ -182,11 +182,16 @@ now answers as 26.3 does (`Item`'s `true`, `false` for the 17 shulker boxes only
 capture over every registered item, `vanilla_item_data.rs`).
 
 A bundle's `use` drops its contents, then draws `level.getRandom().nextFloat()` for its sound's
-pitch. The drops are carried out after the call, but a drop is on the level-random allow-list
-(`live_menu::draws_no_level_random`): 26.3's `ServerPlayer.drop` draws only the player's own and
-the item entity's own randoms, so Java's draw sits at vanilla's position in either order and is
-served exactly from the lent stream. The use then applies in vanilla's order: the cleared held
-stack, each drop with its stats (`player_drop_plan`), `ITEM_USED`, the sound.
+pitch. Vanilla's drop draws only entity randoms, but Sunrise carries the drop out after the call,
+through the swing, `item_toss` and `entity_join_level`, any of whose listeners may draw the level
+stream, where vanilla would run them before that draw; the SDK can't tell that none does (its
+only query says whether *any* mod listens, and this mod always listens to `entity_join_level`).
+So the draw counts (`live_menu::draws_no_level_random` has the evidence), and the use stops
+there, as the altar's take does (#665's rule (b)): the runtime says where the first counted draw
+fell (`CountedDrawStop`), and `server_use` applies what came before it, the cleared pouch and
+each drop with its stats (`player_drop_plan`), counts the draw, and carries out nothing after it
+(no sound, no `ITEM_USED`, `FAIL` as the result), provided the held stack wasn't written after
+the draw. The pouch empties; its drop-contents sound doesn't play.
 
 Tests, in the repo's usual pattern: javac fixtures for each façade with JDK 25 / game 26.3
 expected rows, then a real-jar test (`RUNES_JAR`) that inserts runes into a pouch through

@@ -28,13 +28,15 @@
 //!   `Entity.playSound`, then `awardStat(ITEM_USED.get(this))`, and on a server level answers
 //!   `SUCCESS_SERVER`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use horizon_native_java::{
-    BlockUsePlayerData, ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, InteractionResultValue,
-    ItemClick, ItemClickDirection, ItemHook, ItemUse, LevelRandomStream, LiveMenuEffect,
-    MenuPlayerFacts, NativeJar, Nbt, NbtCompound, PlayerContainer, RuntimeComponentValue, StdHost,
-    SwingSource, Value, level_sound::SoundRecord, player_drop_plan,
+    BlockUsePlayerData, CountedDrawStop, DRAW_AFTER_DEFERRED_EFFECT, ExecutionBudget,
+    GAME_PROTOTYPE_COMPONENTS, InteractionResultValue, ItemClick, ItemClickDirection, ItemHook,
+    ItemUse, LevelRandomStream, LiveMenuEffect, MenuPlayerFacts, NativeJar, Nbt, NbtCompound,
+    PlayerContainer, RuntimeComponentValue, StdHost, SwingSource, Value, level_sound::SoundRecord,
+    player_drop_plan,
 };
 
 const UUID: u128 = 0x00c0_ffee_0000_0000_0000_0000_0000_0077;
@@ -533,9 +535,10 @@ fn rune_pouch_onto_cobblestone_moves_nothing() {
 
 /// BUGS-3d34-round4 #2: using a filled pouch drops its contents in their list order, plays the
 /// drop-contents sound and counts the use. The sound's pitch draws the level's random after the
-/// drops are recorded; a drop draws nothing of the level stream in 26.3 (the player's own and
-/// the item entity's own randoms: `live_menu::draws_no_level_random`), so that draw is served
-/// exactly from the lent stream, not counted.
+/// drops are recorded, and the embedder carries a drop out after the call, through listeners
+/// that may draw that stream (`live_menu::draws_no_level_random`): the draw is answered from
+/// the lent stream but counted, and the outcome says where it fell (`CountedDrawStop`), so an
+/// embedder can apply the clear and the two drops before it and stop there.
 #[test]
 fn rune_pouch_use_drops_its_contents_in_order() {
     let Some(jar_path) = std::env::var_os("RUNES_JAR") else {
@@ -575,12 +578,21 @@ fn rune_pouch_use_drops_its_contents_in_order() {
                 })
                 .expect("use");
             host.set_host_deferred_server_sound_seeds(false);
-            assert!(used.report.exact(), "{:?}", used.report);
+            assert_eq!(used.report.failure, None);
             assert_eq!(
-                host.unknown_host_call_count(),
-                0,
-                "{:?}",
-                host.unknown_host_calls()
+                used.report.unknown_host_calls,
+                BTreeMap::from([(DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1)])
+            );
+            // The draw came after both drops and before the sound and `ITEM_USED`, with the
+            // pouch already cleared (`dropAllBundledItems` offset 40) and not written again.
+            assert_eq!(
+                used.counted_draw_stop,
+                Some(CountedDrawStop {
+                    effects: 2,
+                    sounds: 0,
+                    first_counted: true,
+                    held_unchanged: true,
+                })
             );
             assert!(
                 matches!(
