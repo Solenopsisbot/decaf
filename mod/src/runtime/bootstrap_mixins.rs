@@ -42,18 +42,20 @@
 //!
 //! Only the shape Mixin gives a `TAIL` callback on a static `void` target runs: a static handler
 //! taking one `CallbackInfo`, not cancellable, with no selector modifier, into `<clinit>` or into a
-//! static method named with no descriptor or `()V` (Mixin's name-only selector: a mod whose
-//! handler takes only a `CallbackInfo` loads on Fabric only if it selects a no-argument `void`
-//! method). Anything else that would apply on a real game (another anchor, a config plugin that
-//! could veto the mixin, a target the bootstrap does not reach or reaches at no one point) is
-//! counted under `<target>#<method>` on the declaring jar's host and not run; a callback into a
-//! static method the side's list never reaches is not this pass's (another tier answers or counts
-//! it). A callback that throws is the game failing to start: no later callback runs, and the
-//! loader starts no jar's entrypoint (every jar is refused with that reason). So is a callback at
-//! a point after `BuiltInRegistries.freeze()` that registers into a built-in registry, where the
-//! game's `Registry.register` throws "Registry is already frozen" (the client's
-//! `RangeSelectItemModelProperties.bootstrap()` is such a point: a `put` into its id mapper is not
-//! a registry write).
+//! static method selected as `()V`, or by name alone when its class declares that name once
+//! (`@overloaded` in the list: Mixin's name-only selector selects every overload, and a bare
+//! `(CallbackInfo)V` handler fits any target, `Callback.checkDescriptor` with `captureArgs`
+//! false). Anything else that would apply on a real game (another anchor, a config plugin that
+//! could veto the mixin, a target the bootstrap does not reach or reaches at no one point, a `TAIL`
+//! on a static handler into a method with arguments or one the list never reaches, unless a
+//! game-hook site binds it) is counted under `<target>#<method>` on the declaring jar's host and
+//! not run ([`decide`]). A callback that throws is the game failing to start: no later callback runs, and the
+//! loader starts no jar's entrypoint (every jar is refused with that reason). A callback at a point
+//! after `BuiltInRegistries.freeze()` that registers into a built-in registry counts: vanilla's
+//! `Registry.register` throws "Registry is already frozen" there, but Fabric API's registry sync
+//! delays the freeze until after mod initialization, and which game it is is not modelled (the
+//! client's `RangeSelectItemModelProperties.bootstrap()` is such a point: a `put` into its id
+//! mapper is not a registry write).
 
 use super::*;
 
@@ -62,8 +64,8 @@ use super::*;
 /// returns, `<class>.<name>()V` where a static `()V` method reaches its last `return`.
 const SERVER_ORDER: &str = crate::runtime::vendored_bootstrap_clinit_order_26_3_txt::VENDORED_DATA;
 
-/// The same for the 26.3 client, up to `Minecraft.<init>`
-/// (`tools/trace_bootstrap_clinit_order.py --side client`).
+/// The same for the 26.3 client, up to where Fabric runs its first entrypoint in
+/// `Minecraft.<init>` (`tools/trace_bootstrap_clinit_order.py --side client`).
 const CLIENT_ORDER: &str = crate::runtime::vendored_bootstrap_clinit_order_26_3_client_txt::VENDORED_DATA;
 
 /// `CallbackInfo`'s descriptor as a handler's only parameter.
@@ -73,64 +75,115 @@ const TAIL_HANDLER_DESCRIPTOR: &str =
 /// A line the tool marks as reached on a thread other than `main`.
 const OTHER_THREAD: &str = " @other-thread";
 
-/// One side's list: each point with its turn, `None` for a point reached more than once or on
-/// another thread (no one turn).
-fn parse_order(text: &'static str) -> BTreeMap<&'static str, Option<usize>> {
-    let mut order: BTreeMap<&'static str, Option<usize>> = BTreeMap::new();
+/// A method point whose name its class declares more than once.
+const OVERLOADED: &str = " @overloaded";
+
+/// One point of a side's list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Point {
+    /// Its turn; `None` for a point reached more than once or on another thread (no one turn).
+    turn: Option<usize>,
+    /// A method whose name its class declares more than once.
+    overloaded: bool,
+}
+
+/// One side's list, by point.
+fn parse_order(text: &'static str) -> BTreeMap<&'static str, Point> {
+    let mut order: BTreeMap<&'static str, Point> = BTreeMap::new();
     for (position, line) in text
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .enumerate()
     {
-        let (point, main_thread) = match line.strip_suffix(OTHER_THREAD) {
+        let (line, main_thread) = match line.strip_suffix(OTHER_THREAD) {
             Some(point) => (point, false),
             None => (line, true),
         };
+        let (point, overloaded) = match line.strip_suffix(OVERLOADED) {
+            Some(point) => (point, true),
+            None => (line, false),
+        };
         order
             .entry(point)
-            .and_modify(|turn| *turn = None)
-            .or_insert(main_thread.then_some(position));
+            .and_modify(|seen| seen.turn = None)
+            .or_insert(Point {
+                turn: main_thread.then_some(position),
+                overloaded,
+            });
     }
     order
 }
 
 /// `side`'s list ([`SERVER_ORDER`] or [`CLIENT_ORDER`]).
-fn side_order(side: MixinSide) -> &'static BTreeMap<&'static str, Option<usize>> {
-    static SERVER: std::sync::OnceLock<BTreeMap<&'static str, Option<usize>>> =
-        std::sync::OnceLock::new();
-    static CLIENT: std::sync::OnceLock<BTreeMap<&'static str, Option<usize>>> =
-        std::sync::OnceLock::new();
+fn side_order(side: MixinSide) -> &'static BTreeMap<&'static str, Point> {
+    static SERVER: std::sync::OnceLock<BTreeMap<&'static str, Point>> = std::sync::OnceLock::new();
+    static CLIENT: std::sync::OnceLock<BTreeMap<&'static str, Point>> = std::sync::OnceLock::new();
     match side {
         MixinSide::Client => CLIENT.get_or_init(|| parse_order(CLIENT_ORDER)),
         _ => SERVER.get_or_init(|| parse_order(SERVER_ORDER)),
     }
 }
 
-/// The list's name for the point a `TAIL` into `target` runs at: the class for `<clinit>`,
-/// `<class>.<name>()V` for a static method selected by name alone or as `()V`, `None` for any
-/// other target.
-fn tail_point(target: &MethodRef) -> Option<String> {
-    if target.name == "<clinit>" {
-        return Some(target.owner.clone());
-    }
-    matches!(target.descriptor.as_str(), "" | "()V")
-        .then(|| format!("{}.{}()V", target.owner, target.name))
-}
-
-/// Where `BuiltInRegistries.freeze()` ends on `side`: after it, `Registry.register` into a
-/// built-in registry throws `IllegalStateException` ("Registry is already frozen").
+/// Where `BuiltInRegistries.freeze()` ends on `side`: after it, vanilla's `Registry.register`
+/// into a built-in registry throws `IllegalStateException` ("Registry is already frozen").
 fn freeze_turn(side: MixinSide) -> Option<usize> {
-    point_turn(
-        side,
-        "net/minecraft/core/registries/BuiltInRegistries.freeze()V",
-    )
-    .flatten()
+    side_order(side)
+        .get("net/minecraft/core/registries/BuiltInRegistries.freeze()V")
+        .and_then(|point| point.turn)
 }
 
-/// Where `side`'s bootstrap reaches `point`: `None` when it never does, `Some(None)` when it
-/// does at no one turn.
-fn point_turn(side: MixinSide, point: &str) -> Option<Option<usize>> {
-    side_order(side).get(point).copied()
+/// What the pass does with one callback into a game class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Decision {
+    /// Not a bootstrap callback: another tier answers or counts it.
+    NotOurs,
+    /// It would run on a real game, at no turn this pass can give it: counted.
+    Count,
+    /// It runs at this turn.
+    Run(usize),
+}
+
+/// The pass's decision for `plan` against `order`. `runnable` is everything but the point:
+/// Mixin's `TAIL` shape on a static handler taking one `CallbackInfo`, a config that applies it
+/// for sure, a class the side loads before mods. `static_handler` alone says the target is a
+/// static method (Mixin requires a static handler for one). `hook_site` is whether a game-hook
+/// tier binds the target.
+///
+/// * `<clinit>`: runs at its point's one turn, counted otherwise.
+/// * A method selected by name alone or as `()V` whose point the list holds: runs at its one
+///   turn, counted otherwise, and when selected by name alone on a name the class declares more
+///   than once (Mixin's name-only selector selects every overload, and a `(CallbackInfo)V`
+///   handler fits any of them: `Callback.checkDescriptor`, `captureArgs` false).
+/// * Any other `TAIL` on a static handler into a method no game-hook site binds (an argument
+///   descriptor, a name the list never reaches): it runs on a real game, never here: counted.
+fn decide(
+    order: &BTreeMap<&'static str, Point>,
+    plan: &MixinInjectionPlan,
+    runnable: bool,
+    static_handler: bool,
+    hook_site: bool,
+) -> Decision {
+    let target = &plan.target;
+    if target.name == "<clinit>" {
+        return match order.get(target.owner.as_str()) {
+            Some(Point {
+                turn: Some(turn), ..
+            }) if runnable => Decision::Run(*turn),
+            _ => Decision::Count,
+        };
+    }
+    let name_only = target.descriptor.is_empty();
+    let point = (name_only || target.descriptor == "()V")
+        .then(|| order.get(format!("{}.{}()V", target.owner, target.name).as_str()))
+        .flatten();
+    match point {
+        Some(point) => match point.turn {
+            Some(turn) if runnable && !(name_only && point.overloaded) => Decision::Run(turn),
+            _ => Decision::Count,
+        },
+        None if plan.at == "TAIL" && static_handler && !hook_site => Decision::Count,
+        None => Decision::NotOurs,
+    }
 }
 
 /// One jar of the pass: the jar whose runtime runs the callbacks, its host, and the jars whose
@@ -144,8 +197,7 @@ pub struct BootstrapUnit<'a> {
 
 /// One callback that would run on a real server, with what decides its turn.
 struct Pending {
-    /// Its turn in the side's list ([`point_turn`]), `None` when it is counted for its own shape
-    /// or its point.
+    /// Its turn in the side's list ([`decide`]), `None` when it is counted.
     position: Option<usize>,
     /// The unit whose host it runs on.
     unit: usize,
@@ -191,14 +243,6 @@ fn unit_callbacks(index: usize, unit: &BootstrapUnit<'_>) -> Vec<Pending> {
             if !target.starts_with("net/minecraft/") || jar_class(target) {
                 continue;
             }
-            // Every `<clinit>` callback is this pass's; a callback into a method only when it is
-            // into a static `()V` method this side's bootstrap reaches (any anchor but `TAIL`
-            // then counts below).
-            let point = tail_point(&plan.target);
-            let turn = point.as_deref().and_then(|point| point_turn(side, point));
-            if plan.target.name != "<clinit>" && turn.is_none() {
-                continue;
-            }
             let applies =
                 match mixin_config_gate(&configs, &config_sides, &plan.callback.owner, side) {
                     Ok(()) => true,
@@ -224,7 +268,18 @@ fn unit_callbacks(index: usize, unit: &BootstrapUnit<'_>) -> Vec<Pending> {
             // client, the list ends where Fabric runs the first entrypoint.
             let loaded = side == MixinSide::Client
                 || crate::runtime::mixin_class_loading::server_loads_before_mods(target);
-            let position = turn.flatten().filter(|_| applies && shape && loaded);
+            let hook_site = crate::runtime::hook_shapes::game_hook_site_at(&plan.target, &plan.at).is_some();
+            let position = match decide(
+                side_order(side),
+                &plan,
+                applies && shape && loaded,
+                handler,
+                hook_site,
+            ) {
+                Decision::NotOurs => continue,
+                Decision::Count => None,
+                Decision::Run(turn) => Some(turn),
+            };
             pending.push(Pending {
                 position,
                 unit: index,
@@ -299,10 +354,13 @@ pub fn run_bootstrap_injectors(
             &entry.plan.callback,
             false,
         );
-        // Past `BuiltInRegistries.freeze()`, a registration is the game failing to start.
+        // Past `BuiltInRegistries.freeze()`, vanilla refuses a registration into a built-in
+        // registry, but Fabric API's registry sync (`BootstrapMixin.delayRegistryFreeze`,
+        // fabric-registry-sync-v0) moves the freeze to after mod initialization: which one the
+        // game has is not modelled, so such a callback counts (its rows stay, as with Fabric API).
         let frozen = freeze_turn(unit.host.mixin_side())
             .is_some_and(|freeze| entry.position.is_some_and(|turn| turn > freeze));
-        let registered = unit.host.registrations().len();
+        let built_in_rows = built_in_registrations(unit.host);
         let site = format!(
             "{}#{} at the end of {}.{}",
             entry.plan.callback.owner,
@@ -316,13 +374,28 @@ pub fn run_bootstrap_injectors(
         {
             return vec![format!("{site}: {error}")];
         }
-        if frozen && unit.host.registrations().len() > registered {
-            return vec![format!(
-                "{site}: java.lang.IllegalStateException: Registry.register after BuiltInRegistries.freeze() (Registry is already frozen)"
-            )];
+        if frozen && built_in_registrations(unit.host) > built_in_rows {
+            *unit
+                .host
+                .unknown_host_calls
+                .entry(format!(
+                    "{}#{} <registration after BuiltInRegistries.freeze()>",
+                    entry.plan.target.owner, entry.plan.target.name
+                ))
+                .or_default() += 1;
         }
     }
     Vec::new()
+}
+
+/// How many registrations `host` holds in a built-in registry: every `BuiltInRegistries`
+/// registry is keyed `minecraft:`, and a mod's own registry (which is never frozen) its own
+/// namespace.
+fn built_in_registrations(host: &StdHost) -> usize {
+    host.registrations()
+        .iter()
+        .filter(|entry| entry.registry.starts_with("minecraft:"))
+        .count()
 }
 
 impl NativeJar {
@@ -341,5 +414,95 @@ impl NativeJar {
             }],
             budget,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A side's list with a class finished once, a method ended once, one ended twice, one ended
+    /// off the main thread, and one whose name its class declares twice.
+    const ORDER: &str = "# header\n\
+        demo/Once\n\
+        demo/A.once()V\n\
+        demo/A.twice()V\n\
+        demo/A.twice()V\n\
+        demo/A.elsewhere()V @other-thread\n\
+        demo/A.overloaded()V @overloaded\n";
+
+    fn plan(name: &str, descriptor: &str, at: &str) -> MixinInjectionPlan {
+        MixinInjectionPlan {
+            target: MethodRef {
+                owner: if name == "<clinit>" {
+                    "demo/Once"
+                } else {
+                    "demo/A"
+                }
+                .into(),
+                name: name.into(),
+                descriptor: descriptor.into(),
+            },
+            callback: MethodRef {
+                owner: "demo/mixin/M".into(),
+                name: "tail".into(),
+                descriptor: TAIL_HANDLER_DESCRIPTOR.into(),
+            },
+            at: at.into(),
+            cancellable: false,
+            invoke_target: None,
+            ordinal: None,
+            slice: None,
+            shift: None,
+        }
+    }
+
+    fn decided(name: &str, descriptor: &str) -> Decision {
+        decide(
+            &parse_order(ORDER),
+            &plan(name, descriptor, "TAIL"),
+            true,
+            true,
+            false,
+        )
+    }
+
+    #[test]
+    fn a_point_reached_twice_or_off_the_main_thread_has_no_turn() {
+        let order = parse_order(ORDER);
+        assert_eq!(order["demo/A.once()V"].turn, Some(1));
+        assert_eq!(order["demo/A.twice()V"].turn, None);
+        assert_eq!(order["demo/A.elsewhere()V"].turn, None);
+        assert!(order["demo/A.overloaded()V"].overloaded);
+        assert_eq!(decided("<clinit>", ""), Decision::Run(0));
+        assert_eq!(decided("once", ""), Decision::Run(1));
+        assert_eq!(decided("once", "()V"), Decision::Run(1));
+        assert_eq!(decided("twice", "()V"), Decision::Count);
+        assert_eq!(decided("elsewhere", "()V"), Decision::Count);
+    }
+
+    /// Mixin's name-only selector selects every overload; `()V` selects the one.
+    #[test]
+    fn a_name_only_selector_on_an_overloaded_name_counts() {
+        assert_eq!(decided("overloaded", ""), Decision::Count);
+        assert_eq!(decided("overloaded", "()V"), Decision::Run(5));
+    }
+
+    /// A `(CallbackInfo)V` handler fits any target: a `TAIL` into a static method with
+    /// arguments, or one the bootstrap never reaches, would run on a real game; here it counts,
+    /// unless a game-hook site binds it. An instance handler's target is not the pass's.
+    #[test]
+    fn a_tail_no_turn_can_answer_counts() {
+        assert_eq!(decided("withArgs", "(I)V"), Decision::Count);
+        assert_eq!(decided("neverReached", ""), Decision::Count);
+        let order = parse_order(ORDER);
+        let tail = plan("withArgs", "(I)V", "TAIL");
+        assert_eq!(decide(&order, &tail, true, true, true), Decision::NotOurs);
+        assert_eq!(decide(&order, &tail, true, false, false), Decision::NotOurs);
+        let head = plan("withArgs", "(I)V", "HEAD");
+        assert_eq!(decide(&order, &head, false, true, false), Decision::NotOurs);
+        // Any other anchor at a measured point is the pass's, and counts.
+        let head = plan("once", "()V", "HEAD");
+        assert_eq!(decide(&order, &head, false, true, false), Decision::Count);
     }
 }

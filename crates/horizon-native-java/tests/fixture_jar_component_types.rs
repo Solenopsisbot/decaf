@@ -773,8 +773,9 @@ fn each_side_runs_callbacks_in_its_own_measured_order() {
 }
 
 /// A `TAIL` into a static `()V` method the bootstrap ends once runs at that method's turn: the
-/// handler selects `FireBlock.bootStrap` by name alone. A `HEAD` into it counts; a `TAIL` into a
-/// static method the bootstrap never reaches is not the pass's (nothing runs, nothing counts).
+/// handler selects `FireBlock.bootStrap` by name alone (`FireBlock` declares one `bootStrap`). A
+/// `HEAD` into it counts; so does a `TAIL` into a static method the bootstrap never reaches, which
+/// a real game runs at some later call and this pass never does.
 #[test]
 fn a_tail_into_a_static_bootstrap_method_runs_at_its_turn() {
     let jar = mod_jar(
@@ -826,20 +827,28 @@ fn a_tail_into_a_static_bootstrap_method_runs_at_its_turn() {
         assert_eq!(ids, ["methods:fire"], "{environment}");
         assert_eq!(
             unknown(&host),
-            BTreeMap::from([(
-                "net/minecraft/world/level/block/FireBlock#bootStrap".to_owned(),
-                1
-            )]),
+            BTreeMap::from([
+                (
+                    "net/minecraft/world/level/block/FireBlock#bootStrap".to_owned(),
+                    1
+                ),
+                (
+                    "net/minecraft/world/level/block/FireBlock#neverCalled".to_owned(),
+                    1
+                ),
+            ]),
             "{environment}"
         );
     }
 }
 
-/// Past `BuiltInRegistries.freeze()` a registration throws on a real game ("Registry is already
-/// frozen"): a `TAIL` into `Bootstrap.bootStrap()` (which ends after the freeze) that registers is
-/// the game failing to start.
+/// Past `BuiltInRegistries.freeze()` vanilla's `Registry.register` into a built-in registry
+/// throws ("Registry is already frozen"), but Fabric API's registry sync
+/// (`BootstrapMixin.delayRegistryFreeze`) moves the freeze to after mod initialization, and which
+/// game it is is not modelled: a `TAIL` into `Bootstrap.bootStrap()` (which ends after the freeze)
+/// that registers counts, the game starts, and the row stays (as with Fabric API).
 #[test]
-fn a_registration_after_the_registries_freeze_fails_the_bootstrap() {
+fn a_registration_after_the_registries_freeze_counts() {
     let jar = mod_jar(
         "bootstrap_after_freeze",
         "late",
@@ -857,14 +866,25 @@ fn a_registration_after_the_registries_freeze_fails_the_bootstrap() {
     let mut host = jar
         .jar
         .seed_host(StdHost::new().with_environment_type("SERVER"));
-    let failures = jar
-        .jar
-        .run_bootstrap_static_injectors(&mut host, &ExecutionBudget::UNBOUNDED);
+    assert!(
+        jar.jar
+            .run_bootstrap_static_injectors(&mut host, &ExecutionBudget::UNBOUNDED)
+            .is_empty()
+    );
     assert_eq!(
-        failures,
-        [
-            "demo/mixin/LateTail#tail at the end of net/minecraft/server/Bootstrap.bootStrap: java.lang.IllegalStateException: Registry.register after BuiltInRegistries.freeze() (Registry is already frozen)"
-        ]
+        rows(&host),
+        vec![(
+            "minecraft:data_component_predicate_type".to_owned(),
+            "late:frozen".to_owned()
+        )]
+    );
+    assert_eq!(
+        unknown(&host),
+        BTreeMap::from([(
+            "net/minecraft/server/Bootstrap#bootStrap <registration after BuiltInRegistries.freeze()>"
+                .to_owned(),
+            1
+        )])
     );
 }
 
