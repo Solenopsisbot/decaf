@@ -76,6 +76,10 @@ mod client_registrations;
 pub(crate) use client_registrations::range_select_properties;
 #[path = "client_config.rs"]
 mod config;
+// `Font.width` / `Font.split`: the glyph model and the embedder's answers.
+#[path = "client_font.rs"]
+mod font;
+pub use font::{FontAnswers, FontQuestion, WidthOrder};
 
 /// `Minecraft.getInstance()`, and every client listener's `Minecraft`.
 pub const MINECRAFT: &str = "client/minecraft";
@@ -467,6 +471,48 @@ const INPUT_KEY_PREFIX: &str = "client/input-key/";
 const MINECRAFT_CLASS: &str = "net/minecraft/client/Minecraft";
 const OPTIONS_CLASS: &str = "net/minecraft/client/Options";
 const FONT_CLASS: &str = "net/minecraft/client/gui/Font";
+/// The leading arguments of the `GuiGraphicsExtractor` overloads that draw a
+/// `FormattedCharSequence`.
+const FONT_CHAR_SEQUENCE_ARGS: &str =
+    "(Lnet/minecraft/client/gui/Font;Lnet/minecraft/util/FormattedCharSequence;";
+const WORD_WRAP: &str =
+    "(Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/FormattedText;IIII)I";
+const WORD_WRAP_SHADOW: &str =
+    "(Lnet/minecraft/client/gui/Font;Lnet/minecraft/network/chat/FormattedText;IIIIZ)I";
+/// 26.3 `blitSprite(RenderPipeline, Identifier, x, y, w, h…)`'s leading arguments.
+const BLIT_SPRITE_ARGS: &str =
+    "(Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;";
+
+/// How a 26.3 whole-sprite `blitSprite` overload tints.
+#[derive(Clone, Copy)]
+enum SpriteTint {
+    /// `(…IIII)V`: `-1`.
+    White,
+    /// `(…IIIII)V`: the colour argument.
+    Colour,
+    /// `(…IIIIF)V`: `ARGB.white(alpha)`.
+    Alpha,
+}
+
+fn blit_sprite_overload(descriptor: &str) -> Option<SpriteTint> {
+    Some(match descriptor.strip_prefix(BLIT_SPRITE_ARGS)? {
+        "IIII)V" => SpriteTint::White,
+        "IIIII)V" => SpriteTint::Colour,
+        "IIIIF)V" => SpriteTint::Alpha,
+        _ => return None,
+    })
+}
+
+/// 26.3 `ARGB.white(float alpha)`: `as8BitChannel(alpha) << 24 | 0xFFFFFF`, where
+/// `as8BitChannel` is `Mth.floor(alpha * 255.0f)` and `Mth.floor(float)` is
+/// `(int) Math.floor((double) f)` (offsets 0-6): the float product widened, floored as a double,
+/// then Java's saturating `d2i` (Rust's `as`; NaN is 0). An alpha outside `[0, 1]` shifts its
+/// channel's low byte into the alpha as Java's `ishl` does: `-1e10f`, `-inf` and `-9e6f` floor to
+/// `Integer.MIN_VALUE`, whose shifted byte is 0, so their colour is `0x00FFFFFF`.
+fn argb_white(alpha: f32) -> u32 {
+    let channel = f64::from(alpha * 255.0).floor() as i32;
+    (channel.wrapping_shl(24) | 0x00ff_ffff) as u32
+}
 const RENDER_PIPELINES: &str = "net/minecraft/client/renderer/RenderPipelines";
 const RENDER_PIPELINE_DESC: &str = "Lcom/mojang/renderpearl/api/pipeline/RenderPipeline;";
 pub(crate) const GUI_TEXTURED_PIPELINE: &str = "client/render-pipeline/gui_textured";
@@ -614,77 +660,21 @@ pub struct ClientLevel {
     pub height: i32,
 }
 
-/// What `Font.width` needs: the game font's advances and the translations a
-/// translatable component resolves to. Built once by the game and shared.
+/// What `Font.width` and `Font.split` need: the game font's advances and the translations a
+/// translatable component resolves to, and the game's own answers for exact texts
+/// (`client_font.rs`). Built by the game and shared. Every answer is exact or counted: a glyph past
+/// the table, a translation the table lacks, a style the model doesn't read, each counts and is
+/// asked ([`ClientFrameOutput::font_questions`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextMetrics {
-    /// Advance of each char below `advances.len()`, in GUI pixels.
+    /// Advance of each char below `advances.len()`, in GUI pixels (`GlyphInfo.getAdvance(false)`
+    /// in the default font).
     pub advances: Vec<f32>,
-    /// The advance of a char past the table.
-    pub fallback: f32,
     /// Translation key → text, for translatable components.
     pub translations: BTreeMap<String, String>,
-}
-
-impl TextMetrics {
-    /// `Font.width` of plain text: the advances' sum, rounded up; a `§`
-    /// formatting code and the char after it take no width.
-    pub fn width(&self, text: &str) -> i32 {
-        let mut total = 0.0f32;
-        let mut chars = text.chars();
-        while let Some(c) = chars.next() {
-            if c == '§' {
-                chars.next();
-                continue;
-            }
-            total += self
-                .advances
-                .get(c as usize)
-                .copied()
-                .unwrap_or(self.fallback);
-        }
-        total.ceil() as i32
-    }
-
-    /// The text a [`ClientText`] reads as: a translatable one's translation,
-    /// else its key (vanilla shows the key of a missing translation).
-    pub fn resolve<'a>(&'a self, text: &'a ClientText) -> std::borrow::Cow<'a, str> {
-        match text {
-            ClientText::Literal(text) => text.as_str().into(),
-            ClientText::Translatable(key) => self
-                .translations
-                .get(key)
-                .map_or(key.as_str(), String::as_str)
-                .into(),
-            ClientText::Json(json) => {
-                let mut out = String::new();
-                if let Ok(json) = serde_json::from_str(json) {
-                    self.flatten(&json, &mut out);
-                }
-                out.into()
-            }
-        }
-    }
-
-    /// A component JSON's text in order, translations resolved (their
-    /// arguments are not substituted for the width).
-    fn flatten(&self, json: &serde_json::Value, out: &mut String) {
-        use serde_json::Value as Json;
-        match json {
-            Json::String(text) => out.push_str(text),
-            Json::Object(object) => {
-                if let Some(Json::String(text)) = object.get("text") {
-                    out.push_str(text);
-                } else if let Some(Json::String(key)) = object.get("translate") {
-                    out.push_str(self.translations.get(key).map_or(key, String::as_str));
-                }
-                if let Some(Json::Array(extra)) = object.get("extra") {
-                    extra.iter().for_each(|part| self.flatten(part, out));
-                }
-            }
-            _ => {}
-        }
-    }
+    /// The game's `Font.width` / `Font.split` of exact texts, which an embedder fills from its
+    /// own font after a frame asked for them ([`ClientFrameOutput::font_questions`]).
+    pub answers: FontAnswers,
 }
 
 /// The client state one firing sees, snapshotted by the game.
@@ -768,7 +758,7 @@ pub struct KeyPress {
 }
 
 /// Text a mod drew or sent.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ClientText {
     /// A string (its `§` codes are formatting) or a literal component.
     Literal(String),
@@ -813,12 +803,31 @@ pub enum DrawOp {
         /// stack's own count (`itemDecorations(font, stack, x, y)`).
         decorations: Option<Option<String>>,
     },
-    /// `blitSprite` of a GUI sprite (`hud/heart/full`, a mod's
-    /// `examplemod:gui/meter`) stretched into `rect`, tinted `argb`.
+    /// `blitSprite` of a whole GUI sprite (`hud/heart/full`, a mod's `examplemod:gui/meter`)
+    /// into `rect`, tinted `argb`: drawn as the sprite's `gui.scaling` metadata says (stretched,
+    /// tiled or nine-sliced, `GuiGraphicsExtractor.blitSprite`'s switch), which the embedder's
+    /// sprite atlas knows. A nine-slice's borders keep their size in GUI pixels, so the 26.3 arm
+    /// records one only under a pose that does not scale.
     Sprite {
         sprite: String,
         rect: [f32; 4],
         argb: u32,
+    },
+    /// `item`/`fakeItem` (`model`) or `itemDecorations` (`decorations`, as on
+    /// [`DrawOp::Item`]) of a runtime `ItemStack` rather than a frame stack: one jar code built,
+    /// or a jar component's contents decoded. `stack` is what the embedder rebuilds the game's
+    /// stack from (its item, count and component patch, with no opaque or unsupported entry);
+    /// its top left at `at`, 16 GUI pixels square times `scale`. `seed` is the model draw's
+    /// (`item(stack, x, y, seed)`; `0` for the overloads without one, and for decorations). Like
+    /// [`DrawOp::Item`], the draw names no holder: `item` passes the local player and
+    /// `fakeItem` none, which only an item model property that reads its holder tells apart.
+    Stack {
+        stack: crate::runtime::StackComponents,
+        at: [f32; 2],
+        scale: [f32; 2],
+        model: bool,
+        seed: i32,
+        decorations: Option<Option<String>>,
     },
     /// A texture blit: `src` is `[u, v, region_w, region_h]` in texture pixels
     /// (preserving Java's `float` u/v), `dst` is `[x, y, w, h]` in GUI pixels
@@ -859,6 +868,16 @@ pub struct ClientFrameOutput {
     pub tooltip: Option<Vec<ClientText>>,
     /// Client-side level/local-player sounds recorded during this frame, in call order.
     pub sounds: Vec<crate::runtime::level_sound::LevelSoundEffect>,
+    /// The `Font.width` / `Font.split` questions the frame could not answer exactly (each call
+    /// counted), in the order first asked: what an embedder answers ([`FontAnswers`]) before it
+    /// runs the call again.
+    pub font_questions: Vec<FontQuestion>,
+    /// The counted calls those questions refused, by the key `StdHost::unknown_host_calls`
+    /// counts them under (`net/minecraft/client/gui/Font#width…`, a `GuiGraphicsExtractor`
+    /// draw that measured or wrapped). An embedder that runs a call again with its answers may
+    /// drop exactly these from a discarded run, and nothing else that run counted
+    /// ([`crate::runtime::StdHost::unknown_calls_since`]).
+    pub font_refusals: BTreeMap<String, usize>,
 }
 
 /// How a `KeyMapping` was constructed.
@@ -921,6 +940,19 @@ pub(crate) struct ClientState {
     /// `Screen.extractBackground` (the in-game backdrop Sunrise draws itself) ran in this
     /// frame's `extractBackground` chain.
     pub(crate) screen_backdrop: bool,
+    /// The frame's unanswered font questions (`client_font.rs`).
+    font_questions: Vec<FontQuestion>,
+    /// A font question was just asked, so the refusal the surface makes next is the font's:
+    /// set by `ask_font`, taken by `refuse_client_call`, and cleared as each client call starts,
+    /// so it never outlives the call that asked.
+    font_refusal_pending: bool,
+    /// The counted keys of the font's refusals this frame, with how many.
+    font_refusals: BTreeMap<String, usize>,
+    /// `Font.split` line handles (`client/char-sequence/<n>`) → their text, for this frame: a
+    /// line kept into a later frame is no longer read (its use counts).
+    char_sequences: BTreeMap<String, ClientText>,
+    /// The next line handle's number; never reused.
+    next_char_sequence: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1479,6 +1511,9 @@ impl StdHost {
 
     fn refuse_client_call(&mut self, r: &MethodRef) -> NativeError {
         let key = format!("{}#{}{}", r.owner, r.name, r.descriptor);
+        if std::mem::take(&mut self.client.font_refusal_pending) {
+            *self.client.font_refusals.entry(key.clone()).or_default() += 1;
+        }
         *self.unknown_host_calls.entry(key).or_default() += 1;
         NativeError::UnknownHostCall(r.clone())
     }
@@ -1556,6 +1591,10 @@ impl StdHost {
         state.made_aliases.clear();
         state.tasks.clear();
         state.sounds.clear();
+        state.font_questions.clear();
+        state.font_refusal_pending = false;
+        state.font_refusals.clear();
+        state.char_sequences.clear();
         let lines = state.frame.as_ref().and_then(|f| {
             f.tooltip_stack.as_ref()?;
             Some(
@@ -1602,6 +1641,7 @@ impl StdHost {
         }
         let state = &mut self.client;
         state.frame = None;
+        state.char_sequences.clear();
         state.poses.clear();
         state.made.clear();
         state.made_aliases.clear();
@@ -1618,6 +1658,8 @@ impl StdHost {
                     .collect()
             }),
             sounds: std::mem::take(&mut self.client.sounds),
+            font_questions: std::mem::take(&mut self.client.font_questions),
+            font_refusals: std::mem::take(&mut self.client.font_refusals),
         }
     }
 
@@ -1891,6 +1933,8 @@ impl StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
+        // A font question belongs to the call that asked it (`ClientState::font_refusal_pending`).
+        self.client.font_refusal_pending = false;
         // Style and TextColor are value handles used by server-side mods too;
         // ChatFormatting constants are text markers produced by this surface.
         if let Some(text) = crate::runtime::game_object::text(receiver)
@@ -2187,6 +2231,11 @@ impl StdHost {
                 None => Err(self.refuse_client_call(r)),
             },
             POSE => match self.pose_call(r, args) {
+                Some(value) => Ok(value),
+                None => Err(self.refuse_client_call(r)),
+            },
+            // `Font.width` / `Font.split`, answered exactly or counted (`client_font.rs`).
+            FONT => match self.font_call(&frame, r, args) {
                 Some(value) => Ok(value),
                 None => Err(self.refuse_client_call(r)),
             },
@@ -2663,13 +2712,7 @@ impl StdHost {
                 ("showDebugScreen" | "isOverlayVisible", "Z") => Some(flag(frame.debug_screen)),
                 _ => None,
             },
-            FONT => match (name, returns) {
-                ("width", "I") => {
-                    let text = text_arg(args.first()?, &self.component_states)?;
-                    int(frame.metrics.width(&frame.metrics.resolve(&text)))
-                }
-                _ => None,
-            },
+            FONT => self.font_call(frame, r, args),
             DELTA => match (name, returns) {
                 ("getGameTimeDeltaPartialTick", "F") => float(frame.partial_tick),
                 ("getGameTimeDeltaTicks" | "getRealtimeDeltaTicks", "F") => float(1.0),
@@ -2755,6 +2798,45 @@ impl StdHost {
                     .and_then(|()| self.client.fill([x, y + 1, x + 1, y + h - 1], c))
                     .and_then(|()| self.client.fill([x + w - 1, y + 1, x + w, y + h - 1], c))
             }
+            // `text(font, line, x, y, colour[, shadow])` and `centeredText(font, line, x, y,
+            // colour)` of a `Font.split` line (`client_font.rs`): its text, drawn as the
+            // component overloads draw theirs. 26.3's `centeredText` is `text(font, line,
+            // x - font.width(line) / 2, y, colour)`, Java's integer division.
+            ("text" | "centeredText", descriptor)
+                if descriptor.starts_with(FONT_CHAR_SEQUENCE_ARGS) =>
+            {
+                let text = self.char_sequence_text(args.get(1)?)?;
+                let v = ints(2, 3)?;
+                let shadow = int_arg(args, 5).is_none_or(|v| v != 0);
+                let x = if r.name == "centeredText" {
+                    v[0] - self.frame_width(frame, text.clone(), font::WidthOrder::Visual)? / 2
+                } else {
+                    v[0]
+                };
+                self.client.text(text, x, v[1], v[2] as u32, shadow)
+            }
+            // 26.3 `textWithWordWrap(font, text, x, y, width, colour[, shadow])` (offsets 0-67):
+            // each line of `font.split(text, width)` drawn with `text(font, line, x, y, colour,
+            // shadow)` at `y` steps of `font.lineHeight` (9); answers the `y` after the last.
+            // The six-argument overload draws with a shadow. Only the surface's own font
+            // splits here.
+            ("textWithWordWrap", descriptor)
+                if descriptor == WORD_WRAP || descriptor == WORD_WRAP_SHADOW =>
+            {
+                if crate::runtime::game_object::handle_key(args.first()?) != Some(FONT) {
+                    return None;
+                }
+                let text = self.component_text(args.get(1)?)?;
+                let v = ints(2, 4)?;
+                let shadow = int_arg(args, 6).is_none_or(|v| v != 0);
+                let lines = self.frame_split(frame, text, v[2])?;
+                let mut y = v[1];
+                for line in lines {
+                    self.client.text(line, v[0], y, v[3] as u32, shadow).ok()?;
+                    y = y.wrapping_add(9);
+                }
+                return Some(Ok(Value::Int(y)));
+            }
             ("text", descriptor) if descriptor.starts_with("(Lnet/minecraft/client/gui/Font;") => {
                 let arg = args.get(1)?;
                 let text = match self.graphics_text_arg(arg, descriptor, "str") {
@@ -2791,47 +2873,87 @@ impl StdHost {
             ("item" | "fakeItem", descriptor)
                 if descriptor.starts_with("(Lnet/minecraft/world/item/ItemStack;II") =>
             {
-                let slot = self.client_stack_slot(args.first()?)?;
                 let v = ints(1, 2)?;
+                let seed = int_arg(args, 3).unwrap_or(0);
                 return self
-                    .client_item_draw(frame, slot, [v[0], v[1]], true, None)
+                    .any_item_draw(frame, args.first()?, [v[0], v[1]], Some(seed), None)
                     .map(|()| Ok(Value::Void));
             }
             // `item(owner, stack, x, y, seed)`: the owner only seeds animation.
             ("item", "(Lnet/minecraft/world/entity/LivingEntity;Lnet/minecraft/world/item/ItemStack;III)V") => {
-                let slot = self.client_stack_slot(args.get(1)?)?;
-                let v = ints(2, 2)?;
+                let v = ints(2, 3)?;
                 return self
-                    .client_item_draw(frame, slot, [v[0], v[1]], true, None)
+                    .any_item_draw(frame, args.get(1)?, [v[0], v[1]], Some(v[2]), None)
                     .map(|()| Ok(Value::Void));
             }
             ("itemDecorations", descriptor)
                 if descriptor.starts_with("(Lnet/minecraft/client/gui/Font;Lnet/minecraft/world/item/ItemStack;II") =>
             {
-                let slot = self.client_stack_slot(args.get(1)?)?;
+                let stack = args.get(1)?;
                 let v = ints(2, 2)?;
+                // The count text is a `String` (`(Font, ItemStack, II, String)`): the jar's string
+                // itself, uncut (`font::string_text` refuses one past the surface's bound, whose
+                // drawn text would be a cut one), and `null` for the stack's own count.
                 let count = match args.get(4) {
-                    Some(arg) => match text_arg(arg, &self.component_states) {
-                        Some(t) => Some(Some(match t {
-                            ClientText::Literal(s) | ClientText::Translatable(s) => s,
-                            ClientText::Json(json) => serde_json::from_str(&json)
-                                .map(|json| crate::runtime::facade_text::plain(&json))
-                                .unwrap_or_default(),
-                        })),
-                        None if *arg == Value::Ref(None) => Some(None),
-                        None => return None,
+                    Some(Value::Ref(None)) => Some(None),
+                    Some(arg) => match font::string_text(arg)? {
+                        ClientText::Literal(text) => Some(Some(text)),
+                        _ => return None,
                     },
                     None => None,
                 };
                 return self
-                    .client_item_draw(frame, slot, [v[0], v[1]], false, Some(count.flatten()))
+                    .any_item_draw(frame, stack, [v[0], v[1]], None, Some(count.flatten()))
                     .map(|()| Ok(Value::Void));
             }
-            // `blitSprite(pipeline, sprite, x, y, w, h[, colour | alpha])`. Pre-26.3 package, as
-            // the pipeline `fill` above: a 26.3 call (`com.mojang.renderpearl.api.pipeline`)
-            // stays counted. A port also needs the 10-int partial overload (a sub-region of the
-            // sprite) and a nine-slice sprite under a scaled pose, which `DrawOp::Sprite`
-            // (a stretched rect) does not express exactly.
+            // 26.3 `blitSprite(pipeline, sprite, x, y, w, h[, colour | alpha])` (offsets 0-166):
+            // the six-int overload is the colour one with `-1`, the alpha one with
+            // `ARGB.white(alpha)`; that looks the sprite up in the GUI atlas and draws it as its
+            // `gui.scaling` says, which `DrawOp::Sprite` asks the embedder to do. Only on
+            // `RenderPipelines.GUI_TEXTURED` (Sunrise's `Blend::Textured`); another pipeline
+            // counts. A zero width or height draws nothing in every scaling (`Stretch` returns at
+            // offsets 0-10 of the `TextureAtlasSprite` overload, `Tile` at 0-10 of
+            // `blitTiledSprite`, and a `NineSlice`'s pieces are all empty), so none is recorded; a
+            // negative one draws differently per scaling, which the surface doesn't know: counted.
+            // A scaled pose would scale a nine-slice's borders, which a posed `rect` doesn't:
+            // counted. The 10- and 11-int partial overloads (a sub-region) are not modelled.
+            ("blitSprite", descriptor) if blit_sprite_overload(descriptor).is_some() => {
+                if crate::runtime::game_object::handle_key(args.first()?) != Some(GUI_TEXTURED_PIPELINE) {
+                    return None;
+                }
+                let id = crate::runtime::host_ids::identifier_key(args.get(1)?)?;
+                let (namespace, path) = id.split_once(':')?;
+                let v = ints(2, 4)?;
+                let argb = match blit_sprite_overload(descriptor)? {
+                    SpriteTint::White => u32::MAX,
+                    SpriteTint::Colour => int_arg(args, 6)? as u32,
+                    SpriteTint::Alpha => argb_white(float_arg(args, 6)?),
+                };
+                let (w, h) = (v[2], v[3]);
+                if w == 0 || h == 0 {
+                    return Some(Ok(Value::Void));
+                }
+                let [sx, sy, _, _] = self.client.pose();
+                if w < 0 || h < 0 || sx != 1.0 || sy != 1.0 {
+                    return None;
+                }
+                // A GUI sprite is named by its path under `textures/gui/sprites`; a mod's keeps
+                // its namespace.
+                let sprite = if namespace == "minecraft" {
+                    path.to_owned()
+                } else {
+                    id.to_owned()
+                };
+                let rect = self.client.posed_rect([
+                    v[0],
+                    v[1],
+                    v[0].wrapping_add(w),
+                    v[1].wrapping_add(h),
+                ]);
+                self.client.draw(DrawOp::Sprite { sprite, rect, argb })
+            }
+            // `blitSprite(pipeline, sprite, x, y, w, h[, colour | alpha])` in the pre-26.3
+            // package, as the pipeline `fill` above (a jar built against an older game).
             ("blitSprite", descriptor)
                 if descriptor.starts_with(
                     "(Lcom/mojang/blaze3d/pipeline/RenderPipeline;Lnet/minecraft/resources/Identifier;IIII",
@@ -2900,17 +3022,63 @@ impl StdHost {
                     Err(None) => return None,
                 };
                 let v = ints(2, 3)?;
-                // A container screen's frame has no font metrics: the width is no fact.
-                if frame.screen_scope {
-                    return None;
-                }
-                // `x - font.width(text) / 2`, Java's integer division.
-                let width = frame.metrics.width(&frame.metrics.resolve(&text));
+                // `x - font.width(text) / 2`, Java's integer division, the width exact
+                // (`client_font.rs`): `width(String)` sums the string in its own order; the
+                // component overload measures `getVisualOrderText()`.
+                let (measured, order) = if descriptor
+                    .starts_with("(Lnet/minecraft/client/gui/Font;Ljava/lang/String;")
+                {
+                    (font::string_text(arg)?, font::WidthOrder::Logical)
+                } else {
+                    (self.component_text(arg)?, font::WidthOrder::Visual)
+                };
+                let width = self.frame_width(frame, measured, order)?;
                 self.client.text(text, v[0] - width / 2, v[1], v[2] as u32, true)
             }
             _ => return None,
         };
         drawn.ok().map(|()| Ok(Value::Void))
+    }
+
+    /// An item draw of a frame stack ([`Self::client_item_draw`]) or of a runtime `ItemStack`
+    /// ([`DrawOp::Stack`]); `model` is the model draw's seed, `None` for decorations. `None`
+    /// (counted) for any other value, a runtime stack whose components can't all cross the
+    /// boundary, or a draw past [`MAX_DRAWS_PER_CALL`].
+    fn any_item_draw(
+        &mut self,
+        frame: &ClientSnapshot,
+        stack: &Value,
+        [x, y]: [i32; 2],
+        model: Option<i32>,
+        decorations: Option<Option<String>>,
+    ) -> Option<()> {
+        if let Some(slot) = self.client_stack_slot(stack) {
+            return self.client_item_draw(frame, slot, [x, y], model.is_some(), decorations);
+        }
+        let parts = self.item_stack_components(stack)?;
+        // `item` and `itemDecorations` draw nothing for an empty stack (`ItemStack.isEmpty`: air
+        // or a count of 0 or less).
+        if parts.count <= 0 || parts.item_id == "minecraft:air" {
+            return Some(());
+        }
+        let unsupported = parts
+            .patch
+            .iter()
+            .any(|(_, value)| matches!(value, Some(crate::runtime::RuntimeComponentValue::Unsupported)));
+        if parts.opaque_components || unsupported {
+            return None;
+        }
+        let [sx, sy, tx, ty] = self.client.pose();
+        self.client
+            .draw(DrawOp::Stack {
+                stack: parts,
+                at: [x as f32 * sx + tx, y as f32 * sy + ty],
+                scale: [sx, sy],
+                model: model.is_some(),
+                seed: model.unwrap_or(0),
+                decorations,
+            })
+            .ok()
     }
 
     /// Records one item draw; `None` past [`MAX_DRAWS_PER_CALL`].
@@ -3358,8 +3526,8 @@ mod tests {
             gui_size: [320, 240],
             metrics: Arc::new(TextMetrics {
                 advances: vec![6.0; 128],
-                fallback: 6.0,
                 translations: BTreeMap::from([("hud.example.title".into(), "Title".into())]),
+                answers: Default::default(),
             }),
             ..ClientSnapshot::default()
         })
@@ -3421,16 +3589,23 @@ mod tests {
         assert_eq!(input_key_name(true, 4), "key.mouse.4");
     }
 
+    /// `ARGB.white(float)` against Java 25.0.5 on the 26.3 jar (the `white` rows of
+    /// `tests/fixtures/client_font/edge25.txt`): in range, the saturating `Mth.floor` far below it, a
+    /// channel past 255 shifting its low byte, and NaN.
     #[test]
-    fn font_width_skips_formatting_codes_and_rounds_up() {
-        let metrics = TextMetrics {
-            advances: vec![5.5; 128],
-            fallback: 8.0,
-            translations: BTreeMap::new(),
-        };
-        assert_eq!(metrics.width("ab"), 11);
-        assert_eq!(metrics.width("§cab"), 11);
-        assert_eq!(metrics.width("a\u{4e2d}"), 14);
+    fn argb_white_floors_as_a_double_and_saturates() {
+        for (alpha, java) in [
+            (0.5, 0x7fff_ffff),
+            (1.0, 0xffff_ffff),
+            (0.0, 0x00ff_ffff),
+            (-1e10, 0x00ff_ffff),
+            (f32::NEG_INFINITY, 0x00ff_ffff),
+            (-9e6, 0x00ff_ffff),
+            (2.0, 0xfeff_ffff),
+            (f32::NAN, 0x00ff_ffff),
+        ] {
+            assert_eq!(argb_white(alpha), java, "{alpha}");
+        }
     }
 
     /// The façade's draw calls land as ops in GUI pixels: the pose moves and
