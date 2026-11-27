@@ -23,7 +23,12 @@ public final class EnumText {
     out.append(String.valueOf(Color.GREEN)).append('|').append("" + Color.GREEN).append('|');
     out.append(Color.GREEN.name()).append('|');
     out.append(EnumSet.allOf(Shade.class)).append('|');
-    out.append(new StringBuilder().append((Object) Color.GREEN));
+    out.append(new StringBuilder().append((Object) Color.GREEN)).append('|');
+    // Views over a list of constants: read through the view, not its own row.
+    List<Color> backing = new ArrayList<>(List.of(Color.GREEN, Color.RED));
+    out.append(Collections.unmodifiableList(backing)).append('|');
+    out.append(Collections.synchronizedList(backing)).append('|');
+    out.append(List.of("plain", "strings"));
     return out.toString();
   }
 

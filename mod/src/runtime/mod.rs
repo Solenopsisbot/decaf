@@ -3025,6 +3025,13 @@ pub trait Host {
         None
     }
 
+    /// Whether any element of the collection `value` (a map's keys and values alike) satisfies
+    /// `test`, `None` for no collection: [`Self::mutable_collection_values`] without copying
+    /// the elements where the host can read them in place.
+    fn collection_any(&self, value: &Value, test: &mut dyn FnMut(&Value) -> bool) -> Option<bool> {
+        Some(self.mutable_collection_values(value)?.iter().any(test))
+    }
+
     /// The concrete class recorded for a sub-list, or `Some(None)` when the
     /// parent list's class was unknown and only the list interfaces are known.
     fn sub_list_class(&self, _value: &Value) -> Option<Option<String>> {
@@ -9192,6 +9199,25 @@ impl Host for StdHost {
 
     fn mutable_collection_values(&self, value: &Value) -> Option<Vec<Value>> {
         self.mutable_values(value)
+    }
+
+    fn collection_any(&self, value: &Value, test: &mut dyn FnMut(&Value) -> bool) -> Option<bool> {
+        // A collection's own row, read in place: no view over it and no row of the derived
+        // kinds `mutable_values` tries first (a Guava table's, a `SetFromMap`'s, a repeated
+        // value's). Anything else reads as `mutable_values` does.
+        if let Some(marker) = expect_ref(value)
+            && !jar_object::spells_key(value)
+            && let Some(values) = self.mutable_collections.get(marker)
+            && self.synchronized_target(marker) == marker
+            && !self.unmodifiable_collections.contains_key(marker)
+            && !self.reversed_views.contains_key(marker)
+            && self.set_from_map_values(marker).is_none()
+            && self.repeated_collection(value).is_none()
+            && self.guava_tables.collection_values(value).is_none()
+        {
+            return Some(values.iter().any(test));
+        }
+        Some(self.mutable_values(value)?.iter().any(test))
     }
 
     fn mixin_side(&self) -> MixinSide {
@@ -36766,16 +36792,18 @@ impl<H: Host> Runtime<'_, H> {
         if self.host_collection_kind(receiver).is_none() {
             return Ok(None);
         }
-        let Ok(shape) = CollectionShape::of(&*self.host, receiver, owner_is_map) else {
-            return Ok(None);
-        };
-        let runtime_prints = |element: &Value| {
+        // Scan in place first: a collection of values the host prints itself (strings, boxes,
+        // its own models) goes to the host's printer without a copy of its elements made here.
+        let mut runtime_prints = |element: &Value| {
             self.jar_object_class(element).is_some()
                 || matches!(element, Value::Host(handle) if handle.kind() == HostKind::Collection)
         };
-        if !shape.values().iter().any(runtime_prints) {
+        if self.host.collection_any(receiver, &mut runtime_prints) != Some(true) {
             return Ok(None);
         }
+        let Ok(shape) = CollectionShape::of(&*self.host, receiver, owner_is_map) else {
+            return Ok(None);
+        };
         // One level of nested printing: a cycle ends in a `StackOverflowError` (#250).
         let _level = host_recursion::enter()?;
         let mut texts = Vec::with_capacity(shape.values().len());
