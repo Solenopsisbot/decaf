@@ -1817,6 +1817,20 @@ impl CallbackInfos {
             .unwrap_or(Value::Ref(None)))
     }
 
+    /// What a target a callback cancelled returns: the `setReturnValue` value in the target's
+    /// declared shape (sponge-mixin 0.17.5's woven `HEAD` returns `cir.getReturnValue()`), with
+    /// `true`; the descriptor's default when no callback set one, with `false`.
+    fn cancelled_result(
+        &self,
+        marker: &str,
+        target_descriptor: &str,
+    ) -> Result<(Value, bool), NativeError> {
+        Ok(match self.take_override(marker, target_descriptor)? {
+            Some(value) => (value, true),
+            None => (Value::default_for(target_descriptor), false),
+        })
+    }
+
     /// The override in the target's declared shape, or `None` when no callback
     /// replaced the value.
     fn take_override(
@@ -23887,9 +23901,13 @@ impl NativeJar {
             plan.target.descriptor = target.descriptor.clone();
             match plan.at.as_str() {
                 "HEAD" => {
-                    if callback_takes_returnable(&plan.callback.descriptor) {
+                    // A `void` target has no `CallbackInfoReturnable` (Mixin refuses one). On a
+                    // valued target a cancelled `HEAD` answers the callback's `setReturnValue`.
+                    if callback_takes_returnable(&plan.callback.descriptor)
+                        && return_desc(&target.descriptor) == "V"
+                    {
                         return Err(NativeError::Metadata(format!(
-                            "native Mixin callback {}#{}{} takes a CallbackInfoReturnable at HEAD on {}#{}; a HEAD callback takes a CallbackInfo and a cancelled HEAD answers the target descriptor's default",
+                            "native Mixin callback {}#{}{} takes a CallbackInfoReturnable at HEAD on {}#{}; a HEAD callback on a void target takes a CallbackInfo",
                             plan.callback.owner,
                             plan.callback.name,
                             plan.callback.descriptor,
@@ -26363,10 +26381,15 @@ impl NativeJar {
             &mut callback_infos,
         )?;
         let cancelled = plan.cancellable && callback_infos.flag(&marker)?;
+        let mut return_value_overridden = false;
         let target_result = if cancelled {
             // A cancelled HEAD injection never reaches the target body; the
-            // woven method returns the descriptor's default instead.
-            Value::default_for(&plan.target.descriptor)
+            // woven method returns the callback's `setReturnValue`, else the
+            // descriptor's default.
+            let (value, overridden) =
+                callback_infos.cancelled_result(&marker, &plan.target.descriptor)?;
+            return_value_overridden = overridden;
+            value
         } else {
             let target_receiver = (!target_method.is_static()).then(|| {
                 receiver
@@ -26388,7 +26411,7 @@ impl NativeJar {
             target_result,
             callback_results: vec![callback_result],
             cancelled,
-            return_value_overridden: false,
+            return_value_overridden,
             matched_invoke_sites: 0,
             matched_anchor_sites: 0,
             skipped_plans: Vec::new(),
@@ -26689,6 +26712,7 @@ impl NativeJar {
         });
         let mut callback_infos = CallbackInfos::new();
         let mut cancelled = false;
+        let mut return_value_overridden = false;
         let mut callback_results = Vec::with_capacity(plans.len());
         let target_result = if first.at == "HEAD" {
             for plan in plans {
@@ -26707,7 +26731,12 @@ impl NativeJar {
                 }
             }
             if cancelled {
-                Value::default_for(&first.target.descriptor)
+                let (value, overridden) = callback_infos.cancelled_result(
+                    &callback_info_marker(&first.target),
+                    &first.target.descriptor,
+                )?;
+                return_value_overridden = overridden;
+                value
             } else {
                 self.invoke_with_callback_infos(
                     &first.target.owner,
@@ -26745,7 +26774,7 @@ impl NativeJar {
             target_result,
             callback_results,
             cancelled,
-            return_value_overridden: false,
+            return_value_overridden,
             matched_invoke_sites: 0,
             matched_anchor_sites: 0,
             skipped_plans: Vec::new(),
@@ -27366,8 +27395,13 @@ impl NativeJar {
                 break;
             }
         }
+        // Assigned when cancelled; the other branch returns its own report.
+        let return_value_overridden;
         let target_result = if cancelled {
-            Value::default_for(&target.descriptor)
+            let (value, overridden) =
+                callback_infos.cancelled_result(&marker, &target.descriptor)?;
+            return_value_overridden = overridden;
+            value
         } else {
             let target_receiver = (!target_method.is_static()).then(|| {
                 receiver
@@ -27439,7 +27473,7 @@ impl NativeJar {
             target_result,
             callback_results: head_results,
             cancelled,
-            return_value_overridden: false,
+            return_value_overridden,
             matched_invoke_sites: 0,
             matched_anchor_sites: 0,
             skipped_plans: gate.skipped,
@@ -28792,6 +28826,15 @@ impl<H: Host> Runtime<'_, H> {
             // A cancel() at an invoke site suppresses that call and, like the
             // HEAD chain, the callbacks after it at the same site.
             if entry.cancellable && self.callback_infos.flag(marker)? {
+                // `setReturnValue` there makes Mixin's woven target return that value at
+                // once, which a suppressed call does not express: counted.
+                if self.callback_infos.state(marker)?.returned.is_some() {
+                    self.host.unknown_operand_call(&MethodRef {
+                        owner: entry.callback.owner.clone(),
+                        name: format!("{} <setReturnValue at INVOKE>", entry.callback.name),
+                        descriptor: entry.callback.descriptor.clone(),
+                    })?;
+                }
                 return Ok(true);
             }
         }
