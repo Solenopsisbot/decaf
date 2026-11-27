@@ -520,9 +520,8 @@ fn run(jar_path: &Path) {
         host.unknown_host_calls()
     );
     // A pouch on screen, drawn as the client bridge draws it every frame (#609 round 4 bug 1):
-    // its fullness on the stack the last draw of the same game stack used, in a transient scope.
-    // Every answer is the bytecode's `10/256`, nothing counts, the contents are decoded once, and
-    // the heap and the stack rows don't grow with the draws.
+    // its fullness on a stack built fresh in a transient scope. Every answer is the bytecode's
+    // `10/256`, nothing counts, and the heap and the stack rows don't grow with the draws.
     let counted = host.unknown_host_call_count();
     let fields = host.resident_heap().instance_fields();
     let request = ItemStackRequest {
@@ -541,7 +540,7 @@ fn run(jar_path: &Path) {
     for draw in 0..2_000 {
         let value = host.with_transient_rows(|host| {
             let stack = jar
-                .reusable_item_stack(host, request.clone())
+                .build_item_stack(host, request.clone())
                 .expect("pouch stack");
             jar.range_select_property_value(
                 host,
@@ -560,9 +559,8 @@ fn run(jar_path: &Path) {
         );
     }
     eprintln!(
-        "2000 pouch fullness draws: {:?}; cache {:?}; rows {:?}; fields {fields} -> {}",
+        "2000 pouch fullness draws: {:?}; rows {:?}; fields {fields} -> {}",
         start.elapsed(),
-        host.item_stack_cache_counts(),
         host.recipe_row_counts(),
         host.resident_heap().instance_fields()
     );
@@ -572,11 +570,15 @@ fn run(jar_path: &Path) {
         "{:?}",
         host.unknown_host_calls()
     );
-    assert_eq!(host.item_stack_cache_counts(), (1, 1_999, 1));
     assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+    assert!(
+        host.recipe_row_counts().0 <= 2048,
+        "{:?}",
+        host.recipe_row_counts()
+    );
 
     // Its tooltip, made as the bridge makes it on every frame it shows: one transient scope over
-    // the stack, `getTooltipImage`, `create` and every font pass of `tooltip_image_with_font`
+    // a fresh stack, `getTooltipImage`, `create` and every font pass of `tooltip_image_with_font`
     // (the probes it rewinds included). Each make answers the first's size and draws, nothing
     // counts, and the rows the passes made don't outlive them.
     // A partly filled pouch draws counts only; an empty one wraps its description with
@@ -596,7 +598,7 @@ fn run(jar_path: &Path) {
         };
         let (component, image) = host.with_transient_rows(|host| {
             let stack = jar
-                .reusable_item_stack(host, request.clone())
+                .build_item_stack(host, request.clone())
                 .expect("pouch stack");
             let component = make_component(host, &stack);
             let image = jar.tooltip_image_with_font(
@@ -625,8 +627,7 @@ fn run(jar_path: &Path) {
     }
     assert!(probed, "the font passes ran (a probe was rewound)");
     eprintln!(
-        "200 pouch tooltip makes: cache {:?}; rows {:?}; fields {}",
-        host.item_stack_cache_counts(),
+        "200 pouch tooltip makes: rows {:?}; fields {}",
         host.recipe_row_counts(),
         host.resident_heap().instance_fields()
     );

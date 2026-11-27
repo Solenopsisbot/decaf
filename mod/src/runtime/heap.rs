@@ -36,7 +36,8 @@
 //!
 //! The recipe model's rows (stacks, templates, component patches: `recipe_models.rs`) are
 //! host state an embedder may hold, so they are roots, except the ones made inside a transient
-//! scope ([`StdHost::with_transient_rows`], a client draw), which are objects like any other.
+//! scope ([`StdHost::begin_transient_rows`]: a client draw, a server item hook), which are
+//! objects like any other once the scope closes.
 //!
 //! Collection is linear in what it traces: each object's fields are a range of the sorted
 //! field table, and the Kotlin lazy states a text keeps are found with one automaton pass over
@@ -81,6 +82,8 @@ pub struct JavaHeap {
     pub(crate) next_array: usize,
     /// Entries the last collection kept, the baseline of the next trigger.
     live: usize,
+    /// Collections this host's heap has had ([`StdHost::collection_count`]).
+    collections: usize,
     /// Texts the storing caller holds outside the host (the game-hook tier's
     /// fields on game objects), roots of this store's collection only.
     roots: Vec<String>,
@@ -108,6 +111,14 @@ impl JavaHeap {
         self.fields
             .get(&format!("{object}|{owner}#{name_descriptor}"))
     }
+}
+
+/// An open transient scope of recipe-model rows ([`StdHost::begin_transient_rows`]); close it with
+/// [`StdHost::end_transient_rows`].
+#[must_use = "a transient scope seals its rows only when it is closed"]
+#[derive(Debug)]
+pub struct TransientRows {
+    depth: usize,
 }
 
 /// A position in a host's call log ([`StdHost::invocations`] and its method
@@ -223,27 +234,40 @@ impl StdHost {
         self.block_states.len()
     }
 
-    /// Run `body` with a transient scope open: every stack, template, component patch and
-    /// other recipe-model row made inside it (by the embedder's calls or by the jar's code) is
-    /// an ordinary object of the heap collector, kept only while something reaches it, rather
-    /// than a root for the host's life.
+    /// Open a transient scope: every stack, template, component patch and other recipe-model row
+    /// made from now until the scope closes ([`Self::end_transient_rows`]), by the embedder's
+    /// calls or by the jar's code, becomes an ordinary object of the heap collector when the
+    /// outermost scope closes, kept only while something reaches it, rather than a root for the
+    /// host's life.
     ///
-    /// The embedder promises not to hold a value made inside the scope after it ends, except
-    /// through [`Self::retain`] (or by the jar's own roots, which the collector sees). That
-    /// holds for a call whose answer is plain data (a model property's number, an item bar,
-    /// a tooltip image's draws): the client's draw paths, which run every frame. Rows made
-    /// anywhere else stay roots, as before.
+    /// While a scope is open its rows are roots, as every row was before scopes: the embedder
+    /// can hold any value it was handed between its calls inside the scope, and a collection
+    /// in between (every call's store may collect) frees none of them. The embedder promises
+    /// not to hold one after the scope closes, except through [`Self::retain`] (or the jar's own
+    /// roots, which the collector sees). That holds for a call whose answer the embedder turns
+    /// into its own data before it returns: a client draw (a model property's number, an item
+    /// bar, a tooltip image's draws) and a server click, use or destroy, whose stacks become
+    /// game stacks. Rows made outside any scope stay roots.
     ///
-    /// A collection inside the scope sees the scope's live values as roots the way any
-    /// invocation's are (its receiver, arguments and result are roots of its own store); a
-    /// value the embedder keeps from one call of the scope to a later one is retained for
-    /// that while (`NativeJar::make_item_stack` does so for its decoded values).
-    ///
-    /// Scopes nest; the depth is restored however `body` ends, a panic included.
+    /// Scopes nest; only the outermost close seals. A scope that is never closed (an embedder
+    /// that unwound past it) leaves its rows roots: as before scopes, never a missed root.
+    pub fn begin_transient_rows(&mut self) -> TransientRows {
+        TransientRows {
+            depth: self.recipes.enter_transient(),
+        }
+    }
+
+    /// Close the scope `scope` opened ([`Self::begin_transient_rows`]).
+    pub fn end_transient_rows(&mut self, scope: TransientRows) {
+        self.recipes.leave_transient(scope.depth);
+    }
+
+    /// Run `body` in a transient scope ([`Self::begin_transient_rows`]), closed however `body`
+    /// ends, a panic included.
     pub fn with_transient_rows<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
-        let depth = self.recipes.enter_transient();
+        let scope = self.begin_transient_rows();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(self)));
-        self.recipes.leave_transient(depth);
+        self.end_transient_rows(scope);
         match result {
             Ok(result) => result,
             Err(panic) => std::panic::resume_unwind(panic),
@@ -260,10 +284,17 @@ impl StdHost {
     }
 
     pub(crate) fn take_resident_heap(&mut self) -> JavaHeap {
-        let live = self.heap.live;
+        let (live, collections) = (self.heap.live, self.heap.collections);
         let heap = std::mem::take(&mut self.heap);
         self.heap.live = live;
+        self.heap.collections = collections;
         heap
+    }
+
+    /// How many collections this host's resident heap has had: what a test checks to know the
+    /// collector ran, rather than how long something took.
+    pub fn collection_count(&self) -> usize {
+        self.heap.collections
     }
 
     /// Keep `heap` as this host's resident heap, collecting it first when it
@@ -272,6 +303,7 @@ impl StdHost {
     /// fails the callback that grew it.
     pub(crate) fn store_resident_heap(&mut self, mut heap: JavaHeap) -> Result<(), NativeError> {
         heap.live = self.heap.live;
+        heap.collections = self.heap.collections;
         let roots = std::mem::take(&mut heap.roots);
         let entries = heap_entries(&heap, self);
         // Collect once the heap doubled past what the last collection kept
@@ -285,6 +317,7 @@ impl StdHost {
                 || over_count_guard(&heap))
         {
             collect(&mut heap, self, &roots);
+            heap.collections += 1;
             heap.live = heap_entries(&heap, self);
             let bytes = heap_bytes(&heap, self);
             self.heap = heap;
@@ -453,8 +486,6 @@ impl StdHost {
         self.vec2.root_texts(out);
         self.tool_material.root_texts(out);
         self.entity_registration.root_texts(out);
-        // The client draw stacks kept for reuse (`item_stack_cache.rs`).
-        self.item_stack_cache.root_texts(out);
         // Seeded `Level.random` handles kept per dimension (`level_sound.rs`).
         for held in self.level_sound.level_random_handles.values() {
             value(held, out);
@@ -482,7 +513,7 @@ impl StdHost {
     /// guard, a comparator, a reference's referent, a throwable's cause, a
     /// collection's layout. Edges from `marker` when it is collectable,
     /// roots when not.
-    pub(crate) fn keyed_texts(&self, marker: &str, out: &mut Vec<String>) {
+    fn keyed_texts(&self, marker: &str, out: &mut Vec<String>) {
         fn push(entry: Option<&impl std::fmt::Debug>, out: &mut Vec<String>) {
             if let Some(entry) = entry {
                 out.push(format!("{entry:?}"));
@@ -538,22 +569,7 @@ impl StdHost {
 
     /// Every key of the tables [`Self::keyed_texts`] reads, and of the other
     /// tables kept per object.
-    pub(crate) fn keyed_table_keys(&self) -> impl Iterator<Item = &str> {
-        self.state_table_keys().chain(self.layout_table_keys())
-    }
-
-    /// The keys of the per-object tables that hold a hash or tree collection's layout
-    /// (its iteration order), state of the collection itself.
-    pub(crate) fn layout_table_keys(&self) -> impl Iterator<Item = &str> {
-        self.hash_tables
-            .keys()
-            .chain(self.red_black_trees.keys())
-            .chain(self.probe_tables.keys())
-            .map(String::as_str)
-    }
-
-    /// [`Self::keyed_table_keys`] but the layouts ([`Self::layout_table_keys`]).
-    pub(crate) fn state_table_keys(&self) -> impl Iterator<Item = &str> {
+    fn keyed_table_keys(&self) -> impl Iterator<Item = &str> {
         self.io_paths
             .keys()
             .chain(self.set_from_map_views.keys())
@@ -571,6 +587,9 @@ impl StdHost {
             .chain(self.throwable_causes.keys())
             .chain(self.throwable_suppressed.keys())
             .chain(self.throwable_messages.keys())
+            .chain(self.hash_tables.keys())
+            .chain(self.red_black_trees.keys())
+            .chain(self.probe_tables.keys())
             .chain(self.constructed_items.iter())
             .chain(self.constructed_blocks.iter())
             .chain(self.block_items.keys())
@@ -722,11 +741,6 @@ const KOTLIN_LAZY_FIELD_PREFIX: &str = "kotlin-lazy|";
 
 fn kotlin_lazy_field_handle(key: &str) -> Option<&str> {
     key.strip_prefix(KOTLIN_LAZY_FIELD_PREFIX)
-}
-
-/// Whether a field key is a Kotlin lazy state's (`kotlin-lazy|<holder>`).
-pub(crate) fn kotlin_lazy_field_key(key: &str) -> bool {
-    kotlin_lazy_field_handle(key).is_some()
 }
 
 fn heap_entries(heap: &JavaHeap, host: &StdHost) -> usize {
@@ -1013,13 +1027,13 @@ fn note_menu_numbers(text: &str, out: &mut Vec<usize>) {
 
 /// The collectable markers of a heap and the distinct lengths they come in,
 /// which is what [`scan`] tries at each digit-run end.
-pub(crate) struct Collectable {
-    pub(crate) markers: HashSet<String>,
+struct Collectable {
+    markers: HashSet<String>,
     lengths: Vec<usize>,
 }
 
 impl Collectable {
-    pub(crate) fn new(heap: &JavaHeap, host: &StdHost) -> Self {
+    fn new(heap: &JavaHeap, host: &StdHost) -> Self {
         // Field keys are sorted, so an object's fields are adjacent: each
         // receiver is checked once.
         let mut previous = "";
@@ -1055,15 +1069,9 @@ impl Collectable {
         }
     }
 
-    /// Recompute the marker lengths [`Self::scan`] tries, after `markers` changed.
-    pub(crate) fn refresh_lengths(&mut self) {
-        let lengths: BTreeSet<usize> = self.markers.iter().map(String::len).collect();
-        self.lengths = lengths.into_iter().collect();
-    }
-
     /// Every collectable marker `text` names, itself or embedded: each one
     /// ends where a run of digits ends.
-    pub(crate) fn scan(&self, text: &str, out: &mut Vec<String>) {
+    fn scan(&self, text: &str, out: &mut Vec<String>) {
         let bytes = text.as_bytes();
         for end in 1..=bytes.len() {
             if !bytes[end - 1].is_ascii_digit() || bytes.get(end).is_some_and(u8::is_ascii_digit) {
@@ -1721,6 +1729,7 @@ impl<H: Host> Runtime<'_, H> {
             next_object: self.next_object,
             next_array: self.next_array,
             live: 0,
+            collections: 0,
             roots,
         };
         self.host.store_persistent_heap(heap)
@@ -1941,6 +1950,46 @@ mod tests {
         assert!(host.recipes.collectable_rows.is_empty());
         assert_eq!(objects(&heap), ["[Ldemo/Node;#1"]);
         let _ = unreached;
+    }
+
+    /// While a scope is open its rows are roots: an embedder holds what it was handed between its
+    /// calls, and any call's store may collect. Only the outermost close makes them collectable.
+    #[test]
+    fn rows_of_an_open_scope_survive_collections_until_it_closes() {
+        let (mut host, mut heap) = graph("demo/Mod#unused");
+        let outer = host.begin_transient_rows();
+        let held = stack_holding(&mut host, text("demo/Node#1"));
+        let inner = host.begin_transient_rows();
+        let inner_held = stack_holding(&mut host, text("demo/Node#3"));
+        host.end_transient_rows(inner);
+        // Inner closed, outer open: nothing is collectable yet.
+        collect(&mut heap, &mut host, &[]);
+        assert!(host.recipes.collectable_rows.is_empty());
+        assert_eq!(
+            host.recipes.stacks.keys().collect::<Vec<_>>(),
+            [&key(&held), &key(&inner_held)]
+        );
+        assert!(objects(&heap).contains(&"demo/Node#1"));
+        assert!(objects(&heap).contains(&"demo/Node#3"));
+        host.end_transient_rows(outer);
+        collect(&mut heap, &mut host, &[]);
+        assert!(host.recipes.stacks.is_empty());
+        assert!(!objects(&heap).contains(&"demo/Node#1"));
+    }
+
+    /// A scope never closed leaves its rows roots, as rows were before scopes.
+    #[test]
+    fn an_unclosed_scope_leaves_its_rows_roots() {
+        let (mut host, mut heap) = graph("demo/Mod#unused");
+        let scope = host.begin_transient_rows();
+        let held = stack_holding(&mut host, text("demo/Node#1"));
+        drop(scope); // never handed to `end_transient_rows`
+        collect(&mut heap, &mut host, &[]);
+        assert_eq!(
+            host.recipes.stacks.keys().collect::<Vec<_>>(),
+            [&key(&held)]
+        );
+        assert!(objects(&heap).contains(&"demo/Node#1"));
     }
 
     /// The scope's depth is restored however its body ends.
@@ -2677,8 +2726,6 @@ mod tests {
             "vec2",
             "block_use",
             "level_sound",
-            // Kept client draw stacks: roots (`item_stack_cache.rs`).
-            "item_stack_cache",
         ];
         const HOLDS_NO_OBJECT: &[&str] = &[
             // A dimension name and a lend id (`level_random.rs`).

@@ -275,13 +275,17 @@ pub(crate) struct RecipeState {
     /// (`Item.components()`): what the item-part bridge read from the game
     /// (`NativeJar::make_item_stack`). They answer before the runtime's own prototype model.
     pub(crate) game_prototypes: BTreeMap<String, BTreeMap<String, Option<Value>>>,
-    /// How many transient scopes are open ([`crate::runtime::StdHost::with_transient_rows`]). While one
-    /// is, every row [`Self::next_key`] mints is collectable (#609 round 4 bug 1).
+    /// How many transient scopes are open ([`crate::runtime::StdHost::begin_transient_rows`]).
     transient_depth: usize,
-    /// The rows minted inside a transient scope: ordinary objects of the heap collector, kept
-    /// only while something reaches them (`heap::collect`), their values edges rather than
-    /// roots. Every other row is a root for the host's life, as before: an embedder may hold
-    /// any stack, template or patch it was handed, and the collector can't see what it holds.
+    /// The rows minted while a scope is open. They are roots like any other until the outermost
+    /// scope closes, so nothing the embedder holds between its calls inside the scope can be
+    /// collected under it; then they become [`Self::collectable_rows`].
+    sealing_rows: Vec<String>,
+    /// The rows minted inside a transient scope that has closed: ordinary objects of the heap
+    /// collector, kept only while something reaches them (`heap::collect`), their values edges
+    /// rather than roots. Every other row is a root for the host's life, as before: an embedder
+    /// may hold any stack, template or patch it was handed, and the collector can't see what it
+    /// holds.
     ///
     /// Why the split: before it every row was a root, so the client's draw paths, which build
     /// a fresh `ItemStack` for each draw of a jar item (its model property, bar and tooltip),
@@ -312,7 +316,7 @@ impl RecipeState {
         self.next_id = self.next_id.saturating_add(1);
         let key = format!("{prefix}/{id}");
         if self.transient_depth > 0 {
-            self.collectable_rows.insert(key.clone());
+            self.sealing_rows.push(key.clone());
         }
         key
     }
@@ -324,9 +328,33 @@ impl RecipeState {
         depth
     }
 
-    /// Close the scope [`Self::enter_transient`] opened.
+    /// Close the scope [`Self::enter_transient`] opened. Closing the outermost one seals what
+    /// the scopes minted: those rows are collectable from now on. A scope never closed (an
+    /// embedder that unwound past it) leaves its rows roots, as rows were before scopes.
     pub(crate) fn leave_transient(&mut self, depth: usize) {
         self.transient_depth = depth;
+        if depth == 0 {
+            // A row the scope minted and something already dropped (none can be: rows go only in
+            // a collection, which keeps every unsealed row) still names nothing.
+            let sealed: Vec<String> = std::mem::take(&mut self.sealing_rows)
+                .into_iter()
+                .filter(|key| self.row_exists(key))
+                .collect();
+            self.collectable_rows.extend(sealed);
+        }
+    }
+
+    /// Whether any table holds the row `key`.
+    fn row_exists(&self, key: &str) -> bool {
+        self.stacks.contains_key(key)
+            || self.templates.contains_key(key)
+            || self.patches.contains_key(key)
+            || self.patch_builders.contains_key(key)
+            || self.ingredients.contains_key(key)
+            || self.holders.contains_key(key)
+            || self.common_infos.contains_key(key)
+            || self.custom_data.contains_key(key)
+            || self.tooltip_displays.contains_key(key)
     }
 
     /// The values the row `key` holds, which name other objects: a stack's item and
@@ -355,24 +383,6 @@ impl RecipeState {
             out.push(&holder.value);
         }
         out
-    }
-
-    /// Debug text of every row `key` names, for a state fingerprint (`item_stack_cache.rs`).
-    pub(crate) fn row_state(&self, key: &str, out: &mut String) {
-        use std::fmt::Write as _;
-        let _ = write!(
-            out,
-            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
-            self.stacks.get(key),
-            self.templates.get(key),
-            self.patches.get(key),
-            self.patch_builders.get(key),
-            self.ingredients.get(key),
-            self.holders.get(key),
-            self.common_infos.get(key),
-            self.custom_data.get(key),
-            self.tooltip_displays.get(key),
-        );
     }
 
     /// Drop every collectable row the collector didn't reach (`keep` false). A root row is

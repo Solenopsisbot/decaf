@@ -570,6 +570,48 @@ impl NativeJar {
     }
 }
 
+/// What a Java `ItemStack` for a game stack is built from: [`NativeJar::make_item_stack`]'s
+/// arguments, and the prototype values of every item its jar components name, recorded first
+/// ([`NativeJar::record_item_prototype`]), since the components' codecs read them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemStackRequest {
+    pub item_override: Option<Value>,
+    pub item_id: String,
+    pub count: i32,
+    pub patch: Vec<(String, Option<RuntimeComponentValue>)>,
+    pub defaults: Vec<(String, Option<Nbt>)>,
+    pub opaque_components: bool,
+    pub opaque_keys: Vec<String>,
+    /// `(item id, its prototype values)` for each item the components name.
+    pub named_prototypes: Vec<(String, Vec<(String, Option<Nbt>)>)>,
+}
+
+impl NativeJar {
+    /// A Java `ItemStack` built from `request`: the named items' prototypes recorded, then
+    /// [`Self::make_item_stack`]. A new stack each call: the game's stack has no identity an
+    /// embedder could key a reused one on (two equal pouches in two slots are two objects), and
+    /// a decode may read state outside the stack, so no build is reused.
+    pub fn build_item_stack(
+        &self,
+        host: &mut StdHost,
+        request: ItemStackRequest,
+    ) -> Result<Value, NativeError> {
+        for (item_id, defaults) in request.named_prototypes {
+            self.record_item_prototype(host, &item_id, defaults)?;
+        }
+        self.make_item_stack(
+            host,
+            request.item_override,
+            &request.item_id,
+            request.count,
+            request.patch,
+            request.defaults,
+            request.opaque_components,
+            request.opaque_keys,
+        )
+    }
+}
+
 /// The registered `DataComponentType` object of `component`.
 fn component_type_value(host: &StdHost, component: &str) -> Option<Value> {
     host.registrations()

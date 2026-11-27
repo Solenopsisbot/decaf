@@ -645,11 +645,10 @@ impl State {
             let overrides = loaded.jar.item_overrides(&item, &loaded.host);
             let jar_types = crate::item_parts::persistent_jar_types(&loaded.host);
             let jar = &loaded.jar;
-            // Drawn every frame the stack shows: what the calls make is garbage once the bar is
-            // known, and the stack is the one the last draw of this game stack used while
-            // nothing changed it.
+            // Drawn every frame the stack shows: the stack it builds, and everything else the
+            // calls make, is garbage once the bar is known.
             let outcome = loaded.host.with_transient_rows(|jar_host| {
-                let value = crate::item_parts::java_draw_stack(
+                let value = crate::item_parts::java_stack(
                     host,
                     jar,
                     jar_host,

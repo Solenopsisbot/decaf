@@ -216,10 +216,10 @@ fn property_value(
     let jar_types = crate::item_parts::persistent_jar_types(&loaded.host);
     let context = input.context;
     let jar = &loaded.jar;
-    // A draw runs every frame: what it makes is garbage once it has its number, and the stack
-    // is the one the last draw of this game stack used while nothing changed it.
+    // A draw runs every frame: the stack it builds, and everything else it makes, is garbage
+    // once it has its number.
     let outcome = loaded.host.with_transient_rows(|jar_host| {
-        let stack = crate::item_parts::java_draw_stack(
+        let stack = crate::item_parts::java_stack(
             host,
             jar,
             jar_host,
@@ -292,12 +292,11 @@ impl State {
         let jar = &loaded.jar;
         // Asked on every frame the tooltip shows. One transient scope covers the whole make,
         // every font pass included (a rewound probe pass too): what the calls make is garbage once
-        // the component is measured (the component itself is retained). The stack is the one the
-        // last draw of this game stack used while nothing changed it; the passes rerun only the
-        // component, never the stack.
+        // the component is measured (the component itself is retained). The passes rerun only
+        // the component; the stack is built once, before them.
         let mut texts = BTreeMap::new();
         let made = loaded.host.with_transient_rows(|jar_host| {
-            let Some(value) = crate::item_parts::java_draw_stack(
+            let Some(value) = crate::item_parts::java_stack(
                 host,
                 jar,
                 jar_host,
