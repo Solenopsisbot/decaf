@@ -1,0 +1,61 @@
+label kind=1 width=61 height=78
+  draw at 10,20 box 61x78
+  text "Can" 10 20 -5592406 true
+  text "hold" 10 29 -5592406 true
+  text "mixed" 10 38 -5592406 true
+  text "stacks" 10 47 -5592406 true
+  text "of" 10 56 -5592406 true
+  text "runes" 10 65 -5592406 true
+  sprite gui_textured minecraft:container/bundle/slot_background 10 74 24 24 -1
+  sprite gui_textured demo:bar 11 74 0 13 -1
+  sprite gui_textured demo:bar 34 74 33 13 -2130771968
+  sprite gui_textured demo:bar 34 87 30 11 2147483647
+  text "Can" 49 76 -1 true
+  text "Pouch Label" 10 89 -256 true
+  text "Iq6" 2 98 -1 true
+label kind=2 width=61 height=69
+  draw at 10,20 box 61x69
+  text "wrap" 10 20 -5592406 true
+  text "superc" 10 29 -5592406 true
+  text "alifragil" 10 38 -5592406 true
+  text "istic" 10 47 -5592406 true
+  text "words" 10 56 -5592406 true
+  sprite gui_textured minecraft:container/bundle/slot_background 10 65 24 24 -1
+  sprite gui_textured demo:bar 11 65 0 13 -1
+  sprite gui_textured demo:bar 34 65 39 13 -2130771968
+  sprite gui_textured demo:bar 34 78 30 11 2147483647
+  text "wrap" 46 67 -1 true
+  text "Pouch Label" 10 80 -256 true
+  text "Iq5" 2 89 -1 true
+label kind=3 width=61 height=60
+  draw at 10,20 box 61x60
+  text "one" 10 20 -5592406 true
+  text "" 10 29 -5592406 true
+  text "two" 10 38 -5592406 true
+  text "" 10 47 -5592406 true
+  sprite gui_textured minecraft:container/bundle/slot_background 10 56 24 24 -1
+  sprite gui_textured demo:bar 11 56 0 13 -1
+  sprite gui_textured demo:bar 34 56 18 13 -2130771968
+  sprite gui_textured demo:bar 34 69 30 11 2147483647
+  text "one" 49 58 -1 true
+  text "Pouch Label" 10 71 -256 true
+  text "Iq4" 2 80 -1 true
+label kind=4 width=61 height=42
+  draw at 10,20 box 61x42
+  text "qqqqqqq" 10 20 -5592406 true
+  text "qq" 10 29 -5592406 true
+  sprite gui_textured minecraft:container/bundle/slot_background 10 38 24 24 -1
+  sprite gui_textured demo:bar 11 38 0 13 -1
+  sprite gui_textured demo:bar 34 38 39 13 -2130771968
+  sprite gui_textured demo:bar 34 51 30 11 2147483647
+  text "qqqqqqq" 39 40 -1 true
+  text "Pouch Label" 10 53 -256 true
+  text "Iq2" 2 62 -1 true
+label kind=5 width=61 height=24
+  draw at 10,20 box 61x24
+  sprite gui_textured minecraft:container/bundle/slot_background 10 20 24 24 -1
+  sprite gui_textured demo:bar 11 20 0 13 -1
+  sprite gui_textured demo:bar 34 20 0 13 -2130771968
+  sprite gui_textured demo:bar 34 33 30 11 2147483647
+  text "Pouch Label" 10 35 -256 true
+  text "Iq0" 2 44 -1 true

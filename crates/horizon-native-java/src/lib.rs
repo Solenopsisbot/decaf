@@ -218,7 +218,9 @@ pub use level_random::{
     is_counted_level_stream_draw,
 };
 mod client_item_parts;
-pub use client_item_parts::{ClientItemOutcome, ItemModelHolder, TooltipComponentSize};
+pub use client_item_parts::{
+    ClientItemOutcome, ItemModelHolder, TooltipComponentSize, TooltipImage,
+};
 mod item_parts;
 pub use item_parts::{
     GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick, ItemClickDirection,
@@ -4024,6 +4026,14 @@ const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1 << 20;
 const MAX_PERSISTENT_IO_ENTRIES: usize = 4096;
 const MAX_PERSISTENT_IO_BYTES: usize = 16 * 1024 * 1024;
 
+/// A copy of a host's counted-call record, and of the classes it holds as erroneous
+/// ([`StdHost::unknown_calls_mark`]).
+#[derive(Clone, Debug)]
+pub struct UnknownCallsMark {
+    counted: BTreeMap<String, usize>,
+    erroneous: std::collections::BTreeSet<String>,
+}
+
 /// Deterministic, game-independent mappings for the small standard-library
 /// surface commonly reached during mod bootstrap.
 #[derive(Debug, Clone)]
@@ -4889,6 +4899,61 @@ impl StdHost {
 
     pub fn unknown_host_call_count(&self) -> usize {
         self.unknown_host_calls.values().sum()
+    }
+
+    /// The counted-call record as it stands, for an embedder that runs a call once to learn
+    /// what it asks (a tooltip component's font questions, `client_font.rs`) and then runs it
+    /// again with the answers: [`Self::rewind_unknown_calls`] drops what the discarded probe
+    /// counted, so only the run whose result is used counts. The probe's own result must be
+    /// thrown away, the call must be one the game itself repeats (a tooltip component's
+    /// `getHeight` / `extractImage`, which vanilla runs every frame), and what the probe counted
+    /// must be only what the answers remove ([`Self::unknown_calls_since`]).
+    pub fn unknown_calls_mark(&self) -> UnknownCallsMark {
+        UnknownCallsMark {
+            counted: self.unknown_host_calls.clone(),
+            erroneous: self.erroneous_class_records(),
+        }
+    }
+
+    /// Put the counted-call record back to `mark` ([`Self::unknown_calls_mark`]).
+    pub fn rewind_unknown_calls(&mut self, mark: UnknownCallsMark) {
+        self.unknown_host_calls = mark.counted;
+    }
+
+    /// The persistent runtime's erroneous-class records (`class_init.rs`): a class whose
+    /// `<clinit>` failed, which every later use refuses (`NoClassDefFoundError`, or the runtime's
+    /// "failed to initialize earlier").
+    fn erroneous_class_records(&self) -> std::collections::BTreeSet<String> {
+        self.persistent_initialized_classes
+            .iter()
+            .filter(|entry| class_init::is_erroneous_record(entry))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a class became erroneous since `mark`. A run that did is no probe to throw away:
+    /// the failure outlives it (a font refusal inside a `<clinit>` leaves the class erroneous, and
+    /// the next run's use of it fails with nothing counted and nothing asked), so its counts
+    /// must stand.
+    pub fn classes_failed_since(&self, mark: &UnknownCallsMark) -> bool {
+        self.erroneous_class_records()
+            .iter()
+            .any(|entry| !mark.erroneous.contains(entry))
+    }
+
+    /// What was counted since `mark`, by key: the record a rewind to `mark` would drop. An
+    /// embedder rewinds only when this is exactly what it means to drop (a tooltip run's font
+    /// refusals, `ClientFrameOutput::font_refusals`); anything else the run counted may have
+    /// been kept by the jar (a counted call's placeholder stored in a static during a class's
+    /// first `<clinit>`, which the next run doesn't repeat), so it must stand.
+    pub fn unknown_calls_since(&self, mark: &UnknownCallsMark) -> BTreeMap<String, usize> {
+        self.unknown_host_calls
+            .iter()
+            .filter_map(|(key, &count)| {
+                let before = mark.counted.get(key).copied().unwrap_or(0);
+                (count > before).then(|| (key.clone(), count - before))
+            })
+            .collect()
     }
 
     /// Serializer object identities registered for client recipe synchronization.

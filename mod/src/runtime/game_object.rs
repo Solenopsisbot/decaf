@@ -481,6 +481,9 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
         (true, "font") => &["net/minecraft/client/gui/Font"],
         (true, "gui") => &["net/minecraft/client/gui/Gui"],
         (true, "render-pipeline") => &["com/mojang/renderpearl/api/pipeline/RenderPipeline"],
+        // A `Font.split` line (`client_font.rs`): `Language.getVisualOrder`'s lambda, an object
+        // of no class but its own, which implements `FormattedCharSequence` alone.
+        (true, "char-sequence") => &["net/minecraft/util/FormattedCharSequence"],
         (true, "inventory") => &[
             "net/minecraft/world/entity/player/Inventory",
             "net/minecraft/world/Container",

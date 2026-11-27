@@ -65,6 +65,11 @@ use super::*;
 /// Prefix of an erroneous-class record in the initialized-class set:
 /// `\0erroneous\0<internal name>\0<cause>`.
 const ERRONEOUS_PREFIX: &str = "\u{0}erroneous\u{0}";
+/// Whether an initialized-class set entry is an erroneous-class record.
+pub(crate) fn is_erroneous_record(entry: &str) -> bool {
+    entry.starts_with(ERRONEOUS_PREFIX)
+}
+
 /// The cause tag of a class whose `<clinit>` threw a Java exception.
 const JAVA_FAILURE: &str = "java";
 /// The cause tag prefix of a class whose `<clinit>` the interpreter refused.

@@ -20,16 +20,179 @@
 //!   into `ClientTooltipComponent.create`) maps to `CustomBundleTooltipComponent`, whose
 //!   `getWidth` is `96` and whose `getHeight` for contents of `n` stacks is
 //!   `ceilDiv(min(12, n), 4) * 24 + 13 + 8` (`getHeightOfNonEmpty`, `getRows`,
-//!   `getNumVisibleSlots`); an empty pouch's height wraps its description with `Font.split`, which
-//!   the client surface does not model: counted.
+//!   `getNumVisibleSlots`).
+//! - The empty, partly full and full pouches' tooltip images, measured and drawn in a tooltip's
+//!   screen frame whose font is the advance table `fixture_client_font.rs` uses, are
+//!   `fixtures/runes_client_items/java25.txt`: `oracle/PouchTooltipOracle.java` on Java 25.0.5+8,
+//!   Bundle API's own `CustomBundleTooltipComponent` on the real 26.3 client's `Font`,
+//!   `ClientLanguage` and `GuiGraphicsExtractor` (see the fixture's README). Every size and draw
+//!   is exact, nothing counted: the description wraps with `Font.split`, the slots and the bar are
+//!   26.3 `blitSprite`s on `GUI_TEXTURED`, the runes are `item`/`itemDecorations` of the
+//!   contents' own stacks, and the labels are centred with `Font.width`.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use horizon_native_java::{
     ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemHook, ItemModelHolder, NativeJar, Nbt,
     NbtCompound, RuntimeComponentValue, StdHost, Value,
+    client_surface::{
+        ClientSnapshot, ClientText, DrawOp, FontAnswers, FontQuestion, TextMetrics, WidthOrder,
+    },
 };
+
+const JAVA25: &str = include_str!("fixtures/runes_client_items/java25.txt");
+
+/// The translations the oracle's `ClientLanguage` holds: Runes 1.3.2's en_us for the pouch's
+/// description, vanilla 26.3's en_us for the bundle labels Bundle API draws.
+const TRANSLATIONS: &[(&str, &str)] = &[
+    (
+        "item.runes.rune_pouch.empty.description",
+        "Can hold mixed stacks of runes",
+    ),
+    ("item.minecraft.bundle.empty", "Empty"),
+    ("item.minecraft.bundle.full", "Full"),
+];
+
+/// The oracle's advance table (`PouchTooltipOracle.advance`, `fixture_client_font.rs`'s too).
+fn advances() -> Vec<f32> {
+    (0u8..128)
+        .map(|c| {
+            let c = c as char;
+            match c {
+                c if (c as u32) < 32 => 0.0,
+                ' ' => 4.0,
+                c if "i!.,:;'|".contains(c) => 2.0,
+                'l' => 3.0,
+                c if "tI[]".contains(c) => 4.0,
+                c if "fk<>{}()\"*".contains(c) => 5.0,
+                'q' => 5.5,
+                '@' | '~' => 7.0,
+                _ => 6.0,
+            }
+        })
+        .collect()
+}
+
+/// The oracle's font: its advance table and translations.
+fn oracle_font() -> TextMetrics {
+    TextMetrics {
+        advances: advances(),
+        translations: TRANSLATIONS
+            .iter()
+            .map(|(key, text)| ((*key).to_owned(), (*text).to_owned()))
+            .collect(),
+        ..TextMetrics::default()
+    }
+}
+
+/// A tooltip's screen frame (the embedder's is one) whose font is `metrics`.
+fn screen_frame(metrics: TextMetrics) -> Arc<ClientSnapshot> {
+    Arc::new(ClientSnapshot {
+        screen_scope: true,
+        metrics: Arc::new(metrics),
+        ..ClientSnapshot::default()
+    })
+}
+
+/// A tooltip frame whose font is the oracle's glyph table.
+fn tooltip_frame() -> Arc<ClientSnapshot> {
+    screen_frame(oracle_font())
+}
+
+/// A tooltip frame with no glyph table, as Sunrise's is, holding only the game font's answers.
+fn answered_frame(answers: &FontAnswers) -> Arc<ClientSnapshot> {
+    screen_frame(TextMetrics {
+        answers: answers.clone(),
+        ..TextMetrics::default()
+    })
+}
+
+/// A fake embedder whose game font is the oracle's, asked text by text as Sunrise's
+/// `text_width` / `text_split` are (`mod/src/client_item_parts.rs`).
+fn game_font(questions: &[FontQuestion], answers: &mut FontAnswers) -> bool {
+    let font = oracle_font();
+    questions.iter().all(|question| match question {
+        FontQuestion::Width(text) => font
+            .exact_width(text, WidthOrder::Logical)
+            .map(|width| answers.widths.insert(text.clone(), width))
+            .is_some(),
+        FontQuestion::Split(text, width) => font
+            .exact_split(text, *width)
+            .map(|lines| answers.splits.insert((text.clone(), *width), lines))
+            .is_some(),
+    })
+}
+
+/// A recorded draw as the oracle prints it.
+fn print(op: &DrawOp) -> String {
+    let translations: BTreeMap<&str, &str> = TRANSLATIONS.iter().copied().collect();
+    match op {
+        DrawOp::Text {
+            text,
+            at: [x, y],
+            argb,
+            shadow,
+            scale: [1.0, 1.0],
+        } => {
+            let text = match text {
+                ClientText::Literal(text) => text.as_str(),
+                ClientText::Translatable(key) => translations[key.as_str()],
+                ClientText::Json(json) => panic!("a styled text: {json}"),
+            };
+            format!(
+                "  text \"{text}\" {} {} {} {shadow}",
+                *x as i32, *y as i32, *argb as i32
+            )
+        }
+        DrawOp::Sprite {
+            sprite,
+            rect: [x, y, w, h],
+            argb,
+        } => format!(
+            "  sprite gui_textured minecraft:{sprite} {} {} {} {} {}",
+            *x as i32, *y as i32, *w as i32, *h as i32, *argb as i32
+        ),
+        DrawOp::Stack {
+            stack,
+            at: [x, y],
+            scale: [1.0, 1.0],
+            model,
+            seed,
+            decorations,
+        } => {
+            assert!(
+                stack.patch.is_empty() && !stack.opaque_components,
+                "{stack:?}"
+            );
+            match (model, decorations) {
+                (true, None) => format!(
+                    "  item {} {} {} {} {seed}",
+                    stack.item_id, stack.count, *x as i32, *y as i32
+                ),
+                (false, Some(None)) => format!(
+                    "  decorations {} {} {} {}",
+                    stack.item_id, stack.count, *x as i32, *y as i32
+                ),
+                other => panic!("unexpected stack draw {other:?}"),
+            }
+        }
+        other => panic!("unexpected draw {other:?}"),
+    }
+}
+
+/// A zero-sized sprite (the oracle's recorder prints it from `blitSprite`'s colour overload: the
+/// empty pouch's bar fill is 0 wide) draws nothing in 26.3 in any `gui.scaling`
+/// (`fixture_client_font.rs`'s `draws_something`), so the surface records none.
+fn draws_something(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("  sprite ") else {
+        return true;
+    };
+    let fields: Vec<&str> = rest.split(' ').collect();
+    fields[4] != "0" && fields[5] != "0"
+}
 
 const POUCH: &str = "runes:small_rune_pouch";
 const RUNE: &str = "runes:fire_stone";
@@ -259,36 +422,101 @@ fn run(jar_path: &Path) {
             .unwrap_or_else(|| panic!("Bundle API maps its data: {:?}", created.report))
     };
     // `getTooltipImage` and `create` run as the item part's hook does, outside a frame; the
-    // component measures and draws inside one.
-    let components: Vec<(Value, i32)> = [(&partly, 45), (&full, 45), (&mixed, 69)]
-        .into_iter()
-        .map(|(stack, height)| (make_component(&mut host, stack), height))
-        .collect();
-    let empty_component = make_component(&mut host, &empty);
-    host.begin_client_frame(std::sync::Arc::default(), &[]);
-    for (component, height) in &components {
-        let size = jar.tooltip_component_size(&mut host, component, &budget);
+    // component measures and draws inside one, a tooltip's screen frame.
+    let mixed_component = make_component(&mut host, &mixed);
+    host.begin_client_frame(tooltip_frame(), &[]);
+    let size = jar.tooltip_component_size(&mut host, &mixed_component, &budget);
+    let size = size
+        .clone()
+        .exact()
+        .unwrap_or_else(|| panic!("the size is exact: {:?}", size.report));
+    assert_eq!((size.width, size.height), (96, 69));
+    host.end_client_frame();
+
+    // The oracle's three pouches: each answers an image, every size and draw exact.
+    let mut printed = Vec::new();
+    for (name, stack) in [("empty", &empty), ("partly", &partly), ("full", &full)] {
+        let component = make_component(&mut host, stack);
+        host.begin_client_frame(tooltip_frame(), &[]);
+        let size = jar.tooltip_component_size(&mut host, &component, &budget);
         let size = size
             .clone()
             .exact()
-            .unwrap_or_else(|| panic!("the size is exact: {:?}", size.report));
-        assert_eq!((size.width, size.height), (96, *height));
+            .unwrap_or_else(|| panic!("{name}: the size is exact: {:?}", size.report));
+        printed.push(format!(
+            "pouch {name} width={} height={}",
+            size.width, size.height
+        ));
+        printed.push(format!("  draw at 8,8 box {}x{}", size.width, size.height));
+        let drawn = jar.draw_tooltip_component_image(
+            &mut host,
+            &component,
+            8,
+            8,
+            size.width,
+            size.height,
+            &budget,
+        );
+        let draws = drawn
+            .clone()
+            .exact()
+            .unwrap_or_else(|| panic!("{name}: the image is exact: {:?}", drawn.report));
+        let out = host.end_client_frame();
+        assert_eq!(out.font_questions, Vec::new(), "{name}");
+        printed.extend(draws.iter().map(print));
+        host.release(&component);
     }
-    // An empty pouch wraps its (empty) description to measure itself: `Font.split` counts.
-    let size = jar.tooltip_component_size(&mut host, &empty_component, &budget);
-    assert!(!size.report.exact());
-    assert!(
-        size.report
-            .unknown_host_calls
-            .keys()
-            .any(|key| key.starts_with("net/minecraft/client/gui/Font#split")),
+    let expected: Vec<&str> = JAVA25
+        .lines()
+        .filter(|line| draws_something(line))
+        .collect();
+    assert_eq!(printed, expected);
+
+    // The path Sunrise runs: no glyph table, each text asked of the game's font between runs
+    // (`NativeJar::tooltip_image_with_font`), the image drawn later with the answers. The same
+    // sizes and draws, and the probes' counts rewound.
+    let mut sunrise = Vec::new();
+    for (name, stack) in [("empty", &empty), ("partly", &partly), ("full", &full)] {
+        let component = make_component(&mut host, stack);
+        let image = jar
+            .tooltip_image_with_font(
+                &mut host,
+                &component,
+                &answered_frame,
+                8,
+                &mut game_font,
+                &budget,
+            )
+            .unwrap_or_else(|| panic!("{name}: no image: {:?}", host.unknown_host_calls()));
+        let size = image.size;
+        sunrise.push(format!(
+            "pouch {name} width={} height={}",
+            size.width, size.height
+        ));
+        sunrise.push(format!("  draw at 8,8 box {}x{}", size.width, size.height));
+        host.begin_client_frame(answered_frame(&image.answers), &[]);
+        let drawn = jar.draw_tooltip_component_image(
+            &mut host,
+            &component,
+            8,
+            8,
+            size.width,
+            size.height,
+            &budget,
+        );
+        host.end_client_frame();
+        let draws = drawn
+            .clone()
+            .exact()
+            .unwrap_or_else(|| panic!("{name}: {:?}", drawn.report));
+        sunrise.extend(draws.iter().map(print));
+        host.release(&component);
+    }
+    assert_eq!(sunrise, expected);
+    assert_eq!(
+        host.unknown_host_call_count(),
+        0,
         "{:?}",
-        size.report
+        host.unknown_host_calls()
     );
-    // Its image draws its slots with 26.3's `blitSprite` (the `renderpearl` pipeline overload),
-    // which the client surface counts.
-    let drawn =
-        jar.draw_tooltip_component_image(&mut host, &components[0].0, 8, 8, 96, 45, &budget);
-    assert!(!drawn.report.exact(), "{:?}", drawn.report);
-    host.end_client_frame();
 }

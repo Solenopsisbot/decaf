@@ -760,12 +760,13 @@ pub(crate) fn gui_draw_with(
             }
         }
         DrawOp::Item { .. } => return Err("item"),
+        DrawOp::Stack { .. } => return Err("stack"),
     })
 }
 
 /// A drawn text as Sunrise's component: a literal without legacy `§` codes, a bare
 /// translation key, or a component's JSON.
-fn api_text(host: &dyn ClientHost, text: &ClientText) -> Option<mod_api::Text> {
+pub(crate) fn api_text(host: &dyn ClientHost, text: &ClientText) -> Option<mod_api::Text> {
     match text {
         ClientText::Literal(literal) if !literal.contains('§') => {
             Some(mod_api::Text::literal(literal.clone()))
