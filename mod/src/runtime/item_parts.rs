@@ -442,6 +442,38 @@ impl NativeJar {
                 other => plain.push((id, other)),
             }
         }
+        opaque_keys.extend(self.record_item_prototype(host, item_id, defaults)?);
+        let stack = host.make_host_item_stack_with_components(
+            item_override,
+            item_id,
+            count,
+            plain,
+            opaque_components,
+            opaque_keys,
+        );
+        if let Value::Host(handle) = &stack
+            && let Some(live) = host.recipes.stacks.get_mut(handle.key())
+        {
+            for (id, value) in decoded {
+                live.patch.entries.insert(id, Some(value));
+            }
+        }
+        Ok(stack)
+    }
+
+    /// Record the game's prototype values of `item_id` (`Item.components()`, as the game holds
+    /// them: `None` when the item hasn't the component) for the components `defaults` names, as
+    /// [`Self::make_item_stack`] does for its own item. An embedder also hands them for every item
+    /// a stack's jar component contents name (a stored `ItemStackTemplate`'s item), which the
+    /// type's codec reads while it decodes. Returns the components whose value stays unknown
+    /// (a vanilla type's value, or a jar type's the runtime can't decode): a read of one counts.
+    pub fn record_item_prototype(
+        &self,
+        host: &mut StdHost,
+        item_id: &str,
+        defaults: Vec<(String, Option<Nbt>)>,
+    ) -> Result<Vec<String>, NativeError> {
+        let mut opaque_keys = Vec::new();
         let mut prototype = BTreeMap::new();
         for (id, nbt) in defaults {
             // The item's own recorded `Item.Properties.component` value answers its prototype
@@ -467,22 +499,7 @@ impl NativeJar {
         if !prototype.is_empty() {
             host.recipes.set_game_prototype(item_id, prototype);
         }
-        let stack = host.make_host_item_stack_with_components(
-            item_override,
-            item_id,
-            count,
-            plain,
-            opaque_components,
-            opaque_keys,
-        );
-        if let Value::Host(handle) = &stack
-            && let Some(live) = host.recipes.stacks.get_mut(handle.key())
-        {
-            for (id, value) in decoded {
-                live.patch.entries.insert(id, Some(value));
-            }
-        }
-        Ok(stack)
+        Ok(opaque_keys)
     }
 
     /// [`StdHost::item_stack_components`] with each jar component value encoded to its NBT

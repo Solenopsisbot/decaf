@@ -306,6 +306,16 @@ pub(crate) fn instance_call(
                 value
             }))
         }
+        // 26.3 `ItemInstance.getMaxStackSize` (default method) offsets 0-19:
+        // `getOrDefault(DataComponents.MAX_STACK_SIZE, 1).intValue()`.
+        ("getMaxStackSize", "()I") => {
+            match stack_component_get(host, &data.item_id, &data.patch, "minecraft:max_stack_size")?
+            {
+                Value::Ref(None) => Some(Ok(Value::Int(1))),
+                Value::Boxed(crate::runtime::Boxed::Integer(n)) | Value::Int(n) => Some(Ok(Value::Int(n))),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

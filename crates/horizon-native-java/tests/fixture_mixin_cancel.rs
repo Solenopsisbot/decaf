@@ -70,6 +70,7 @@ fn build_jar(name: &str, sources: BTreeMap<&str, &str>) -> (scratch::Scratch, st
     let excluded = [
         "demo/Probe.class",
         "org/spongepowered/asm/mixin/injection/callback/CallbackInfo.class",
+        "org/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable.class",
     ];
     for class in files_under(&classes) {
         let entry = class
@@ -157,6 +158,16 @@ public class CallbackInfo {
 }
 "#,
     );
+    // A valued target's `HEAD` callback takes a `CallbackInfoReturnable`, as Mixin's
+    // `Callback.checkDescriptor` requires.
+    sources.insert(
+        "org/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable.java",
+        r#"package org.spongepowered.asm.mixin.injection.callback;
+public class CallbackInfoReturnable<R> extends CallbackInfo {
+    public void setReturnValue(R value) { cancel(); }
+}
+"#,
+    );
     sources.insert(
         "demo/Probe.java",
         r#"package demo;
@@ -180,12 +191,12 @@ public final class Target {
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = Target.class, targets = {"Ldemo/Target;"})
 public abstract class CancelMixin {
     @Inject(method = "cancelMe()I", at = @At("HEAD"), cancellable = true)
-    private static void cancelHead(CallbackInfo info) {
+    private static void cancelHead(CallbackInfoReturnable<Integer> info) {
         Probe.mark("cancel-head");
         info.cancel();
         Probe.mark(info.isCancelled() ? "cancel-seen" : "cancel-missed");
@@ -199,12 +210,12 @@ public abstract class CancelMixin {
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = Target.class, targets = {"Ldemo/Target;"})
 public abstract class KeepMixin {
     @Inject(method = "keep()I", at = @At("HEAD"), cancellable = true)
-    private static void keepHead(CallbackInfo info) {
+    private static void keepHead(CallbackInfoReturnable<Integer> info) {
         Probe.mark(info.isCancelled() ? "keep-cancelled" : "keep-head");
     }
 }
@@ -216,12 +227,12 @@ public abstract class KeepMixin {
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = Target.class, targets = {"Ldemo/Target;"})
 public abstract class LateMixin {
     @Inject(method = "cancelMe()I", at = @At("HEAD"))
-    private static void lateHead(CallbackInfo info) {
+    private static void lateHead(CallbackInfoReturnable<Integer> info) {
         Probe.mark("cancel-late");
     }
 }

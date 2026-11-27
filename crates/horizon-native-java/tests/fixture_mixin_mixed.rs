@@ -154,7 +154,7 @@ public class CallbackInfo {
     sources.insert(
         "org/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable.java",
         r#"package org.spongepowered.asm.mixin.injection.callback;
-public class CallbackInfoReturnable<T> {
+public class CallbackInfoReturnable<T> extends CallbackInfo {
     private T returnValue;
     public void setReturnValue(T value) { this.returnValue = value; }
     public T getReturnValue() { return returnValue; }
@@ -192,8 +192,10 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(value = Target.class, targets = {"Ldemo/Target;"})
 public abstract class ComputeMixin {
+    // A valued target's `HEAD` callback takes a `CallbackInfoReturnable` (Mixin's
+    // `Callback.checkDescriptor`).
     @Inject(method = "compute()I", at = @At("HEAD"))
-    private static void onHead(CallbackInfo info) { Probe.mark("head"); }
+    private static void onHead(CallbackInfoReturnable<Integer> info) { Probe.mark("head"); }
 
     // `setReturnValue` cancels: Mixin throws unless the @Inject is cancellable.
     @Inject(method = "compute()I", at = @At("RETURN"), cancellable = true)
@@ -218,7 +220,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(value = Target.class, targets = {"Ldemo/Target;"})
 public abstract class CancelMixin {
     @Inject(method = "cancelled()I", at = @At("HEAD"), cancellable = true)
-    private static void onHead(CallbackInfo info) {
+    private static void onHead(CallbackInfoReturnable<Integer> info) {
         Probe.mark("cancel-head");
         info.cancel();
     }

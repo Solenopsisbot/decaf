@@ -662,6 +662,15 @@ fn blit_texture(texture: &str) -> Option<String> {
 
 /// One recorded `GuiGraphicsExtractor` op as Sunrise's GUI op, or why it has none.
 pub(crate) fn gui_draw(host: &dyn ClientHost, op: &DrawOp) -> Result<GuiDraw, &'static str> {
+    gui_draw_with(op, &|text| api_text(host, text))
+}
+
+/// [`gui_draw`] with `text_of` forming each text draw's text (`None` refuses the draw): a caller
+/// with no host (a tooltip component's `draw_image`) forms none.
+pub(crate) fn gui_draw_with(
+    op: &DrawOp,
+    text_of: &dyn Fn(&ClientText) -> Option<mod_api::Text>,
+) -> Result<GuiDraw, &'static str> {
     let rect = |[x, y, w, h]: [f32; 4]| -> Option<[i32; 4]> {
         Some([pixel(x)?, pixel(y)?, pixel(w)?, pixel(h)?])
     };
@@ -743,7 +752,7 @@ pub(crate) fn gui_draw(host: &dyn ClientHost, op: &DrawOp) -> Result<GuiDraw, &'
                 return Err("text_scaled");
             }
             GuiDraw::Text {
-                text: api_text(host, text).ok_or("text_form")?,
+                text: text_of(text).ok_or("text_form")?,
                 x: pixel(*x).ok_or("text_off_pixel")?,
                 y: pixel(*y).ok_or("text_off_pixel")?,
                 color: *argb,

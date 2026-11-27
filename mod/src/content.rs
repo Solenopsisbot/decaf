@@ -640,8 +640,8 @@ pub(crate) fn register_block_parts(
 
 /// Attaches a generic [`crate::item_parts::JavaItemPart`] to every registered Java mod item
 /// (owned as [`attachable_registrations`] decides) whose class chain declares an override the
-/// part runs: `overrideStackedOnOther`, `overrideOtherStackedOnMe`, `use`, the bar methods or
-/// `onDestroyed`. An item a jar built as a plain `new Item(..)` gets none.
+/// part runs: `overrideStackedOnOther`, `overrideOtherStackedOnMe`, `use`, the bar methods,
+/// `onDestroyed` or `getTooltipImage`. An item a jar built as a plain `new Item(..)` gets none.
 pub(crate) fn register_item_parts(
     state: &Arc<Mutex<State>>,
     registrar: &mut dyn Registrar,
@@ -673,6 +673,7 @@ pub(crate) fn register_item_parts(
                 ItemHook::BarWidth,
                 ItemHook::BarColor,
                 ItemHook::Destroyed,
+                ItemHook::TooltipImage,
             ]
             .into_iter()
             .any(|hook| overrides.overrides(hook))

@@ -217,6 +217,8 @@ pub use level_random::{
     DRAW_AFTER_DEFERRED_EFFECT, LEVEL_STREAM_UNKNOWN, LevelRandomStream,
     is_counted_level_stream_draw,
 };
+mod client_item_parts;
+pub use client_item_parts::{ClientItemOutcome, ItemModelHolder, TooltipComponentSize};
 mod item_parts;
 pub use item_parts::{
     GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick, ItemClickDirection,
@@ -1813,6 +1815,29 @@ impl CallbackInfos {
             .clone()
             .or_else(|| state.actual.clone())
             .unwrap_or(Value::Ref(None)))
+    }
+
+    /// What a target a callback cancelled returns: the `setReturnValue` value in the target's
+    /// declared shape (sponge-mixin 0.17.5's woven `HEAD` returns `cir.getReturnValue()`), with
+    /// `true`; the descriptor's default when no callback set one, with `false`.
+    fn cancelled_result(
+        &self,
+        marker: &str,
+        target_descriptor: &str,
+    ) -> Result<(Value, bool), NativeError> {
+        // `setReturnValue(null)` on a primitive target: the woven return unboxes through
+        // `getReturnValueI()` and its siblings, which answer 0 for `null`.
+        let primitive = !matches!(
+            return_desc(target_descriptor).as_bytes().first(),
+            Some(b'L' | b'[')
+        );
+        if primitive && matches!(self.state(marker)?.returned, Some(Value::Ref(None))) {
+            return Ok((Value::default_for(target_descriptor), true));
+        }
+        Ok(match self.take_override(marker, target_descriptor)? {
+            Some(value) => (value, true),
+            None => (Value::default_for(target_descriptor), false),
+        })
     }
 
     /// The override in the target's declared shape, or `None` when no callback
@@ -23845,9 +23870,10 @@ impl NativeJar {
     /// left to [`Self::unresolved_invoke_plans`].
     ///
     /// A `cancellable` HEAD plan is accepted: the native `CallbackInfo` owns the
-    /// flag and the execution stops the target body when it is set.  A HEAD
-    /// callback takes the plain `CallbackInfo`; a `CallbackInfoReturnable` is a
-    /// return-value override, which this runtime only models after the body.
+    /// flag and the execution stops the target body when it is set, answering
+    /// the callback's `setReturnValue` (or the descriptor's default after a bare
+    /// `cancel()`).  As Mixin requires, a HEAD callback on a `void` target takes a
+    /// `CallbackInfo` and one on a valued target a `CallbackInfoReturnable`.
     /// A RETURN/TAIL plan follows the target's shape: a non-void target needs a
     /// trailing `CallbackInfoReturnable` and a void target must not declare one.
     /// An INVOKE callback mirrors the woven method's arguments and may add one
@@ -23882,17 +23908,39 @@ impl NativeJar {
             if gate.skips(&plan) {
                 continue;
             }
+            let selected_by_name = plan.target.descriptor.is_empty();
             plan.target.descriptor = target.descriptor.clone();
             match plan.at.as_str() {
                 "HEAD" => {
-                    if callback_takes_returnable(&plan.callback.descriptor) {
+                    // Mixin's `Callback.checkDescriptor`: a `void` target takes a
+                    // `CallbackInfo`, a valued one a `CallbackInfoReturnable` ("Invalid
+                    // descriptor ... Expected ..."). A selector that names the target by
+                    // name alone may select several methods, and Mixin skips the ones the
+                    // handler doesn't fit; one that names it exactly fails the mixin.
+                    let returnable = callback_takes_returnable(&plan.callback.descriptor);
+                    let valued = return_desc(&target.descriptor) != "V";
+                    if returnable != valued {
+                        if selected_by_name {
+                            continue;
+                        }
                         return Err(NativeError::Metadata(format!(
-                            "native Mixin callback {}#{}{} takes a CallbackInfoReturnable at HEAD on {}#{}; a HEAD callback takes a CallbackInfo and a cancelled HEAD answers the target descriptor's default",
+                            "native Mixin callback {}#{}{} takes a {} at HEAD on {}#{}{}; Mixin expects a {} there",
                             plan.callback.owner,
                             plan.callback.name,
                             plan.callback.descriptor,
+                            if returnable {
+                                "CallbackInfoReturnable"
+                            } else {
+                                "CallbackInfo"
+                            },
                             target.owner,
-                            target.name
+                            target.name,
+                            target.descriptor,
+                            if valued {
+                                "CallbackInfoReturnable"
+                            } else {
+                                "CallbackInfo"
+                            },
                         )));
                     }
                     before.push(plan);
@@ -26361,10 +26409,15 @@ impl NativeJar {
             &mut callback_infos,
         )?;
         let cancelled = plan.cancellable && callback_infos.flag(&marker)?;
+        let mut return_value_overridden = false;
         let target_result = if cancelled {
             // A cancelled HEAD injection never reaches the target body; the
-            // woven method returns the descriptor's default instead.
-            Value::default_for(&plan.target.descriptor)
+            // woven method returns the callback's `setReturnValue`, else the
+            // descriptor's default.
+            let (value, overridden) =
+                callback_infos.cancelled_result(&marker, &plan.target.descriptor)?;
+            return_value_overridden = overridden;
+            value
         } else {
             let target_receiver = (!target_method.is_static()).then(|| {
                 receiver
@@ -26386,7 +26439,7 @@ impl NativeJar {
             target_result,
             callback_results: vec![callback_result],
             cancelled,
-            return_value_overridden: false,
+            return_value_overridden,
             matched_invoke_sites: 0,
             matched_anchor_sites: 0,
             skipped_plans: Vec::new(),
@@ -26687,6 +26740,7 @@ impl NativeJar {
         });
         let mut callback_infos = CallbackInfos::new();
         let mut cancelled = false;
+        let mut return_value_overridden = false;
         let mut callback_results = Vec::with_capacity(plans.len());
         let target_result = if first.at == "HEAD" {
             for plan in plans {
@@ -26705,7 +26759,12 @@ impl NativeJar {
                 }
             }
             if cancelled {
-                Value::default_for(&first.target.descriptor)
+                let (value, overridden) = callback_infos.cancelled_result(
+                    &callback_info_marker(&first.target),
+                    &first.target.descriptor,
+                )?;
+                return_value_overridden = overridden;
+                value
             } else {
                 self.invoke_with_callback_infos(
                     &first.target.owner,
@@ -26743,7 +26802,7 @@ impl NativeJar {
             target_result,
             callback_results,
             cancelled,
-            return_value_overridden: false,
+            return_value_overridden,
             matched_invoke_sites: 0,
             matched_anchor_sites: 0,
             skipped_plans: Vec::new(),
@@ -27364,8 +27423,13 @@ impl NativeJar {
                 break;
             }
         }
+        // Assigned when cancelled; the other branch returns its own report.
+        let return_value_overridden;
         let target_result = if cancelled {
-            Value::default_for(&target.descriptor)
+            let (value, overridden) =
+                callback_infos.cancelled_result(&marker, &target.descriptor)?;
+            return_value_overridden = overridden;
+            value
         } else {
             let target_receiver = (!target_method.is_static()).then(|| {
                 receiver
@@ -27437,7 +27501,7 @@ impl NativeJar {
             target_result,
             callback_results: head_results,
             cancelled,
-            return_value_overridden: false,
+            return_value_overridden,
             matched_invoke_sites: 0,
             matched_anchor_sites: 0,
             skipped_plans: gate.skipped,
@@ -28706,7 +28770,10 @@ impl<H: Host> Runtime<'_, H> {
                 let cancelled = self.callback_infos.flag(&owned)?;
                 Ok(Some(Value::Int(i32::from(cancelled))))
             }
+            // sponge-mixin 0.17.5's `CallbackInfoReturnable.setReturnValue`: `super.cancel()`,
+            // then the value, so a `HEAD` callback that only sets a value cancels the target too.
             ("setReturnValue", "(Ljava/lang/Object;)V") => {
+                self.callback_infos.cancel(&owned)?;
                 self.callback_infos
                     .set_return(&owned, args.first().cloned().unwrap_or(Value::Ref(None)))?;
                 Ok(Some(Value::Void))
@@ -28787,6 +28854,20 @@ impl<H: Host> Runtime<'_, H> {
             // A cancel() at an invoke site suppresses that call and, like the
             // HEAD chain, the callbacks after it at the same site.
             if entry.cancellable && self.callback_infos.flag(marker)? {
+                // sponge-mixin 0.17.5 returns from the whole target on any cancel of a
+                // cancellable injector (`injectCancellationCode` -> `injectReturnCode`), with
+                // `setReturnValue`'s value or the descriptor's default; the rest of the body
+                // never runs. A suppressed call, the model here, runs it: counted.
+                let what = if self.callback_infos.state(marker)?.returned.is_some() {
+                    "setReturnValue"
+                } else {
+                    "cancel"
+                };
+                self.host.unknown_operand_call(&MethodRef {
+                    owner: entry.callback.owner.clone(),
+                    name: format!("{} <{what} at INVOKE>", entry.callback.name),
+                    descriptor: entry.callback.descriptor.clone(),
+                })?;
                 return Ok(true);
             }
         }
@@ -48295,8 +48376,10 @@ modId="minecraft"
         };
         let jar = NativeJar::from_classes([class]);
         let limit = std::time::Duration::from_millis(5);
-        let budget = ExecutionBudget::within(limit);
+        // `within` reads the clock: take `started` first, so the elapsed time it is compared
+        // with covers the whole budget.
         let started = std::time::Instant::now();
+        let budget = ExecutionBudget::within(limit);
         let error = jar
             .execute_with_budget("demo.Spin", Some("spin"), "main", &mut NullHost, &budget)
             .expect_err("a loop past its budget must fail");
@@ -48316,7 +48399,9 @@ modId="minecraft"
                 assert_eq!(class, "demo/Spin");
                 assert_eq!(method, "spin");
                 assert_eq!(budget, limit);
-                assert!(instructions > 0);
+                // On a loaded machine the deadline can pass before the loop's first
+                // instruction: the budget promises the stop, not a number of instructions.
+                let _ = instructions;
                 assert_eq!(instruction_limit, None);
             }
             other => panic!("expected the execution budget, got {other:?}"),
@@ -59739,7 +59824,7 @@ mandatory = true
     }
 
     #[test]
-    fn invoke_plan_cancellation_pushes_the_default_return() {
+    fn invoke_plan_cancellation_counts() {
         let jar = NativeJar::from_classes([invoke_target_class(), cancel_invoke_mixin()]);
         let site = MethodRef {
             owner: "demo/Probe".into(),
@@ -59757,18 +59842,35 @@ mandatory = true
         assert!(failed.is_err(), "{failed:?}");
         assert_eq!(host.calls, 0, "the call never reaches the host");
 
-        // Cancellable: the call is suppressed and the descriptor's default
-        // (0) takes its place, so the woven method answers 0.
-        let plan = invoke_plan(site, true);
+        // Cancellable: sponge-mixin 0.17.5 returns from the whole target on the
+        // cancel, which the suppressed-call model does not express: the cancel is
+        // counted, and a host that counts nothing refuses it.
+        let plan = invoke_plan(site.clone(), true);
         let mut host = ValueHost { calls: 0 };
+        let refused =
+            jar.execute_mixin_at_invoke(std::slice::from_ref(&plan), None, &[], &mut host);
+        assert!(
+            matches!(&refused, Err(NativeError::UnknownHostCall(r)) if r.name.ends_with("<cancel at INVOKE>")),
+            "{refused:?}"
+        );
+        assert_eq!(host.calls, 0, "the cancelled call never reaches the host");
+        // A counting host keeps going, with the call suppressed and the cancel on its count.
+        let mut host = StdHost::new();
         let report = jar
             .execute_mixin_at_invoke(std::slice::from_ref(&plan), None, &[], &mut host)
             .unwrap();
-        assert_eq!(report.target_result, Value::Int(0));
-        assert_eq!(host.calls, 0, "the cancelled call never reaches the host");
         assert!(report.cancelled);
         assert_eq!(report.matched_invoke_sites, 1);
         assert_eq!(report.callback_results, vec![Value::Void]);
+        assert_eq!(
+            host.unknown_host_calls()
+                .into_iter()
+                .filter(|(key, _)| key.contains("<cancel at INVOKE>"))
+                .count(),
+            1,
+            "{:?}",
+            host.unknown_host_calls()
+        );
     }
 
     #[test]
@@ -59782,11 +59884,11 @@ mandatory = true
             },
             true,
         );
-        let mut host = ValueHost { calls: 0 };
+        // A counting host: the cancel at the site is counted (`invoke_plan_cancellation_counts`).
+        let mut host = StdHost::new();
         let report = jar
             .execute_mixin_at_invoke(std::slice::from_ref(&plan), None, &[], &mut host)
             .unwrap();
-        assert_eq!(report.target_result, Value::Int(0));
         assert!(report.cancelled);
         assert_eq!(report.matched_invoke_sites, 1);
     }

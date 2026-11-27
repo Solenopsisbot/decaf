@@ -16,6 +16,9 @@ use crate::runtime;
 #[path = "menu_screen.rs"]
 pub(crate) mod menu_screen;
 
+#[path = "client_item_parts.rs"]
+pub(crate) mod item_models;
+
 #[derive(Default)]
 pub(crate) struct State {
     loaded: bool,

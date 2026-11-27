@@ -4,7 +4,8 @@
 //! One [`JavaItemPart`] is attached to every jar item whose class chain declares one of the
 //! hooks the runtime runs ([`runtime::ItemHook`]): `item_stacked_on_other` runs
 //! `overrideStackedOnOther` / `overrideOtherStackedOnMe`, `use_item` runs `use`, `item_bar` runs
-//! `isBarVisible` / `getBarWidth` / `getBarColor`, and `item_destroyed` runs `onDestroyed`. The
+//! `isBarVisible` / `getBarWidth` / `getBarColor`, `item_destroyed` runs `onDestroyed`, and
+//! `tooltip_image` runs `getTooltipImage` (`client::item_models`, step 8). The
 //! Java call gets the runtime's façades (`runtime/item_parts.rs`); its stacks cross with their
 //! jar data components as the NBT the type's own codec writes.
 //!
@@ -25,7 +26,7 @@ use crate::runtime::{
     ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemClick, ItemClickDirection, ItemHook, ItemUse,
     LiveMenuEffect, NativeJar, StdHost, Value,
 };
-use crate::{JAR_BUDGET, LOG, State, caught};
+use crate::{JAR_BUDGET, LOG, State, caught, runtime};
 
 /// Player inventory indices a plain `Slot` shows in a vanilla menu: `Inventory.items` 0..36
 /// (the armour 36..40 and off hand 40 slots of `InventoryMenu` are slot subclasses).
@@ -104,17 +105,39 @@ pub(crate) fn java_stack(
     jar_types: &[String],
 ) -> Option<Value> {
     let parts = crate::client::stack_parts(host, stack, jar_types)?;
-    let defaults = jar_types
-        .iter()
-        .map(String::as_str)
-        .chain(GAME_PROTOTYPE_COMPONENTS.iter().copied())
-        .map(|id| {
-            let nbt = host
-                .item_default_component(stack.item(), id)
-                .and_then(|tag| crate::attachments::tag_to_runtime(&tag, 0).ok());
-            (id.to_owned(), nbt)
-        })
-        .collect();
+    let defaults = |item: mod_api::ItemKey| {
+        jar_types
+            .iter()
+            .map(String::as_str)
+            .chain(GAME_PROTOTYPE_COMPONENTS.iter().copied())
+            .map(|id| {
+                let nbt = host
+                    .item_default_component(item, id)
+                    .and_then(|tag| crate::attachments::tag_to_runtime(&tag, 0).ok());
+                (id.to_owned(), nbt)
+            })
+            .collect::<Vec<_>>()
+    };
+    // The items a jar component's stored value names (a bundle's `ItemStackTemplate`s): the
+    // type's codec reads their prototypes while it decodes (a bundle's occupancy asks each one's
+    // max stack size and contents). Each string that is a registered item's id gets the game's
+    // values; one that only looks like an id adds a fact nothing reads.
+    let mut named = std::collections::BTreeSet::new();
+    for (_, entry) in &parts.patch {
+        if let Some(runtime::RuntimeComponentValue::Nbt(nbt)) = entry {
+            item_ids_in(nbt, &mut named);
+        }
+    }
+    for id in named {
+        let key = mod_api::Identifier::parse(&id)
+            .ok()
+            .and_then(|parsed| host.item_key(&parsed));
+        if let Some(key) = key {
+            jar.record_item_prototype(jar_host, &id, defaults(key))
+                .ok()?;
+        }
+    }
+    let defaults = defaults(stack.item());
     jar.make_item_stack(
         jar_host,
         item_override,
@@ -126,6 +149,18 @@ pub(crate) fn java_stack(
         parts.opaque_keys,
     )
     .ok()
+}
+
+/// Every string in `nbt` that could be an item id (`namespace:path`), at any depth.
+fn item_ids_in(nbt: &runtime::Nbt, out: &mut std::collections::BTreeSet<String>) {
+    match nbt {
+        runtime::Nbt::String(text) if text.contains(':') => {
+            out.insert(text.clone());
+        }
+        runtime::Nbt::List(items) => items.iter().for_each(|item| item_ids_in(item, out)),
+        runtime::Nbt::Compound(fields) => fields.values().for_each(|field| item_ids_in(field, out)),
+        _ => {}
+    }
 }
 
 /// A runtime stack as a game stack, its jar components encoded: `Some(None)` for an empty one,
@@ -219,6 +254,18 @@ impl ItemPart for JavaItemPart {
 
     fn item_destroyed(&self, host: &mut dyn ServerHost, event: &mut ItemDestroyedEvent<'_>) {
         self.server_destroyed(host, event);
+    }
+
+    fn tooltip_image(
+        &self,
+        host: &dyn mod_api::ClientHost,
+        event: &mut mod_api::TooltipImageEvent<'_>,
+    ) -> Option<mod_api::TooltipComponent> {
+        let mut client = self
+            .client
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        client.java_tooltip_image(&self.client, host, &self.item_id, event.stack)
     }
 }
 

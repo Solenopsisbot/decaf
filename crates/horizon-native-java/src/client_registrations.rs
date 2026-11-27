@@ -26,6 +26,14 @@ const DEBUG_PROFILE: &str = "net/minecraft/client/gui/components/debug/DebugScre
 const DEBUG_STATUS: &str = "net/minecraft/client/gui/components/debug/DebugScreenEntryStatus";
 const MAP_CODEC: &str = "com/mojang/serialization/MapCodec";
 const STREAM_CODEC: &str = "net/minecraft/network/codec/StreamCodec";
+/// `RangeSelectItemModelProperties`, whose private `ID_MAPPER` names the numeric item model
+/// properties an item definition's `range_dispatch` can use (26.3 client jar).
+const RANGE_SELECT_PROPERTIES: &str =
+    "net/minecraft/client/renderer/item/properties/numeric/RangeSelectItemModelProperties";
+const LATE_BOUND_ID_MAPPER: &str = "net/minecraft/util/ExtraCodecs$LateBoundIdMapper";
+const ID_MAPPER_DESC: &str = "Lnet/minecraft/util/ExtraCodecs$LateBoundIdMapper;";
+/// The handle `RangeSelectItemModelProperties.ID_MAPPER` reads as.
+const RANGE_SELECT_ID_MAPPER: &str = "client/range-select-id-mapper";
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Registration {
@@ -51,6 +59,11 @@ pub(crate) enum Registration {
     },
     ModelLoadingPlugin {
         plugin: Value,
+    },
+    /// `RangeSelectItemModelProperties.ID_MAPPER.put(id, codec)`.
+    RangeSelectProperty {
+        id: String,
+        codec: Value,
     },
 }
 
@@ -314,6 +327,12 @@ const HUD_IDS: &[&str] = &[
 pub(crate) fn static_field(state: &mut State, r: &MethodRef) -> Option<Value> {
     if let Some(value) = model_layers::static_field(&mut state.model_data, r) {
         return Some(value);
+    }
+    // A jar reaches the private mapper only through a Mixin's `@Shadow` (or an accessor), which
+    // `execute_getstatic` resolves to this field.
+    if r.owner == RANGE_SELECT_PROPERTIES && r.name == "ID_MAPPER" && r.descriptor == ID_MAPPER_DESC
+    {
+        return Some(client_handle("range-select-id-mapper"));
     }
     let cache_key = format!("{}#{}:{}", r.owner, r.name, r.descriptor);
     if let Some(value) = state.static_values.get(&cache_key) {
@@ -644,6 +663,9 @@ pub(crate) fn instance(
             _ => {}
         }
     }
+    if let Some(answer) = range_select_put(state, r, receiver, args) {
+        return Some(answer);
+    }
     if r.owner != PARTICLE_REGISTRY || r.name != "register" || args.len() != 2 {
         return None;
     }
@@ -657,6 +679,66 @@ pub(crate) fn instance(
     Some(Ok(Value::Void))
 }
 
+/// `ExtraCodecs.LateBoundIdMapper.put(id, value)` on `RangeSelectItemModelProperties.ID_MAPPER`
+/// (26.3: `Objects.requireNonNull(value, ...)`, then `idToValue.put(id, value)` on a
+/// `HashBiMap`, then `return this`). Recorded when it is exact: a jar's own id, its own codec
+/// object. Counted otherwise: a `null` value (the message is a lambda's), a `minecraft:` id
+/// (replacing a built-in property, whose vanilla codec the runtime does not hold), and a codec
+/// already bound to another id (`HashBiMap.put` throws "value already present").
+fn range_select_put(
+    state: &mut State,
+    r: &MethodRef,
+    receiver: &Value,
+    args: &[Value],
+) -> Option<Result<Value, NativeError>> {
+    if r.owner != LATE_BOUND_ID_MAPPER
+        || r.name != "put"
+        || crate::game_object::handle_key(receiver) != Some(RANGE_SELECT_ID_MAPPER)
+    {
+        return None;
+    }
+    let refuse = || Some(Err(NativeError::UnknownHostCall(r.clone())));
+    if r.descriptor
+        != "(Ljava/lang/Object;Ljava/lang/Object;)Lnet/minecraft/util/ExtraCodecs$LateBoundIdMapper;"
+        || args.len() != 2
+    {
+        return refuse();
+    }
+    let (Some(id), codec) = (identifier(&args[0]), &args[1]) else {
+        return refuse();
+    };
+    if matches!(codec, Value::Ref(None)) || id.starts_with("minecraft:") {
+        return refuse();
+    }
+    let bound_elsewhere = state.registrations.iter().any(|registration| {
+        matches!(registration, Registration::RangeSelectProperty { id: other, codec: bound }
+            if bound == codec && *other != id)
+    });
+    if bound_elsewhere {
+        return refuse();
+    }
+    state.registrations.retain(|registration| {
+        !matches!(registration, Registration::RangeSelectProperty { id: other, .. } if *other == id)
+    });
+    state.registrations.push(Registration::RangeSelectProperty {
+        id,
+        codec: codec.clone(),
+    });
+    Some(Ok(receiver.clone()))
+}
+
+/// The numeric item model properties recorded by [`range_select_put`], in `put` order.
+pub(crate) fn range_select_properties(state: &State) -> Vec<(String, Value)> {
+    state
+        .registrations
+        .iter()
+        .filter_map(|registration| match registration {
+            Registration::RangeSelectProperty { id, codec } => Some((id.clone(), codec.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) fn summary(state: &State) -> serde_json::Value {
     let order = state
         .registrations
@@ -668,6 +750,7 @@ pub(crate) fn summary(state: &State) -> serde_json::Value {
             Registration::EntityRenderer { .. } => "entity_renderer".to_owned(),
             Registration::ModelLayer { .. } => "model_layer".to_owned(),
             Registration::ModelLoadingPlugin { .. } => "model_loading_plugin".to_owned(),
+            Registration::RangeSelectProperty { id, .. } => format!("range_select_property:{id}"),
         })
         .collect::<Vec<_>>();
     serde_json::json!({ "count": order.len(), "order": order })
