@@ -708,7 +708,7 @@ impl NativeJar {
     /// Install `player`'s server-side context (`block_use.rs`'s `ActiveBlockUse`) with an
     /// `Inventory` filled from `facts`, run `run`, and report its counted calls.
     #[allow(clippy::too_many_arguments)]
-    fn run_server_item_call<T>(
+    fn run_server_item_call<T: crate::client_item_parts::AnswerRoot>(
         &self,
         host: &mut StdHost,
         player: &BlockUsePlayerData,
@@ -765,10 +765,16 @@ impl NativeJar {
         });
         let mut roots = vec![level, player_value, inventory];
         roots.extend_from_slice(extra_roots);
+        // The answer is the invocation's result, so the store that ends it keeps what the answer
+        // names: `use`'s `InteractionResult` is a `Success` handle whose row (`block_use`'s
+        // `interaction_results`, holding the held item it was transformed to) a collection in
+        // that store would otherwise drop before it is decoded (#609 review).
         let mut out = None;
         let result = self.with_persistent_runtime_with_budget(host, &roots, budget, |rt| {
-            out = Some(run(rt, &call)?);
-            Ok(Value::Void)
+            let answer = run(rt, &call)?;
+            let root = answer.root();
+            out = Some(answer);
+            Ok(root)
         });
         let finished = host.block_use.active_use.take();
         host.block_use.active_use = previous;

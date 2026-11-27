@@ -64,9 +64,10 @@ pub struct ClientItemOutcome<T> {
     pub report: ItemCallReport,
 }
 
-/// The value of a client call's answer that names jar objects: the result its invocation's store
-/// keeps ([`NativeJar::run_client_item_call`]). Plain answers name none.
-trait AnswerRoot {
+/// The value of an item call's answer that names jar objects: the result its invocation's store
+/// keeps ([`NativeJar::run_client_item_call`], `item_parts.rs`'s `run_server_item_call`). Plain
+/// answers name none.
+pub(crate) trait AnswerRoot {
     fn root(&self) -> Value {
         Value::Void
     }
@@ -76,6 +77,7 @@ impl AnswerRoot for f32 {}
 impl AnswerRoot for TooltipComponentSize {}
 impl AnswerRoot for Vec<DrawOp> {}
 impl AnswerRoot for () {}
+impl AnswerRoot for bool {}
 
 impl AnswerRoot for Value {
     fn root(&self) -> Value {

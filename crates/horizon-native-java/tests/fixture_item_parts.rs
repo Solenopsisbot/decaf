@@ -165,7 +165,9 @@ const STUBS: &[(&str, &str)] = &[
         "package net.minecraft.world;\n\
          public interface InteractionResult {\n\
            Success SUCCESS = null; Success SUCCESS_SERVER = null; Fail FAIL = null;\n\
-           final class Success implements InteractionResult {}\n\
+           final class Success implements InteractionResult {\n\
+             public Success heldItemTransformedTo(net.minecraft.world.item.ItemStack stack) { throw new AssertionError(); }\n\
+           }\n\
            final class Fail implements InteractionResult {}\n\
          }",
     ),
@@ -938,5 +940,145 @@ fn two_thousand_server_clicks_leave_the_heap_bounded() {
         assert!(host.collection_count() > collections, "the collector ran");
         assert!(rows < 4_096, "{rows} rows are left after {clicks} clicks");
         assert!(host.resident_heap().instance_fields() < 4_096);
+    });
+}
+
+/// An item whose `use` answers a `Success` it built (`SUCCESS.heldItemTransformedTo(..)`), with
+/// garbage enough that the store ending the call collects. Registered by `TransformProbe`.
+const TRANSFORM_ITEM: &str = "package demo;\n\
+     import net.minecraft.world.InteractionHand; import net.minecraft.world.InteractionResult;\n\
+     import net.minecraft.world.entity.player.Player; import net.minecraft.world.item.Item;\n\
+     import net.minecraft.world.level.Level;\n\
+     public class TransformItem extends Item {\n\
+       public record Garbage(int n) {}\n\
+       private final int garbage;\n\
+       public TransformItem(Properties properties, int garbage) { super(properties); this.garbage = garbage; }\n\
+       @Override public InteractionResult use(Level level, Player player, InteractionHand hand) {\n\
+         Object last = null;\n\
+         for (int i = 0; i < garbage; i++) { last = new Garbage(i); }\n\
+         return InteractionResult.SUCCESS.heldItemTransformedTo(player.getItemInHand(hand).copyWithCount(2));\n\
+       }\n\
+     }\n";
+
+const TRANSFORM_PROBE: &str = "package demo;\n\
+     import net.fabricmc.api.ModInitializer; import net.minecraft.core.Registry;\n\
+     import net.minecraft.core.registries.BuiltInRegistries; import net.minecraft.core.registries.Registries;\n\
+     import net.minecraft.resources.Identifier; import net.minecraft.resources.ResourceKey;\n\
+     import net.minecraft.world.item.Item;\n\
+     public final class TransformProbe implements ModInitializer {\n\
+       @Override public void onInitialize() {\n\
+         register(\"transform_calm\", 0);\n\
+         register(\"transform_busy\", 4000);\n\
+       }\n\
+       private static void register(String name, int garbage) {\n\
+         Identifier id = Identifier.fromNamespaceAndPath(\"demo\", name);\n\
+         Registry.register(BuiltInRegistries.ITEM, id,\n\
+             new TransformItem(new Item.Properties().setId(ResourceKey.create(Registries.ITEM, id)), garbage));\n\
+       }\n\
+     }\n";
+
+/// `use` answering a `Success` it built: the result is a root of the store that ends the call,
+/// so its row (and the held item it was transformed to) is still there to decode when a
+/// collection ran in that store (#609 review: the server runner persisted `Void`, the row was
+/// pruned, and the embedder kept vanilla's answer). The busy item's 4,000 objects of garbage
+/// make that store collect; the calm item is the same call with none.
+#[test]
+fn a_use_result_survives_a_collection_in_its_own_store() {
+    on_big_stack(|| {
+        let mut sources = STUBS.to_vec();
+        sources.extend_from_slice(&[
+            (
+                "demo/Tally.java",
+                include_str!("fixtures/item_parts/demo/Tally.java"),
+            ),
+            (
+                "demo/Probe.java",
+                include_str!("fixtures/item_parts/demo/Probe.java"),
+            ),
+            (
+                "demo/TallyItem.java",
+                include_str!("fixtures/item_parts/demo/TallyItem.java"),
+            ),
+            ("demo/TransformItem.java", TRANSFORM_ITEM),
+            ("demo/TransformProbe.java", TRANSFORM_PROBE),
+        ]);
+        let fixture = javac_fixture::Fixture::build("item_parts_transform", &sources);
+        let jar = &fixture.jar;
+        let mut host = StdHost::new();
+        jar.execute("demo.TransformProbe", None, "main", &mut host)
+            .expect("probe onInitialize");
+        host.server_player_created(UUID, 1, 0);
+        let mut answers = Vec::new();
+        for name in ["demo:transform_calm", "demo:transform_busy"] {
+            let item = host
+                .registrations()
+                .iter()
+                .find(|entry| entry.registry == "minecraft:item" && entry.id == name)
+                .expect("registered")
+                .value
+                .clone();
+            let collections = host.collection_count();
+            let (line, collected) = host.with_transient_rows(|host| {
+                let held = jar
+                    .build_item_stack(
+                        host,
+                        ItemStackRequest {
+                            item_override: Some(item.clone()),
+                            item_id: name.to_owned(),
+                            count: 5,
+                            ..ItemStackRequest::default()
+                        },
+                    )
+                    .unwrap();
+                let mut inventory = vec![StdHost::empty_item_stack(); 36];
+                inventory[0] = held.clone();
+                let used = jar
+                    .item_use(
+                        host,
+                        &player(Some(held)),
+                        "minecraft:overworld",
+                        &facts(&inventory),
+                        &item,
+                        "demo/TransformItem",
+                        &ItemUse {
+                            hand: "MAIN_HAND".to_owned(),
+                        },
+                        &ExecutionBudget::UNBOUNDED,
+                    )
+                    .expect("use");
+                assert!(used.report.exact(), "{name}: {:?}", used.report);
+                let collected = host.collection_count() > collections;
+                let line = match used.result {
+                    Some(horizon_native_java::InteractionResultValue::Success {
+                        item_context,
+                        ..
+                    }) => {
+                        let transformed = item_context
+                            .held_item_transformed_to
+                            .expect("heldItemTransformedTo");
+                        format!(
+                            "SUCCESS was_item={} transformed={}",
+                            item_context.was_item_interaction,
+                            stack_line(jar, host, &transformed)
+                        )
+                    }
+                    other => format!("{other:?}"),
+                };
+                (line, collected)
+            });
+            answers.push((name, line, collected));
+        }
+        eprintln!("{answers:#?}");
+        // The busy use collected in its own store; the calm one didn't.
+        assert!(!answers[0].2 && answers[1].2, "{answers:?}");
+        // `copyWithCount(2)` of the five held.
+        assert_eq!(
+            answers[0].1,
+            "SUCCESS was_item=true transformed=2 demo:transform_calm tally=none"
+        );
+        assert_eq!(
+            answers[1].1,
+            "SUCCESS was_item=true transformed=2 demo:transform_busy tally=none"
+        );
     });
 }
