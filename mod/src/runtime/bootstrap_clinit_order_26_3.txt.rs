@@ -5,7 +5,8 @@ pub(crate) const VENDORED_DATA: &str = "# Mixin TAIL points the 26.3 server's bo
 # tools/trace_bootstrap_clinit_order.py (a java.lang.classfile agent); do not edit by hand. The
 # `# input` lines are the exact inputs, which the tool checks before every run. Then one point per
 # line: a class's internal name where its <clinit> returns, `<class>.<name>()V` where a static
-# ()V method reaches its last return.
+# ()V method reaches its last return (` @overloaded`: the class declares that name more than
+# once; ` @other-thread`: reached off the main thread).
 # input jdk 25.0.5+8-LTS
 # input server server-26.3.jar sha256:a362163eec5d1612d520772bc16e5b39c09e3b234fdc045f56bf544284ee8ae6
 net/minecraft/nbt/NbtOps

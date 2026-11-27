@@ -8,15 +8,18 @@ Writes, for the server (`--side server`, the default) or the client (`--side cli
   `CrashReport.preload()`, `Bootstrap.bootStrap()`, the calls it makes before anything reads its
   options);
 * `crates/horizon-native-java/src/bootstrap_clinit_order_26_3_client.txt`: the client's, while the
-  real `net.minecraft.client.main.Main.main` runs, up to the first instruction of
-  `Minecraft.<init>` (where Fabric Loader runs the first `main` and `client` entrypoints, so
-  everything before it happens before any mod's code; the client's own `Minecraft.<clinit>`
-  included).
+  real `net.minecraft.client.main.Main.main` runs, up to the point in `Minecraft.<init>` where
+  Fabric Loader 0.20.1 runs the first `main` and `client` entrypoints (`EntrypointPatch`, at the
+  "Backend library: {}" log statement, offset 657), so everything listed happens before any
+  mod's code: the client's own `Minecraft.<clinit>`, and the first part of its constructor
+  (pack repository, services, user API service, data fixers, `Options`, `Tutorial`,
+  `HotbarManager`).
 
 Each line is one point a `TAIL` callback runs at, in the order the game reaches them: a class's
 internal name when its `<clinit>` returns, and `<class>.<name>()V` when a static no-argument
-`void` method reaches its last `return` (Mixin's `TAIL` anchor; only the shape a
-`(CallbackInfo)V` handler can mirror). A method that ends more than once is listed each time.
+`void` method reaches its last `return` (Mixin's `TAIL` anchor). A method that ends more than
+once is listed each time; one whose name its class declares more than once (an overload a
+name-only selector would also select) is marked `@overloaded`.
 
 Why the runtime needs it
 ------------------------
@@ -39,13 +42,18 @@ A Java agent (`InitEndAgent`, JDK 25's `java.lang.classfile`) rewrites every `ne
 class: each `<clinit>` `return` first calls `InitEnd.done("<class>")`, and the last `return` of
 each static `()V` method `InitEnd.done("<class>.<name>()V")`, which append to a queue. On the
 server, a `main` mirroring `Main.main`'s prelude runs, then writes the queue. On the client, the
-real client `Main` runs with its own launcher arguments (an offline user, a scratch game folder)
-and the agent writes the queue and halts the JVM at `Minecraft.<init>`'s first instruction, before
-the game opens a window or touches the network (a SOCKS proxy at a closed local port backs that
-up). A point reached on a thread other than `main` is marked `@other-thread`: its time is not the
-main thread's to order, and the runtime counts a callback there. An initializer that throws never
-returns and is not listed. Neither run has inputs that vary (no world, no options file, no
-account), so two runs give the same list. Fabric does not change it: it loads game classes
+real client `Main` runs with its own launcher arguments (an offline user, a scratch game folder,
+a proxy at a closed local port) and the agent writes the queue and halts the JVM just before
+Fabric's entrypoint hook, before the game opens a window. Both sides run in a network namespace
+with no network (`unshare -rn`; the tool refuses to run without one), with no display and with
+`HOME` and the XDG folders inside the temporary work folder. The window up to the hook builds the
+game's services: `createUserApiService` (`offlineDeveloperMode` is off) makes no request itself
+(authlib 10.0.77 builds a `MinecraftServicesUserApiService` over the proxy), and the two
+`CompletableFuture.supplyAsync` calls on `Util.nonCriticalIoPool()` run on IO threads, whose
+points are marked. A point reached on a thread other than `main` is marked `@other-thread`: its
+time is not the main thread's to order, and the runtime counts a callback there. An initializer
+that throws never returns and is not listed. Neither run has inputs that vary (no world, no
+options file, no account, no network), so two runs give the same list. Fabric does not change it: it loads game classes
 through Knot and Mixin's transformer, but initializes them in the game's order, and runs `main`
 entrypoints only after this bootstrap (`fabric_server_bootstrap_classes_26_3.txt` lists
 `DataComponents` among the classes a real Fabric server loads before the first entrypoint).
@@ -58,10 +66,12 @@ Reproducing the committed files byte-for-byte
         --jdk <JDK 25 home, e.g. Temurin 25.0.5+8> \\
         --output crates/horizon-native-java/src/bootstrap_clinit_order_26_3.txt
 
+    # Copy the launcher's files into a scratch folder first; the tool never reads them in place.
+    cp -r ~/.minecraft/versions/26.3 ~/.minecraft/libraries <scratch>/
     python3 tools/trace_bootstrap_clinit_order.py --side client \\
-        --client-jar <the launcher's versions/26.3/26.3.jar> \\
-        --version-json <the launcher's versions/26.3/26.3.json> \\
-        --libraries <the launcher's libraries directory> \\
+        --client-jar <scratch>/26.3/26.3.jar \\
+        --version-json <scratch>/26.3/26.3.json \\
+        --libraries <scratch>/libraries \\
         --jdk <JDK 25 home> \\
         --output crates/horizon-native-java/src/bootstrap_clinit_order_26_3_client.txt
 
@@ -76,6 +86,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -83,6 +94,12 @@ import zipfile
 from pathlib import Path
 
 GAME_VERSION = "26.3"
+
+# Where Fabric Loader 0.20.1 runs the client's first entrypoint: `EntrypointPatch` (Minecraft
+# 1.19.4 and later) inserts `Hooks.startClient(gameDir, this)` into `Minecraft.<init>` at its
+# "Backend library: {}" log statement (offset 657 in 26.3: `getstatic LOGGER`, the class's own
+# static, then this `ldc`). The trace stops just before the `ldc`.
+CLIENT_STOP = "net/minecraft/client/Minecraft|<init>|Backend library: {}"
 JDK_FEATURE = "25"
 
 SERVER_HEADER = """\
@@ -92,21 +109,25 @@ SERVER_HEADER = """\
 # tools/trace_bootstrap_clinit_order.py (a java.lang.classfile agent); do not edit by hand. The
 # `# input` lines are the exact inputs, which the tool checks before every run. Then one point per
 # line: a class's internal name where its <clinit> returns, `<class>.<name>()V` where a static
-# ()V method reaches its last return.
+# ()V method reaches its last return (` @overloaded`: the class declares that name more than
+# once; ` @other-thread`: reached off the main thread).
 """
 
 CLIENT_HEADER = """\
-# Mixin TAIL points the 26.3 client reaches before Minecraft.<init> (where Fabric runs the first
-# entrypoint), in the order it reaches them. Minecraft 26.3 client, JDK 25: the real
-# net.minecraft.client.main.Main.main (offline user, scratch game folder), stopped at the first
-# instruction of Minecraft.<init>. Generated by tools/trace_bootstrap_clinit_order.py --side client
+# Mixin TAIL points the 26.3 client reaches before Fabric runs the first entrypoint, in the order
+# it reaches them. Minecraft 26.3 client, JDK 25: the real net.minecraft.client.main.Main.main
+# (offline user, scratch game folder, no network), stopped in Minecraft.<init> just before the
+# "Backend library: {}" ldc, where Fabric Loader 0.20.1 starts the entrypoints. Generated by tools/trace_bootstrap_clinit_order.py --side client
 # (a java.lang.classfile agent); do not edit by hand. The `# input` lines are the exact inputs,
 # which the tool checks before every run. Then one point per line: a class's internal name where
-# its <clinit> returns, `<class>.<name>()V` where a static ()V method reaches its last return.
+# its <clinit> returns, `<class>.<name>()V` where a static ()V method reaches its last return
+# (` @overloaded`: the class declares that name more than once; ` @other-thread`: reached off the
+# main thread).
 """
 
 AGENT_SOURCE = """\
 import java.lang.classfile.*;
+import java.lang.classfile.instruction.ConstantInstruction;
 import java.lang.classfile.instruction.ReturnInstruction;
 import java.lang.constant.ClassDesc;
 import java.lang.constant.MethodTypeDesc;
@@ -118,8 +139,11 @@ import java.security.ProtectionDomain;
 /**
  * Records, in order, where a Mixin `@At("TAIL")` callback would run: before every `return` of
  * each net/minecraft `<clinit>` (`InitEnd.done("<class>")`), and before the last `return` of each
- * static `()V` method (`InitEnd.done("<class>.<name>()V")`). With an argument, stops the JVM at
- * the first instruction of the class:method it names (`InitEnd.finish()`).
+ * static `()V` method (`InitEnd.done("<class>.<name>()V")`). With a stop point
+ * (`<class>|<method>|<string>`), writes the list and halts the JVM (`InitEnd.finish()`) just
+ * before the first `ldc` of that string in that method, or at its first instruction when the
+ * string is empty. A stop point the agent cannot place halts the JVM at once (exit 4): the game
+ * must never run past it.
  */
 public class InitEndAgent {
     public static void premain(String args, Instrumentation inst) {
@@ -127,6 +151,7 @@ public class InitEndAgent {
         InitEnd.output = parts[0];
         String stopClass = parts.length > 1 ? parts[1] : "";
         String stopMethod = parts.length > 2 ? parts[2] : "";
+        String stopAt = parts.length > 3 ? parts[3] : "";
         inst.addTransformer(new ClassFileTransformer() {
             @Override
             public byte[] transform(ClassLoader loader, String name, Class<?> redefined,
@@ -152,21 +177,40 @@ public class InitEndAgent {
                             builder.with(element);
                             return;
                         }
-                        String label = clinit ? name : name + "." + methodName + "()V";
+                        // A name-only Mixin selector selects every method of that name: a point
+                        // whose name the class declares more than once is marked.
+                        boolean overloaded = !clinit && model.methods().stream()
+                            .filter(m -> m.methodName().equalsString(methodName)).count() > 1;
+                        String label = clinit ? name
+                            : name + "." + methodName + "()V" + (overloaded ? " @overloaded" : "");
                         long returns = method.code().get().elementStream()
                             .filter(e -> e instanceof ReturnInstruction).count();
+                        if (stop && !stopAt.isEmpty() && method.code().get().elementStream()
+                                .noneMatch(e -> e instanceof ConstantInstruction c
+                                    && stopAt.equals(c.constantValue()))) {
+                            System.err.println("INITEND-STOP-NOT-FOUND " + name + "." + methodName);
+                            Runtime.getRuntime().halt(4);
+                        }
                         builder.transformMethod(method, MethodTransform.transformingCode(
                             new CodeTransform() {
                                 long seen = 0;
+                                boolean stopped = false;
                                 @Override
                                 public void atStart(CodeBuilder code) {
-                                    if (stop) {
+                                    if (stop && stopAt.isEmpty()) {
                                         code.invokestatic(ClassDesc.of("InitEnd"), "finish",
                                             MethodTypeDesc.ofDescriptor("()V"));
                                     }
                                 }
                                 @Override
                                 public void accept(CodeBuilder code, CodeElement e) {
+                                    if (stop && !stopped && !stopAt.isEmpty()
+                                            && e instanceof ConstantInstruction c
+                                            && stopAt.equals(c.constantValue())) {
+                                        stopped = true;
+                                        code.invokestatic(ClassDesc.of("InitEnd"), "finish",
+                                            MethodTypeDesc.ofDescriptor("()V"));
+                                    }
                                     if (e instanceof ReturnInstruction) {
                                         seen++;
                                         // `<clinit>`: every return finishes initialization.
@@ -180,9 +224,18 @@ public class InitEndAgent {
                                 }
                             }));
                     };
+                    if (name.equals(stopClass) && model.methods().stream()
+                            .noneMatch(m -> m.methodName().equalsString(stopMethod))) {
+                        System.err.println("INITEND-STOP-NOT-FOUND " + name + "." + stopMethod);
+                        Runtime.getRuntime().halt(4);
+                    }
                     return cf.transformClass(model, transform);
                 } catch (Throwable t) {
                     System.err.println("INITEND-TRANSFORM-FAILED " + name + " " + t);
+                    // The stop class untransformed would let the game run on past the stop.
+                    if (name.equals(stopClass)) {
+                        Runtime.getRuntime().halt(4);
+                    }
                     return null;
                 }
             }
@@ -321,20 +374,54 @@ def build_agent(jdk: Path, work: Path) -> Path:
     return agent
 
 
+def require_no_network() -> None:
+    """Refuse to run unless `unshare -rn` gives this user a network namespace with no network:
+    the game must never reach the network, whatever goes wrong with the stop point (26.3's
+    client `Main` hands `Minecraft.<init>` `Proxy.NO_PROXY`, and authlib and `HttpClient` ignore
+    the JVM's proxy settings, so a dead proxy alone is no guard)."""
+    try:
+        ok = subprocess.run(["unshare", "-rn", "true"], capture_output=True).returncode == 0
+    except FileNotFoundError:
+        ok = False
+    if not ok:
+        raise SystemExit("`unshare -rn true` fails here: the trace runs only without a network")
+
+
+def isolated_env(work: Path) -> dict[str, str]:
+    """The environment the game runs in: no display, and a home and XDG folders inside `work`,
+    so nothing reads or writes the user's own (a launcher's account files, caches)."""
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"DISPLAY", "WAYLAND_DISPLAY"} and not key.startswith("XDG_")}
+    home = work / "home"
+    for name in ("", ".config", ".cache", ".local/share", ".local/state", "runtime"):
+        (home / name).mkdir(parents=True, exist_ok=True)
+    env.update({
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        "XDG_STATE_HOME": str(home / ".local/state"),
+        "XDG_RUNTIME_DIR": str(home / "runtime"),
+    })
+    return env
+
+
 def run_traced(jdk: Path, agent: Path, stop: str, class_path: str, main: list[str],
                work: Path, listing: Path) -> list[str]:
-    """Run `main` under the agent (stopping at `stop`, `class|method`, if given) and return the
-    points it recorded."""
+    """Run `main` under the agent, in a network namespace with no network (`unshare -rn`), and
+    return the points it recorded. `stop` is `class|method|string` (see the agent), or empty."""
+    require_no_network()
     tmp = work / "tmp"
     tmp.mkdir(exist_ok=True)
     run = subprocess.run(
-        [str(jdk / "bin" / "java"),
-         # Nothing before the stop point needs the network; a closed local SOCKS port makes
-         # sure nothing reaches it.
+        ["unshare", "-rn", str(jdk / "bin" / "java"),
+         # Belt and braces: the namespace has no network; a closed local SOCKS port too.
          "-DsocksProxyHost=127.0.0.1", "-DsocksProxyPort=9",
          f"-Djava.io.tmpdir={tmp}", f"-Dorg.lwjgl.system.SharedLibraryExtractPath={tmp / 'lwjgl'}",
+         f"-Djna.tmpdir={tmp / 'jna'}", f"-Dio.netty.native.workdir={tmp / 'netty'}",
          f"-javaagent:{agent}={listing}|{stop}", "-cp", f"{class_path}:{agent}", *main],
         cwd=work,
+        env=isolated_env(work),
         capture_output=True,
         text=True,
         timeout=900,
@@ -342,6 +429,8 @@ def run_traced(jdk: Path, agent: Path, stop: str, class_path: str, main: list[st
     if run.returncode != 0:
         raise SystemExit(f"the bootstrap run failed ({run.returncode}):\n{run.stderr[-4000:]}")
     output = run.stdout + run.stderr
+    if "INITEND-STOP-NOT-FOUND" in output:
+        raise SystemExit("the agent could not place the stop point:\n" + output[-2000:])
     if "INITEND-TRANSFORM-FAILED" in output:
         failed = [line for line in output.splitlines() if "INITEND-TRANSFORM-FAILED" in line]
         raise SystemExit("the agent could not rewrite every game class:\n" + "\n".join(failed[:20]))
@@ -373,16 +462,18 @@ def trace_server(jdk: Path, server_jar: Path, libs: list[Path], work: Path) -> l
 
 
 def trace_client(jdk: Path, client_jar: Path, libs: list[Path], work: Path) -> list[str]:
-    """Run the real client `Main` under the agent up to `Minecraft.<init>` and return the points
-    it reached."""
+    """Run the real client `Main` under the agent up to Fabric's entrypoint hook in
+    `Minecraft.<init>` ([`CLIENT_STOP`]) and return the points it reached."""
     agent = build_agent(jdk, work)
     game = work / "game"
     game.mkdir()
     class_path = ":".join([*(str(lib) for lib in libs), str(client_jar)])
+    # `--proxyHost` makes `Main` hand authlib a proxy at a closed local port instead of
+    # `Proxy.NO_PROXY` (it builds the `Proxy` before the stop; nothing of it is a game class).
     main = ["net.minecraft.client.main.Main", "--version", GAME_VERSION, "--accessToken", "0",
-            "--username", "Tracer", "--gameDir", str(game), "--assetsDir", str(work / "assets")]
-    return run_traced(jdk, agent, "net/minecraft/client/Minecraft|<init>", class_path, main,
-                      work, work / "done.txt")
+            "--username", "Tracer", "--gameDir", str(game), "--assetsDir", str(work / "assets"),
+            "--proxyHost", "127.0.0.1", "--proxyPort", "9"]
+    return run_traced(jdk, agent, CLIENT_STOP, class_path, main, work, work / "done.txt")
 
 
 def main() -> int:
