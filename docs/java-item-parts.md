@@ -144,11 +144,22 @@ methods, and nothing in it names a mod.
    (`NativeJar::tooltip_component_size`) and draws it once in its own box, and answers a custom
    `TooltipComponent` only when all of that was exact (otherwise vanilla's answer, no image,
    stands: never an empty box). The factory's `draw_image` runs `extractImage`
-   (`NativeJar::draw_tooltip_component_image`) and paints its recorded draws. Still counted, so
-   a pouch's tooltip shows no image yet: an empty pouch's height wraps its description with
-   `Font.split` (the client surface's `Font` answers only `width`), and the slots are drawn with
-   26.3's `blitSprite(RenderPipeline, ...)` (`com.mojang.renderpearl`), which the client surface
-   counts because a nine-slice GUI sprite is not a stretched `DrawOp::Sprite`.
+   (`NativeJar::draw_tooltip_component_image`) and paints its recorded draws.
+   *The pouch's own draws* (`client_font.rs`, `client_surface.rs`; tests `fixture_client_font`
+   against a JDK 25 / client 26.3 oracle, and `fixture_runes_client_items`, whose empty, partly
+   full and full pouches now answer images with every draw exact against Bundle API's own
+   component on the 26.3 client): `Font.split` is 26.3's `StringSplitter.splitLines` over the
+   frame's glyph table for plain text, else the embedder's answer for that exact text, else
+   counted with its question recorded; `Font.width` likewise in a screen frame; `textWithWordWrap`
+   splits and draws each line; the 26.3 whole-sprite `blitSprite` overloads on `GUI_TEXTURED`
+   record `DrawOp::Sprite`, which Sunrise's `GuiDraw::Sprite` paints as the sprite's
+   `gui.scaling` says (`hud_layout.rs` `paint_with` → `ui::draw_whole_sprite`, at the pin);
+   `item` / `itemDecorations` of a runtime stack record `DrawOp::Stack`.
+   *In Sunrise* the tooltip's font is the game's: Sunrise has no glyph table, so the mod asks
+   each text the component measures or wraps of `ClientTextClientHost::text_width` /
+   `text_split` (vanilla's `Font.width` / `Font.split`) and runs it again with the answers,
+   rewinding the discarded probe's counts. An empty pouch's image draws. A pouch holding runes
+   still shows none: see "Upstream" (the stack count).
    An embedder hands the game's prototype values of every item a jar component's stored contents
    name (`NativeJar::record_item_prototype`; the mod seeds each registered item id in the NBT),
    since the type's codec reads them while it decodes.
@@ -171,6 +182,29 @@ answered by the slot the click resolved.
 
 The upstream gap these bugs did show is the unread `fabric:load_conditions` key
 ([mod-plan.md](mod-plan.md), "Fork seams needed").
+
+### A tooltip image's stacks with a count
+
+A pouch's slots draw `item(stack, x, y, seed)` and then `itemDecorations(font, stack, x, y)`:
+the model, then the count text, then the durability bar and the cooldown over them. At the
+`3d34bbe63d` SDK the only draw of a stack with its decorations is `DrawContext::item_stack` (SDK
+`host/draw.rs:106`): the model and "its slot decorations, except the count" (`item` and
+`item_model`, `:65` and `:32`, draw an icon alone). Drawing the count
+after it puts the text over the bar and the cooldown, where vanilla puts them over the text; and
+the mod can't tell when a bar or cooldown shows (no read of either; `host/players.rs:11` has only
+the cooldown group). So the mod draws a stack only when its count is 1, and a pouch of runes
+(counts 10, 64) counts `bridge: tooltip_image:undrawable_stack_count` and shows no image.
+
+The smallest addition: let `item_stack` take the count text as vanilla's
+`itemDecorations(font, stack, x, y, text)` does, drawn in vanilla's order (count, bar,
+cooldown), with `None` for the stack's own count:
+
+```rust
+fn item_stack_decorated(&mut self, stack: &ItemStack, at: [f32; 2], count: Option<&str>) -> bool;
+```
+
+or a `GuiDraw::Stack { stack, x, y, count: Option<String> }` op for `gui_paint`, which would also
+keep a tooltip's draws in one buffer.
 
 ### Settled: the clicked slot's rules from `item_stacked_on_other`
 

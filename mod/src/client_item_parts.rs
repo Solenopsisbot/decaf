@@ -13,6 +13,15 @@
 //!   whose factory (registered in `Hooks::register_client_tooltip_component_factories`) draws it
 //!   with the component's own `extractImage` through the client surface the menu screens use
 //!   (`menu_screen::gui_draw_with`).
+//! * **The tooltip's font.** Sunrise exposes no glyph table, so the runtime's glyph model
+//!   (`client_font.rs`) has nothing to read; the game's own font answers instead.
+//!   `ClientTextClientHost::text_width` and `text_split` are vanilla's `Font.width` and
+//!   `Font.split` with the active font and language. The component runs once, each text it
+//!   measures or wraps is asked of the game ([`answer_font_questions`]), and it runs again with
+//!   those answers ([`FontAnswers`]), until it asks nothing new. Every run but the last is a
+//!   probe whose result is thrown away and whose counted calls are rewound
+//!   (`StdHost::rewind_unknown_calls`). Vanilla runs `getHeight` and `extractImage` every frame,
+//!   so running them again changes nothing.
 //!
 //! Nothing here names a mod. A call that counted leaves Sunrise's answer standing (a property
 //! reads `0.0`, as an unregistered one does; a tooltip shows no image, as vanilla's
@@ -20,17 +29,34 @@
 
 use std::sync::{Arc, Mutex, TryLockError};
 
+use std::collections::BTreeMap;
+
 use mod_api::{
-    ClientHost, ClientTooltipComponent, DrawContext, Identifier, ItemModelPropertyInput,
+    ClientHost, ClientTooltipComponent, DrawContext, GuiDraw, Identifier, ItemModelPropertyInput,
     RegisterRangeSelectItemModelPropertyEvent, Tag, TooltipComponent, TooltipComponentData,
     TooltipFont,
 };
 
 use super::{LoadedJar, State};
 use crate::runtime::{
-    ExecutionBudget, ItemHook, ItemModelHolder, TooltipComponentSize, Value,
-    client_surface::ClientSnapshot,
+    ExecutionBudget, ItemHook, ItemModelHolder, StackComponents, TooltipComponentSize, Value,
+    client_surface::{ClientSnapshot, ClientText, DrawOp, FontAnswers, FontQuestion, TextMetrics},
 };
+
+/// Runs a tooltip component's measure-and-draw may take, each answering the font questions the
+/// one before it asked: a component asks one text at a time (the first unanswered one stops the
+/// run), so a description, its lines and a label take a few. The last run's counts stand.
+const FONT_PASSES: usize = 8;
+
+/// What the tooltip's Java draws reach Sunrise with, formed once with the client host (which
+/// `draw_image` has none of): each text the game's font answered by its exact `Text`, and each
+/// stack the component draws as Sunrise's.
+#[derive(Default)]
+struct TooltipForms {
+    answers: FontAnswers,
+    texts: BTreeMap<ClientText, mod_api::Text>,
+    stacks: Vec<(StackComponents, mod_api::ItemStack)>,
+}
 use crate::{JAR_BUDGET, LOG};
 
 /// The client state, or `None` when it is held (a re-entrant call has no answer here).
@@ -215,10 +241,12 @@ fn property_value(
     outcome.exact().unwrap_or(0.0)
 }
 
-/// A jar's tooltip image: its client component on the resident jar, measured when it was made.
+/// A jar's tooltip image: its client component on the resident jar, measured when it was made,
+/// with the game's font answers and the forms its draws reach Sunrise with.
 pub(crate) struct JavaTooltipData {
     held: Arc<Retained>,
     size: TooltipComponentSize,
+    forms: Arc<TooltipForms>,
 }
 
 impl TooltipComponentData for JavaTooltipData {}
@@ -283,35 +311,63 @@ impl State {
             .exact();
         loaded.host.release(&data);
         let component = component?;
-        loaded.host.begin_client_frame(tooltip_frame(), &[]);
-        let size = loaded
-            .jar
-            .tooltip_component_size(&mut loaded.host, &component, &budget)
-            .exact();
         // A draw that would count paints nothing: Sunrise would keep an empty box where vanilla
-        // draws the image. The image is drawn once here, in its own box, to know.
-        let drawable = size.is_some_and(|size| {
+        // draws the image. The image is drawn once here, in its own box, to know, and the font
+        // questions it asks are answered by the game's font before the run that counts.
+        let mut forms = TooltipForms::default();
+        let mut measured = None;
+        for pass in 0..FONT_PASSES {
+            let mark = loaded.host.unknown_calls_mark();
             loaded
+                .host
+                .begin_client_frame(tooltip_frame(&forms.answers), &[]);
+            let size = loaded
                 .jar
-                .draw_tooltip_component_image(
-                    &mut loaded.host,
-                    &component,
-                    0,
-                    0,
-                    size.width,
-                    size.height,
-                    &budget,
-                )
-                .exact()
-                .is_some_and(|ops| {
-                    ops.iter()
-                        .all(|op| super::menu_screen::gui_draw_with(op, &|_| None).is_ok())
-                })
+                .tooltip_component_size(&mut loaded.host, &component, &budget)
+                .exact();
+            let ops = size.and_then(|size| {
+                loaded
+                    .jar
+                    .draw_tooltip_component_image(
+                        &mut loaded.host,
+                        &component,
+                        0,
+                        0,
+                        size.width,
+                        size.height,
+                        &budget,
+                    )
+                    .exact()
+            });
+            let questions = loaded.host.end_client_frame().font_questions;
+            if let (Some(size), Some(ops)) = (size, &ops) {
+                measured = Some((size, ops.clone()));
+                break;
+            }
+            let last = pass + 1 == FONT_PASSES;
+            if last || questions.is_empty() || !answer_font_questions(host, &questions, &mut forms)
+            {
+                break;
+            }
+            // The probe's result is thrown away: only the run whose answer is used counts.
+            loaded.host.rewind_unknown_calls(mark);
+        }
+        let drawable = measured.and_then(|(size, ops)| {
+            let Some(stacks) = tooltip_stacks(host, &ops) else {
+                note(loaded, "tooltip_image:undrawable_stack_form");
+                return None;
+            };
+            forms.stacks = stacks;
+            let paint = paint_plan(&ops, &forms);
+            if let Err(reason) = paint {
+                note(loaded, &format!("tooltip_image:undrawable_{reason}"));
+                return None;
+            }
+            Some(size)
         });
-        loaded.host.end_client_frame();
         loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
         // A component that can't measure or draw itself shows nothing rather than a guessed box.
-        let Some(size) = size.filter(|_| drawable) else {
+        let Some(size) = drawable else {
             loaded.host.release(&component);
             return None;
         };
@@ -320,7 +376,11 @@ impl State {
             jar: index,
             value: component,
         });
-        Some(TooltipComponent::custom(JavaTooltipData { held, size }))
+        Some(TooltipComponent::custom(JavaTooltipData {
+            held,
+            size,
+            forms: Arc::new(forms),
+        }))
     }
 
     /// The component's own `extractImage` at `(x, y)` in a `width` x `height` tooltip box, its
@@ -334,7 +394,9 @@ impl State {
         let Some(loaded) = self.jars.get_mut(data.held.jar) else {
             return;
         };
-        loaded.host.begin_client_frame(tooltip_frame(), &[]);
+        loaded
+            .host
+            .begin_client_frame(tooltip_frame(&data.forms.answers), &[]);
         let outcome = loaded.jar.draw_tooltip_component_image(
             &mut loaded.host,
             &data.held.value,
@@ -349,35 +411,198 @@ impl State {
             loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
             return;
         };
-        let mut draws = Vec::with_capacity(ops.len());
-        for op in &ops {
-            // `draw_image` has no host to form a text draw's text with: such a draw counts.
-            match super::menu_screen::gui_draw_with(op, &|_| None) {
-                Ok(gui) => draws.push(gui),
-                Err(reason) => {
-                    note(loaded, &format!("tooltip_image:undrawable_{reason}"));
-                    return;
+        // A text or stack the forms made at `tooltip_image` don't hold (the component drew
+        // something else this time) counts, and nothing of the call is painted.
+        let plan = match paint_plan(&ops, &data.forms) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                note(loaded, &format!("tooltip_image:undrawable_{reason}"));
+                return;
+            }
+        };
+        for step in plan {
+            match step {
+                Paint::Gui(draws) => {
+                    if draw.gui_paint(&draws).is_err() {
+                        note(loaded, "tooltip_image:gui_paint_refused");
+                        return;
+                    }
+                }
+                Paint::Stack(stack, at) => {
+                    if !draw.item_stack(stack, at, 16.0) {
+                        note(loaded, "tooltip_image:item_stack_refused");
+                        return;
+                    }
                 }
             }
-        }
-        if !draws.is_empty() && draw.gui_paint(&draws).is_err() {
-            note(loaded, "tooltip_image:gui_paint_refused");
         }
     }
 }
 
-/// A frame for a tooltip component's Java code: no player, no level, nothing a screen reads.
-fn tooltip_frame() -> Arc<ClientSnapshot> {
+/// A frame for a tooltip component's Java code: no player, no level, nothing a screen reads; its
+/// font answers from the game's own answers (`answers`), Sunrise having no glyph table.
+fn tooltip_frame(answers: &FontAnswers) -> Arc<ClientSnapshot> {
     Arc::new(ClientSnapshot {
         screen_scope: true,
+        metrics: Arc::new(TextMetrics {
+            answers: answers.clone(),
+            ..TextMetrics::default()
+        }),
         ..ClientSnapshot::default()
     })
+}
+
+/// Ask the game's font each question (`Font.width` / `Font.split` of an exact text) and keep the
+/// answers. `false` when a text has no exact `Text` here (a literal with `§` codes, JSON Sunrise
+/// doesn't read): the run that counted stands.
+fn answer_font_questions(
+    host: &dyn ClientHost,
+    questions: &[FontQuestion],
+    forms: &mut TooltipForms,
+) -> bool {
+    for question in questions {
+        let asked = match question {
+            FontQuestion::Width(text) | FontQuestion::Split(text, _) => text,
+        };
+        let Some(text) = forms
+            .texts
+            .get(asked)
+            .cloned()
+            .or_else(|| super::menu_screen::api_text(host, asked))
+        else {
+            return false;
+        };
+        match question {
+            FontQuestion::Width(asked) => {
+                forms
+                    .answers
+                    .widths
+                    .insert(asked.clone(), host.text_width(&text));
+            }
+            FontQuestion::Split(asked, width) => {
+                let mut lines = Vec::new();
+                for line in host.text_split(&text, *width) {
+                    let Some(key) = line_text(host, &line) else {
+                        return false;
+                    };
+                    forms.texts.insert(key.clone(), line);
+                    lines.push(key);
+                }
+                forms.answers.splits.insert((asked.clone(), *width), lines);
+            }
+        }
+        forms.texts.insert(asked.clone(), text);
+    }
+    true
+}
+
+/// A split line as the runtime's text: a plain literal without `§` codes as itself (what the
+/// glyph model's lines are), anything styled as its component JSON (the codec's own NBT form).
+fn line_text(host: &dyn ClientHost, line: &mod_api::Text) -> Option<ClientText> {
+    if let mod_api::text::TextContent::Literal(text) = &line.content
+        && *line == mod_api::Text::literal(text.clone())
+        && !text.contains('§')
+    {
+        return Some(ClientText::Literal(text.clone()));
+    }
+    let json = super::nbt_component_to_json(&host.text_to_nbt(line).ok()?)?;
+    Some(ClientText::Json(json))
+}
+
+/// Each stack the component draws ([`DrawOp::Stack`]) as Sunrise's, formed with the client host;
+/// `None` when one can't be (`client::api_stack_from_components`).
+fn tooltip_stacks(
+    host: &dyn ClientHost,
+    ops: &[DrawOp],
+) -> Option<Vec<(StackComponents, mod_api::ItemStack)>> {
+    let mut stacks: Vec<(StackComponents, mod_api::ItemStack)> = Vec::new();
+    for op in ops {
+        if let DrawOp::Stack { stack, .. } = op
+            && !stacks.iter().any(|(known, _)| known == stack)
+        {
+            let api = super::api_stack_from_components(host, stack.clone())?;
+            stacks.push((stack.clone(), api));
+        }
+    }
+    Some(stacks)
+}
+
+/// One step of painting a tooltip image: a run of GUI ops, or a stack.
+enum Paint<'a> {
+    Gui(Vec<GuiDraw>),
+    Stack(&'a mod_api::ItemStack, [f32; 2]),
+}
+
+/// The tooltip's draws as Sunrise paints them, in order, or why it can't.
+///
+/// A text draws with the `Text` the game's font answered for it, else a plain literal or
+/// translation as itself. A stack is vanilla's `item(stack, x, y, seed)` followed at once by
+/// `itemDecorations(font, stack, x, y)` of that stack at that place: Sunrise's
+/// `DrawContext::item_stack` draws the model and the decorations but the count, which is exact
+/// only when there is no count to draw (a count of 1). Vanilla draws the count text and then the
+/// durability bar and the cooldown over it, which `item_stack` and a text after it can't order
+/// (the SDK has no draw of vanilla's whole `itemDecorations`): a larger count, a model draw alone,
+/// a scaled one, or decorations with their own count text, refuse.
+fn paint_plan<'a>(ops: &[DrawOp], forms: &'a TooltipForms) -> Result<Vec<Paint<'a>>, &'static str> {
+    let text_of = |text: &ClientText| match forms.texts.get(text) {
+        Some(text) => Some(text.clone()),
+        None => match text {
+            ClientText::Literal(literal) if !literal.contains('§') => {
+                Some(mod_api::Text::literal(literal.clone()))
+            }
+            ClientText::Translatable(key) => {
+                Some(mod_api::Text::translate(key.clone(), Vec::new()))
+            }
+            _ => None,
+        },
+    };
+    let mut plan = Vec::new();
+    let mut gui = Vec::new();
+    let mut ops = ops.iter().peekable();
+    while let Some(op) = ops.next() {
+        let DrawOp::Stack {
+            stack,
+            at,
+            scale,
+            model: true,
+            ..
+        } = op
+        else {
+            gui.push(super::menu_screen::gui_draw_with(op, &text_of)?);
+            continue;
+        };
+        let decorated = matches!(ops.peek(), Some(DrawOp::Stack {
+            stack: next, at: next_at, scale: next_scale, model: false, decorations: Some(None), ..
+        }) if next == stack && next_at == at && next_scale == scale);
+        if !decorated || *scale != [1.0, 1.0] {
+            return Err("stack_draw");
+        }
+        if stack.count != 1 {
+            return Err("stack_count");
+        }
+        ops.next();
+        let api = forms
+            .stacks
+            .iter()
+            .find(|(known, _)| known == stack)
+            .map(|(_, api)| api)
+            .ok_or("stack_form")?;
+        if !gui.is_empty() {
+            plan.push(Paint::Gui(std::mem::take(&mut gui)));
+        }
+        plan.push(Paint::Stack(api, *at));
+    }
+    if !gui.is_empty() {
+        plan.push(Paint::Gui(gui));
+    }
+    Ok(plan)
 }
 
 /// The client component Sunrise prepares from a [`JavaTooltipData`].
 pub(crate) struct JavaTooltip {
     held: Arc<Retained>,
     size: TooltipComponentSize,
+    forms: Arc<TooltipForms>,
 }
 
 impl ClientTooltipComponent for JavaTooltip {
@@ -404,6 +629,7 @@ impl ClientTooltipComponent for JavaTooltip {
         let data = JavaTooltipData {
             held: Arc::clone(&self.held),
             size: self.size,
+            forms: Arc::clone(&self.forms),
         };
         state.draw_java_tooltip_image(&data, [x, y, width, height], draw);
     }
@@ -416,5 +642,6 @@ pub(crate) fn register_tooltip_factory(
     factories.register::<JavaTooltipData, JavaTooltip>(|data| JavaTooltip {
         held: Arc::clone(&data.held),
         size: data.size,
+        forms: Arc::clone(&data.forms),
     });
 }

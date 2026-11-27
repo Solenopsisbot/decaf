@@ -94,6 +94,7 @@ fn frame(x: Option<f64>) -> Arc<ClientSnapshot> {
             advances: vec![6.0; 128],
             fallback: 6.0,
             translations: BTreeMap::new(),
+            answers: Default::default(),
         }),
         ..ClientSnapshot::default()
     })
@@ -565,6 +566,7 @@ fn frame_in_world(x: f64) -> Arc<ClientSnapshot> {
             advances: vec![6.0; 128],
             fallback: 6.0,
             translations: BTreeMap::new(),
+            answers: Default::default(),
         }),
         ..ClientSnapshot::default()
     })

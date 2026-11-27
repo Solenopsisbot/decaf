@@ -1335,6 +1335,7 @@ fn frame_census(
             advances: vec![6.0; 128],
             fallback: 6.0,
             translations: Default::default(),
+            answers: Default::default(),
         }),
         ..ClientSnapshot::default()
     });

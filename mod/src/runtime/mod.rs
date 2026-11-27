@@ -4027,6 +4027,10 @@ const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1 << 20;
 const MAX_PERSISTENT_IO_ENTRIES: usize = 4096;
 const MAX_PERSISTENT_IO_BYTES: usize = 16 * 1024 * 1024;
 
+/// A copy of a host's counted-call record ([`StdHost::unknown_calls_mark`]).
+#[derive(Clone, Debug)]
+pub struct UnknownCallsMark(BTreeMap<String, usize>);
+
 /// Deterministic, game-independent mappings for the small standard-library
 /// surface commonly reached during mod bootstrap.
 #[derive(Debug, Clone)]
@@ -4892,6 +4896,22 @@ impl StdHost {
 
     pub fn unknown_host_call_count(&self) -> usize {
         self.unknown_host_calls.values().sum()
+    }
+
+    /// The counted-call record as it stands, for an embedder that runs a call once to learn
+    /// what it asks (a tooltip component's font questions, `client_font.rs`) and then runs it
+    /// again with the answers: [`Self::rewind_unknown_calls`] drops what the discarded probe
+    /// counted, so only the run whose result is used counts. The probe's own result must be
+    /// thrown away, and the call must be one the game itself repeats (a tooltip component's
+    /// `getHeight` / `extractImage`, which vanilla runs every frame), so running it twice is no
+    /// observable difference.
+    pub fn unknown_calls_mark(&self) -> UnknownCallsMark {
+        UnknownCallsMark(self.unknown_host_calls.clone())
+    }
+
+    /// Put the counted-call record back to `mark` ([`Self::unknown_calls_mark`]).
+    pub fn rewind_unknown_calls(&mut self, mark: UnknownCallsMark) {
+        self.unknown_host_calls = mark.0;
     }
 
     /// Serializer object identities registered for client recipe synchronization.

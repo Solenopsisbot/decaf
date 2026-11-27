@@ -329,6 +329,7 @@ fn a_config_gated_hud_element_draws_the_held_stack_and_its_durability() {
             advances: vec![6.0; 128],
             fallback: 6.0,
             translations: BTreeMap::new(),
+            answers: Default::default(),
         }),
         ..ClientSnapshot::default()
     });
