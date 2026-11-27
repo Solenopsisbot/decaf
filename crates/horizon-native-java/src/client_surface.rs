@@ -73,6 +73,7 @@ pub(super) mod text;
 // library dispatch.
 #[path = "client_registrations.rs"]
 mod client_registrations;
+pub(crate) use client_registrations::range_select_properties;
 #[path = "client_config.rs"]
 mod config;
 

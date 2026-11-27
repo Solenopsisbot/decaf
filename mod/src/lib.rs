@@ -741,6 +741,28 @@ impl Hooks for HorizonJava {
         self.lock_client().build_creative_tab(host, event);
     }
 
+    /// The numeric `range_dispatch` item model properties the client jars' Java code put into
+    /// `RangeSelectItemModelProperties.ID_MAPPER` (`client::item_models`). Asked once at client
+    /// start, before resources load: the client jars load (and bootstrap) first if they have not.
+    fn register_range_select_item_model_property(
+        &self,
+        context: &RegistrationContext,
+        event: &mut mod_api::RegisterRangeSelectItemModelPropertyEvent<'_>,
+    ) {
+        self.lock_client()
+            .ensure_loaded_with_version(content::registration_game_version(context));
+        client::item_models::register_range_select_properties(&self.client, event);
+    }
+
+    /// The factory that draws a Java item's tooltip image (`client::item_models::JavaTooltip`).
+    fn register_client_tooltip_component_factories(
+        &self,
+        _context: &RegistrationContext,
+        event: &mut mod_api::RegisterClientTooltipComponentFactoriesEvent<'_>,
+    ) {
+        client::item_models::register_tooltip_factory(event.factories);
+    }
+
     /// Run a jar Item's `appendHoverText` before Sunrise's global tooltip listeners.  The
     /// runtime returns structured Components, so translatable text and style cross the native
     /// API boundary without flattening them.

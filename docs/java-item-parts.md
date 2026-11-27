@@ -4,9 +4,13 @@ Status: design for BUGS-3d34-round2 #2 (Runes' rune pouches act as plain items).
 built (`crates/horizon-native-java/src/item_parts.rs`, `mod/src/item_parts.rs`; tests
 `fixture_item_parts` against a JDK 25 oracle and `fixture_item_parts_runes` on the real jar);
 steps 1-2 are built by #671 (`jar_components.rs`, `bootstrap_mixins.rs`), whose recorded
-`Item.Properties.component` objects are the item parts' jar-item prototypes; steps 7-8 are not
-yet. Bugs #3 (pouch recipes) and #4 (pouch lore) are fixed separately, in the bake and
-in the runtime's `Item.Properties` model.
+`Item.Properties.component` objects are the item parts' jar-item prototypes; steps 7-8 are
+built too (`client_item_parts.rs`, `mod/src/client_item_parts.rs`; tests
+`fixture_client_item_parts` against a JDK 25 / client 26.3 oracle and
+`fixture_runes_client_items` on the real jar), on a client bootstrap pass that runs in the
+client's own measured order (`bootstrap_clinit_order_26_3_client.txt`). Bugs #3 (pouch recipes)
+and #4 (pouch lore) are fixed separately, in the bake and in the runtime's `Item.Properties`
+model.
 
 ## What the jar defines
 
@@ -68,9 +72,13 @@ methods, and nothing in it names a mod.
    `[native] serves_content = true` so Sunrise accepts the bake's `served_by`. A Mixin
    `@Inject(method = "<clinit>", at = @At("TAIL"))` into a game class (Bundle API's
    `DataComponentTypesMixin`) runs in one pass over every loaded jar (its own mods and nested
-   ones), before any jar's entrypoint, in the order the server's bootstrap finishes those classes
-   (`bootstrap_mixins.rs`, `bootstrap_clinit_order_26_3.txt` from
-   `tools/trace_bootstrap_clinit_order.py`); any other shape that would apply is counted.
+   ones), before any jar's entrypoint, in the order that side's bootstrap finishes those classes
+   (`bootstrap_mixins.rs`; `bootstrap_clinit_order_26_3.txt` for the server and
+   `bootstrap_clinit_order_26_3_client.txt` for the client, the real client's `Main` up to
+   `Minecraft.<init>`, both from `tools/trace_bootstrap_clinit_order.py`). A `TAIL` into a
+   static `()V` method the bootstrap ends once (`RangeSelectItemModelProperties.bootstrap()`)
+   runs at that method's turn; any other shape that would apply is counted, and a registration
+   at a point after `BuiltInRegistries.freeze()` is the game failing to start.
 2. **Default components.** The bake writes the item's component patch for jar types too (here
    `{"bundleapi:custom_bundle_contents": {"content": [], "size_multiplier": 4}}`). That has to
    wait for step 1, because Sunrise refuses an item declaration with an unregistered component
@@ -108,11 +116,35 @@ methods, and nothing in it names a mod.
    adds `bundleapi:custom_bundle/fullness` → `CustomBundleFullnessProperty.CODEC`. The bridge
    turns that registration into `register_range_select_item_model_property`, and evaluates it by
    running the property class's `get(ItemStack, ClientLevel, ItemOwner, int)` on the client
-   runtime. Today Sunrise reads the unregistered property as 0, so the `_filled` model never shows.
+   runtime.
+   *Built:* the `@Shadow` of the private `ID_MAPPER` reads as a client handle whose
+   `LateBoundIdMapper.put` is recorded (`client_registrations.rs`;
+   `StdHost::client_range_select_properties`; a `minecraft:` id, a `null` codec or a codec
+   bound to another id counts). The mod registers each id; Sunrise's decoder runs the jar's
+   `MapCodec` on the node map (`NativeJar::decode_range_select_property`, as `dispatchMap`
+   reads it) and the bound callback runs `get` on the item-part `ItemStack` façade
+   (`NativeJar::range_select_property_value`; a level or holder present is an object whose
+   every member counts, an absent one `null`). A property that counts reads `0.0`, as an
+   unregistered one does.
 8. **The tooltip component.** The jar's `TooltipComponentMixin` maps its `TooltipComponent`
    record to its `ClientTooltipComponent`, and the factory runs `getHeight`, `getWidth` and
-   `renderImage` through the client screen façade that already draws jar menu screens
-   (`menu_screen.rs`).
+   `extractImage` (26.3's name for `renderImage`) through the client screen façade that already
+   draws jar menu screens (`menu_screen.rs`).
+   *Built:* `ItemPart::tooltip_image` runs the item's own `getTooltipImage`
+   (`NativeJar::item_tooltip_image`), then the jar's cancellable `HEAD` callbacks into
+   `ClientTooltipComponent.create` in Mixin's apply order (`NativeJar::client_tooltip_component`;
+   none cancelling is vanilla refusing the data: counted), then measures the component
+   (`NativeJar::tooltip_component_size`) and draws it once in its own box, and answers a custom
+   `TooltipComponent` only when all of that was exact (otherwise vanilla's answer, no image,
+   stands: never an empty box). The factory's `draw_image` runs `extractImage`
+   (`NativeJar::draw_tooltip_component_image`) and paints its recorded draws. Still counted, so
+   a pouch's tooltip shows no image yet: an empty pouch's height wraps its description with
+   `Font.split` (the client surface's `Font` answers only `width`), and the slots are drawn with
+   26.3's `blitSprite(RenderPipeline, ...)` (`com.mojang.renderpearl`), which the client surface
+   counts because a nine-slice GUI sprite is not a stretched `DrawOp::Sprite`.
+   An embedder hands the game's prototype values of every item a jar component's stored contents
+   name (`NativeJar::record_item_prototype`; the mod seeds each registered item id in the NBT),
+   since the type's codec reads them while it decodes.
 
 Tests, in the repo's usual pattern: javac fixtures for each façade with JDK 25 / game 26.3
 expected rows, then a real-jar test (`RUNES_JAR`) that inserts runes into a pouch through

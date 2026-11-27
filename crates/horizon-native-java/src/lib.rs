@@ -217,6 +217,8 @@ pub use level_random::{
     DRAW_AFTER_DEFERRED_EFFECT, LEVEL_STREAM_UNKNOWN, LevelRandomStream,
     is_counted_level_stream_draw,
 };
+mod client_item_parts;
+pub use client_item_parts::{ClientItemOutcome, ItemModelHolder, TooltipComponentSize};
 mod item_parts;
 pub use item_parts::{
     GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick, ItemClickDirection,
@@ -28324,7 +28326,10 @@ impl<H: Host> Runtime<'_, H> {
                 let cancelled = self.callback_infos.flag(&owned)?;
                 Ok(Some(Value::Int(i32::from(cancelled))))
             }
+            // sponge-mixin 0.17.5's `CallbackInfoReturnable.setReturnValue`: `super.cancel()`,
+            // then the value, so a `HEAD` callback that only sets a value cancels the target too.
             ("setReturnValue", "(Ljava/lang/Object;)V") => {
+                self.callback_infos.cancel(&owned)?;
                 self.callback_infos
                     .set_return(&owned, args.first().cloned().unwrap_or(Value::Ref(None)))?;
                 Ok(Some(Value::Void))

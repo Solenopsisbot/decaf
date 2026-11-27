@@ -116,6 +116,24 @@ fn mth_static_call(r: &MethodRef, args: &[Value]) -> Option<Result<Value, Native
         ("lfloor", "(D)J", [Value::Float(v)]) => Some(Ok(Value::Long(v.floor() as i64))),
         ("abs", "(F)F", [Value::Float(v)]) => Some(Ok(Value::Float(f64::from((*v as f32).abs())))),
         ("abs", "(I)I", [Value::Int(v)]) => Some(Ok(Value::Int(v.wrapping_abs()))),
+        // 26.3 `Mth.positiveCeilDiv(int, int)`: `-Math.floorDiv(-a, b)` (`ineg` wraps).
+        ("positiveCeilDiv", "(II)I", [Value::Int(a), Value::Int(b)]) => {
+            if *b == 0 {
+                return Some(Err(crate::divide_by_zero()));
+            }
+            Some(Ok(Value::Int(
+                a.wrapping_neg().div_floor_java(*b).wrapping_neg(),
+            )))
+        }
+        // `Mth.positiveCeilDiv(long, long)`: `-Math.floorDiv(-a, b)` (`lneg` wraps).
+        ("positiveCeilDiv", "(JJ)J", [Value::Long(a), Value::Long(b)]) => {
+            if *b == 0 {
+                return Some(Err(crate::divide_by_zero()));
+            }
+            Some(Ok(Value::Long(
+                a.wrapping_neg().div_floor_java(*b).wrapping_neg(),
+            )))
+        }
         (
             "mulAndTruncate",
             "(Lorg/apache/commons/lang3/math/Fraction;I)I",
@@ -214,4 +232,32 @@ fn is_blank(text: Option<&String>) -> bool {
                 .encode_utf16()
                 .all(|unit| crate::jdk_character::is_whitespace(i32::from(unit)))
     })
+}
+
+/// `Math.floorDiv` (JDK 25: `q = x / y; if ((x ^ y) < 0 && q * y != x) q--`), `MIN / -1`
+/// wrapping to `MIN` as Java's does. The divisor is not zero.
+trait FloorDivJava: Sized {
+    fn div_floor_java(self, divisor: Self) -> Self;
+}
+
+impl FloorDivJava for i32 {
+    fn div_floor_java(self, divisor: i32) -> i32 {
+        let quotient = self.wrapping_div(divisor);
+        if ((self < 0) != (divisor < 0)) && quotient.wrapping_mul(divisor) != self {
+            quotient - 1
+        } else {
+            quotient
+        }
+    }
+}
+
+impl FloorDivJava for i64 {
+    fn div_floor_java(self, divisor: i64) -> i64 {
+        let quotient = self.wrapping_div(divisor);
+        if ((self < 0) != (divisor < 0)) && quotient.wrapping_mul(divisor) != self {
+            quotient - 1
+        } else {
+            quotient
+        }
+    }
 }
