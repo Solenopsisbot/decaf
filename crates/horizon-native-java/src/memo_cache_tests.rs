@@ -705,3 +705,165 @@ fn runtime_caches_match_uncached_across_primary_nested_and_failing_classes() {
     assert_eq!(jar.tooltip_create_callbacks(&host), expected_cb);
     assert_eq!(jar.tooltip_create_callbacks(&host), expected_cb);
 }
+
+#[test]
+fn linked_table_mutation_invalidates_shared_runtime_cache() {
+    let jars = fixture_jars();
+    let primary = NativeJar::from_bytes(&jars.primary_bytes).unwrap();
+    let nested = NativeJar::from_bytes(&jars.nested_bytes).unwrap();
+
+    // 1. Mutate the SAME host's linked table via `link_classes`, then `link_jar`.
+    let mut host = StdHost::new().with_environment_type("CLIENT");
+    with_test_runtime(&primary, &mut host, false, |rt| {
+        assert!(!rt.class_is_instance("demo/Normal", "nested/LibIface"));
+        assert!(!rt.interface_extends("nested/LibSubIface", "nested/LibIface"));
+        assert!(!rt.mixin_adds_interface("nested/LibBase", "nested/DuckIface"));
+        assert!(!rt.is_unloadable_by_name("nested/mixin/NestedDuckMixin"));
+    });
+
+    host.link_classes("nested-classes", nested.classes.values().cloned())
+        .unwrap();
+    with_test_runtime(&primary, &mut host, false, |rt| {
+        assert!(
+            rt.class_is_instance("demo/Normal", "nested/LibIface"),
+            "link_classes must invalidate cached class_is_instance negative"
+        );
+        assert!(
+            rt.interface_extends("nested/LibSubIface", "nested/LibIface"),
+            "link_classes must invalidate cached interface_extends negative"
+        );
+        // Mixin configs are not linked yet; populate fresh negatives under the bumped id.
+        assert!(!rt.mixin_adds_interface("nested/LibBase", "nested/DuckIface"));
+        assert!(!rt.is_unloadable_by_name("nested/mixin/NestedDuckMixin"));
+    });
+
+    host.link_jar("nested-jar", &nested).unwrap();
+    with_test_runtime(&primary, &mut host, false, |rt| {
+        assert!(
+            rt.mixin_adds_interface("nested/LibBase", "nested/DuckIface"),
+            "link_jar must invalidate cached RuntimeMixinIndex"
+        );
+        assert!(
+            rt.is_unloadable_by_name("nested/mixin/NestedDuckMixin"),
+            "link_jar must invalidate cached refused_mixin_package"
+        );
+    });
+
+    // 2. Also mutate a fresh unlinked host directly via `link_jar` alone.
+    let mut direct_host = StdHost::new().with_environment_type("CLIENT");
+    with_test_runtime(&primary, &mut direct_host, false, |rt| {
+        assert!(!rt.class_is_instance("demo/Normal", "nested/LibIface"));
+        assert!(!rt.mixin_adds_interface("nested/LibBase", "nested/DuckIface"));
+        assert!(!rt.is_unloadable_by_name("nested/mixin/NestedDuckMixin"));
+    });
+    direct_host.link_jar("nestedlib", &nested).unwrap();
+    with_test_runtime(&primary, &mut direct_host, false, |rt| {
+        assert!(
+            rt.class_is_instance("demo/Normal", "nested/LibIface"),
+            "direct link_jar must invalidate cached class_is_instance"
+        );
+        assert!(
+            rt.mixin_adds_interface("nested/LibBase", "nested/DuckIface"),
+            "direct link_jar must invalidate cached RuntimeMixinIndex"
+        );
+        assert!(
+            rt.is_unloadable_by_name("nested/mixin/NestedDuckMixin"),
+            "direct link_jar must invalidate cached refused_mixin_package"
+        );
+    });
+}
+
+#[test]
+fn with_woven_classes_invalidates_cached_runtime_answers() {
+    let original = compile_sources(
+        "woven-before",
+        &[
+            (
+                "woven/Marker.java",
+                "package woven; public interface Marker {}\n",
+            ),
+            ("woven/Base.java", "package woven; public class Base {}\n"),
+            (
+                "woven/Child.java",
+                "package woven; public class Child extends Base {}\n",
+            ),
+        ],
+    );
+    let replacement = compile_sources(
+        "woven-after",
+        &[
+            (
+                "woven/Marker.java",
+                "package woven; public interface Marker {}\n",
+            ),
+            (
+                "woven/Base.java",
+                "package woven;\n\
+                 public class Base implements Marker {\n\
+                   public int wovenField;\n\
+                   public static int wovenTag() { return 42; }\n\
+                 }\n",
+            ),
+        ],
+    );
+    let replacement_base = replacement
+        .into_iter()
+        .find(|(name, _)| name == "woven/Base.class")
+        .expect("replacement woven/Base.class")
+        .1;
+
+    let jar_entries: Vec<(&str, &[u8])> = original
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let jar = NativeJar::from_bytes(&pack_jar(&jar_entries)).unwrap();
+    let mut host = StdHost::new().with_environment_type("CLIENT");
+    let field_ref = crate::MethodRef {
+        owner: "woven/Child".into(),
+        name: "wovenField".into(),
+        descriptor: "I".into(),
+    };
+
+    // Fill the per-jar SharedRuntimeCache with pre-weave answers.
+    with_test_runtime(&jar, &mut host, false, |rt| {
+        assert!(!rt.class_is_instance("woven/Base", "woven/Marker"));
+        assert!(!rt.class_is_instance("woven/Child", "woven/Marker"));
+        assert_eq!(
+            rt.member_owner("woven/Base", "wovenTag", "()I"),
+            Some(("java/lang/Object".to_owned(), false))
+        );
+        assert_eq!(rt.field_owner(&field_ref), "woven/Child");
+    });
+
+    // Replace `woven/Base` through `with_woven_classes` and re-query on the same host.
+    let woven = jar
+        .with_woven_classes(&crate::WovenClasses {
+            classes: std::collections::BTreeMap::from([(
+                "woven/Base".to_owned(),
+                replacement_base,
+            )]),
+            added: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+
+    with_test_runtime(&woven, &mut host, false, |rt| {
+        assert!(
+            rt.class_is_instance("woven/Base", "woven/Marker"),
+            "with_woven_classes must invalidate cached class_is_instance on replaced class"
+        );
+        assert!(
+            rt.class_is_instance("woven/Child", "woven/Marker"),
+            "with_woven_classes must invalidate cached class_is_instance on subclass"
+        );
+        assert_eq!(
+            rt.member_owner("woven/Base", "wovenTag", "()I"),
+            Some(("woven/Base".to_owned(), true)),
+            "with_woven_classes must invalidate cached member_owner"
+        );
+        assert_eq!(
+            rt.field_owner(&field_ref),
+            "woven/Base",
+            "with_woven_classes must invalidate cached field_owner"
+        );
+    });
+}
