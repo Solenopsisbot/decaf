@@ -227,7 +227,33 @@ pub struct ItemUseOutcome {
     pub held: Option<Value>,
     pub inventory: Option<Vec<Value>>,
     pub effects: Vec<LiveMenuEffect>,
+    /// Where the call's first counted level-stream draw fell, when it drew the embedder's
+    /// lent stream after an effect that may draw it (`level_random.rs`).
+    pub counted_draw_stop: Option<CountedDrawStop>,
     pub report: ItemCallReport,
+}
+
+/// What a call had done when its first counted lent level-stream draw happened, for an
+/// embedder that stops it there ("option (b)": what came before the draw still applies, the
+/// draw counts, nothing after it is carried out).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CountedDrawStop {
+    /// How many of the outcome's `effects` came before it.
+    pub effects: usize,
+    /// How many of the host's sound records (`StdHost::take_sound_records`) came before it.
+    pub sounds: usize,
+    /// Whether that draw was the call's first counted call: nothing counted before it.
+    pub first_counted: bool,
+    /// Whether the held stack is what it was at the draw: no `ItemStack` write after it, so the
+    /// outcome's `held` is the stack as it stood there.
+    pub held_unchanged: bool,
+}
+
+/// A stack's state as a plain string, for comparing it across a call without holding its
+/// objects (`level_random::DrawStop`): its item, count, component patch (each value by its
+/// handle, so a component `ItemStack.set` replaced reads differently) and opaque markers.
+pub(crate) fn held_fingerprint(host: &StdHost, stack: &Value) -> Option<String> {
+    recipe_models::read_live_stack_opt(host, stack).map(|live| format!("{live:?}"))
 }
 
 /// A dropped item entity destroyed while holding `stack`, for [`NativeJar::item_destroyed`].
@@ -936,6 +962,9 @@ impl NativeJar {
         };
         let mut roots = vec![item.clone()];
         roots.extend(held.clone());
+        let hand_index = usize::from(request.hand == "OFF_HAND");
+        let counted_at_start = host.unknown_host_call_count();
+        let mut counted_draw_stop = None;
         let (raw, call, effects, report) = self.run_server_item_call(
             host,
             player,
@@ -945,13 +974,29 @@ impl NativeJar {
             budget,
             |rt, call| {
                 let (name, descriptor) = ItemHook::Use.method();
-                rt.invoke(
+                let value = rt.invoke(
                     owner,
                     name,
                     descriptor,
                     Some(item.clone()),
                     &[call.level.clone(), call.player.clone(), hand.clone()],
-                )
+                )?;
+                // Compared here, before the call's heap is stored (and collected), so a handle
+                // in a fingerprint still names the object it named at the draw.
+                if let Some(host) = rt.host.as_std_host()
+                    && let Some(stop) = host.lent_draw_stop()
+                {
+                    let now = held
+                        .as_ref()
+                        .and_then(|stack| held_fingerprint(host, stack));
+                    counted_draw_stop = Some(CountedDrawStop {
+                        effects: stop.effects,
+                        sounds: stop.sounds,
+                        first_counted: stop.counted_before == counted_at_start,
+                        held_unchanged: stop.held[hand_index] == now,
+                    });
+                }
+                Ok(value)
             },
         );
         let result = raw
@@ -963,6 +1008,7 @@ impl NativeJar {
             held,
             inventory,
             effects,
+            counted_draw_stop,
             report,
         })
     }
@@ -1180,6 +1226,19 @@ pub(crate) fn invoke_helper<H: Host>(
         };
         if plain_item {
             return Ok(Some(Value::Int(1)));
+        }
+        // A vanilla item's handle (`ItemStack.getItem()` of a vanilla stack): 26.3's own answer,
+        // `Item`'s `true` or `BlockItem`'s `!(getBlock() instanceof ShulkerBoxBlock)`, as Java 25
+        // gives it for every registered item (`vanilla_item_data`). An id the game doesn't
+        // register falls through, counted.
+        let vanilla = game_object::handle_key(receiver)
+            .and_then(|key| {
+                key.strip_prefix("game/item/")
+                    .or_else(|| key.strip_prefix("client/item/"))
+            })
+            .and_then(crate::runtime::vanilla_item_data::vanilla_can_fit_inside_container_items);
+        if let Some(fits) = vanilla {
+            return Ok(Some(Value::Int(i32::from(fits))));
         }
     }
     let Some(key) = game_object::handle_key(receiver) else {

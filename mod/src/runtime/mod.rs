@@ -227,9 +227,9 @@ pub use client_item_parts::{
 mod item_parts;
 pub use item_parts::ItemStackRequest;
 pub use item_parts::{
-    GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick, ItemClickDirection,
-    ItemClickOutcome, ItemDestroyed, ItemDestroyedOutcome, ItemHook, ItemOverrides, ItemUse,
-    ItemUseOutcome, PlayerDropPlan, player_drop_plan,
+    CountedDrawStop, GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick,
+    ItemClickDirection, ItemClickOutcome, ItemDestroyed, ItemDestroyedOutcome, ItemHook,
+    ItemOverrides, ItemUse, ItemUseOutcome, PlayerDropPlan, player_drop_plan,
 };
 pub mod level_sound;
 mod library_dispatch;
@@ -60868,6 +60868,8 @@ mod vendored_nested_jars_predicate_java25_txt;
 mod vendored_review579_nested_real_java25_txt;
 #[path = "vanilla_block_items_java25.tsv.rs"]
 mod vendored_vanilla_block_items_java25_tsv;
+#[path = "vanilla_can_fit_inside_container_items_java25.txt.rs"]
+mod vendored_vanilla_can_fit_inside_container_items_java25_txt;
 #[path = "vanilla_entity_data_subclass.txt.rs"]
 mod vendored_vanilla_entity_data_subclass_txt;
 #[path = "vanilla_host_methods.tsv.rs"]

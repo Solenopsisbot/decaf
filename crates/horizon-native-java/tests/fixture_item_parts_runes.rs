@@ -15,13 +15,28 @@
 //!   `getMaxAllowed(f) = max((1 * size_multiplier - occupancy) / f, 0)` in `Fraction`s.
 //! - `getBarWidth` is `min(1 + Mth.mulAndTruncate(occupancy, 12), 13)`; `getBarColor` is the
 //!   static `ARGB.colorFromFloat(1.0f, 0.4f, 0.4f, 1.0f)` (`<clinit>` offsets 0-11).
+//! - `overrideStackedOnOther` offsets 0-153: a SECONDARY click with the carried pouch on a
+//!   non-empty slot asks `slot.getItem().getItem().canFitInsideContainerItems()` (offset 95) and
+//!   then `is(#runes:runes)` (offset 114); either `false` skips the insert, and the pouch writes
+//!   its unchanged contents back (`set`, offset 150) and answers `true`: nothing moves. A PRIMARY
+//!   click answers `false` (offsets 0-8).
+//! - `use` offsets 0-52: `dropAllBundledItems` (offsets 0-69) clears the contents
+//!   (`Builder.clear().build()`, `set`) and, on a `ServerPlayer`, drops each stack of the
+//!   contents' list in order through `Player.drop(stack, true, Prediction.PREDICTED)`; then
+//!   `playDropContentsSound` plays `BUNDLE_DROP_CONTENTS` at `0.8f` volume and pitch
+//!   `0.8f + level.getRandom().nextFloat() * 0.4f` (`fmul`, `fadd`) through
+//!   `Entity.playSound`, then `awardStat(ITEM_USED.get(this))`, and on a server level answers
+//!   `SUCCESS_SERVER`.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use horizon_native_java::{
-    BlockUsePlayerData, ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemClick, ItemClickDirection,
-    ItemHook, LevelRandomStream, MenuPlayerFacts, NativeJar, Nbt, NbtCompound, PlayerContainer,
-    RuntimeComponentValue, StdHost, Value,
+    BlockUsePlayerData, CountedDrawStop, DRAW_AFTER_DEFERRED_EFFECT, ExecutionBudget,
+    GAME_PROTOTYPE_COMPONENTS, InteractionResultValue, ItemClick, ItemClickDirection, ItemHook,
+    ItemUse, LevelRandomStream, LiveMenuEffect, MenuPlayerFacts, NativeJar, Nbt, NbtCompound,
+    PlayerContainer, RuntimeComponentValue, StdHost, SwingSource, Value, level_sound::SoundRecord,
+    player_drop_plan,
 };
 
 const UUID: u128 = 0x00c0_ffee_0000_0000_0000_0000_0000_0077;
@@ -331,4 +346,326 @@ fn run(jar_path: &Path) {
         .expect("encode")
         .expect("modelled pouch");
     assert_eq!(pouch_after.patch, Vec::new());
+}
+
+/// The jar booted as the mod boots a server jar: Bundle API's bootstrap Mixin, then Runes'
+/// `main` entrypoints, and the test player's `ServerPlayer`.
+fn boot(jar_path: &Path) -> (NativeJar, StdHost) {
+    let jar = NativeJar::from_path(jar_path).expect("load RUNES_JAR");
+    let mut host = jar
+        .try_seed_host(
+            StdHost::new()
+                .with_game_version("26.3")
+                .with_environment_type("SERVER"),
+        )
+        .expect("seed Runes host");
+    assert_eq!(
+        jar.run_bootstrap_static_injectors(&mut host, &ExecutionBudget::UNBOUNDED),
+        Vec::<String>::new()
+    );
+    for entry in jar.discover_entrypoints("main") {
+        jar.execute(&entry.class, entry.method.as_deref(), "main", &mut host)
+            .expect("run Runes main");
+    }
+    host.server_player_created(UUID, 1, 0);
+    (jar, host)
+}
+
+/// The game's prototype values for the vanilla container components (none on these items) and
+/// the pouch's contents type, as `mod/src/item_parts.rs` `java_stack` hands them.
+fn game_defaults() -> Vec<(String, Option<Nbt>)> {
+    let mut out: Vec<(String, Option<Nbt>)> = GAME_PROTOTYPE_COMPONENTS
+        .iter()
+        .map(|id| ((*id).to_owned(), None))
+        .collect();
+    out.push((CONTENTS.to_owned(), None));
+    out
+}
+
+/// A pouch's `bundleapi:custom_bundle_contents` as the type's codec stores it.
+fn contents_nbt(stacks: &[(&str, i32)], size_multiplier: i32) -> Nbt {
+    Nbt::Compound(NbtCompound::from([
+        (
+            "content".to_owned(),
+            Nbt::List(
+                stacks
+                    .iter()
+                    .map(|(id, count)| {
+                        Nbt::Compound(NbtCompound::from([
+                            ("id".to_owned(), Nbt::String((*id).to_owned())),
+                            ("count".to_owned(), Nbt::Int(*count)),
+                        ]))
+                    })
+                    .collect(),
+            ),
+        ),
+        ("size_multiplier".to_owned(), Nbt::Int(size_multiplier)),
+    ]))
+}
+
+/// A stack of `id`: a jar item (its `Item` object) or a vanilla one (`None`), with `patch`.
+fn stack(
+    jar: &NativeJar,
+    host: &mut StdHost,
+    id: &str,
+    count: i32,
+    patch: Vec<(String, Option<RuntimeComponentValue>)>,
+) -> Value {
+    let item = host
+        .registrations()
+        .iter()
+        .find(|entry| entry.registry == "minecraft:item" && entry.id == id)
+        .map(|entry| entry.value.clone());
+    jar.make_item_stack(
+        host,
+        item,
+        id,
+        count,
+        patch,
+        game_defaults(),
+        false,
+        Vec::new(),
+    )
+    .unwrap_or_else(|error| panic!("{id} stack: {error}"))
+}
+
+/// A small pouch holding `stacks`. Each rune the contents name gets the game's prototype
+/// values first, as the mod seeds them (`java_stack`), since the codec reads them as it decodes.
+fn filled_pouch(jar: &NativeJar, host: &mut StdHost, stacks: &[(&str, i32)]) -> Value {
+    for (id, _) in stacks {
+        jar.record_item_prototype(host, id, game_defaults())
+            .expect("rune prototype");
+    }
+    let patch = vec![(
+        CONTENTS.to_owned(),
+        Some(RuntimeComponentValue::Nbt(contents_nbt(stacks, 4))),
+    )];
+    stack(jar, host, POUCH, 1, patch)
+}
+
+/// BUGS-3d34-round4 #3: the carried pouch right-clicked onto a slot of a vanilla item that isn't
+/// a rune. Fabric's `overrideStackedOnOther` reads the vanilla item's
+/// `canFitInsideContainerItems()` (26.3: `Item`'s `true`; only the 17 shulker boxes, a
+/// `BlockItem` of a `ShulkerBoxBlock`, answer `false`: `vanilla_can_fit_inside_container_items`'s
+/// Java 25 capture), finds it outside `#runes:runes`, writes its contents back unchanged and
+/// answers `true`: nothing moves. The runtime failed that read (`Item#canFitInsideContainerItems`
+/// on a vanilla item was no host call it answered), and the mod turned the failure into
+/// vanilla's swap.
+#[test]
+fn rune_pouch_onto_cobblestone_moves_nothing() {
+    let Some(jar_path) = std::env::var_os("RUNES_JAR") else {
+        eprintln!("RUNES_JAR is unset; real Runes pouch-onto-cobblestone test skipped");
+        return;
+    };
+    std::thread::Builder::new()
+        .name("runes-pouch-onto-cobblestone".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let (jar, mut host) = boot(Path::new(&jar_path));
+            let pouch_item = item(&host, POUCH);
+            // (the slot's item and count, PRIMARY, the override's answer)
+            for (target, count, primary, handled) in [
+                ("minecraft:cobblestone", 10, false, true),
+                // A shulker box stacks to 1; its `false` skips the insert the same way.
+                ("minecraft:shulker_box", 1, false, true),
+                // PRIMARY: `false` at offset 8, before anything is read.
+                ("minecraft:cobblestone", 10, true, false),
+            ] {
+                let pouch = filled_pouch(&jar, &mut host, &[(RUNE, 5)]);
+                let mut inventory = vec![StdHost::empty_item_stack(); 36];
+                inventory[7] = stack(&jar, &mut host, target, count, Vec::new());
+                let before = host.unknown_host_call_count();
+                let out = jar
+                    .item_click_override(
+                        &mut host,
+                        &player(),
+                        "minecraft:overworld",
+                        &facts(&inventory),
+                        &pouch_item,
+                        BUNDLE_ITEM,
+                        &ItemClick {
+                            direction: ItemClickDirection::CarriedOnOther,
+                            inventory_slot: 7,
+                            carried: pouch,
+                            primary,
+                        },
+                        &ExecutionBudget::UNBOUNDED,
+                    )
+                    .expect("click");
+                let what = format!("{target} primary={primary}");
+                assert!(out.report.exact(), "{what}: {:?}", out.report);
+                assert_eq!(host.unknown_host_call_count(), before, "{what}");
+                assert_eq!(out.handled, handled, "{what}");
+                assert_eq!(out.takes, 0, "{what}");
+                assert!(out.effects.is_empty(), "{what}: {:?}", out.effects);
+                // The slot keeps its stack.
+                let slot = host.item_stack_components(&out.slot).expect("slot stack");
+                assert_eq!(
+                    (slot.item_id.as_str(), slot.count),
+                    (target, count),
+                    "{what}"
+                );
+                // The cursor keeps the pouch and its five runes.
+                let carried = jar
+                    .item_stack_components(&mut host, &out.carried)
+                    .expect("encode")
+                    .expect("modelled pouch");
+                assert_eq!(
+                    (carried.item_id.as_str(), carried.count),
+                    (POUCH, 1),
+                    "{what}"
+                );
+                assert_eq!(
+                    carried.patch,
+                    vec![(
+                        CONTENTS.to_owned(),
+                        Some(RuntimeComponentValue::Nbt(contents_nbt(&[(RUNE, 5)], 4)))
+                    )],
+                    "{what}"
+                );
+                // No insert, so no insert sound.
+                let sounds = host.take_sound_records();
+                assert!(sounds.is_empty(), "{what}: {sounds:?}");
+            }
+        })
+        .expect("spawn test thread")
+        .join()
+        .unwrap();
+}
+
+/// BUGS-3d34-round4 #2: using a filled pouch drops its contents in their list order, plays the
+/// drop-contents sound and counts the use. The sound's pitch draws the level's random after the
+/// drops are recorded, and the embedder carries a drop out after the call, through listeners
+/// that may draw that stream (`live_menu::draws_no_level_random`): the draw is answered from
+/// the lent stream but counted, and the outcome says where it fell (`CountedDrawStop`), so an
+/// embedder can apply the clear and the two drops before it and stop there.
+#[test]
+fn rune_pouch_use_drops_its_contents_in_order() {
+    let Some(jar_path) = std::env::var_os("RUNES_JAR") else {
+        eprintln!("RUNES_JAR is unset; real Runes pouch use test skipped");
+        return;
+    };
+    std::thread::Builder::new()
+        .name("runes-pouch-use".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            const FROST: &str = "runes:frost_stone";
+            let (jar, mut host) = boot(Path::new(&jar_path));
+            let pouch_item = item(&host, POUCH);
+            let pouch = filled_pouch(&jar, &mut host, &[(FROST, 10), (RUNE, 40)]);
+            let mut inventory = vec![StdHost::empty_item_stack(); 36];
+            inventory[0] = pouch.clone();
+            let holder = BlockUsePlayerData {
+                main_hand: Some(pouch),
+                ..player()
+            };
+            host.set_host_deferred_server_sound_seeds(true);
+            let mut stream = FixedStream(0.25);
+            let used = host
+                .with_lent_level_random("minecraft:overworld", "test/1", &mut stream, |host| {
+                    jar.item_use(
+                        host,
+                        &holder,
+                        "minecraft:overworld",
+                        &facts(&inventory),
+                        &pouch_item,
+                        BUNDLE_ITEM,
+                        &ItemUse {
+                            hand: "MAIN_HAND".to_owned(),
+                        },
+                        &ExecutionBudget::UNBOUNDED,
+                    )
+                })
+                .expect("use");
+            host.set_host_deferred_server_sound_seeds(false);
+            assert_eq!(used.report.failure, None);
+            assert_eq!(
+                used.report.unknown_host_calls,
+                BTreeMap::from([(DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1)])
+            );
+            // The draw came after both drops and before the sound and `ITEM_USED`, with the
+            // pouch already cleared (`dropAllBundledItems` offset 40) and not written again.
+            assert_eq!(
+                used.counted_draw_stop,
+                Some(CountedDrawStop {
+                    effects: 2,
+                    sounds: 0,
+                    first_counted: true,
+                    held_unchanged: true,
+                })
+            );
+            assert!(
+                matches!(
+                    used.result,
+                    Some(InteractionResultValue::Success {
+                        swing_source: SwingSource::ServerOnly,
+                        ..
+                    })
+                ),
+                "SUCCESS_SERVER: {:?}",
+                used.result
+            );
+            // The drops in the contents' order, each `Player.drop(stack, true, PREDICTED)` (its
+            // plan: thrown by the player, the dropped stats once the entity is in the world),
+            // then `ITEM_USED` of the pouch.
+            let mut lines = Vec::new();
+            for effect in &used.effects {
+                match effect {
+                    LiveMenuEffect::Drop {
+                        stack,
+                        retain_ownership,
+                        prediction,
+                    } => {
+                        let plan = player_drop_plan(stack, *retain_ownership, *prediction);
+                        lines.push(format!(
+                            "drop {} {} thrower={} updateSelf={}",
+                            stack.count, stack.item_id, plan.thrower, plan.swing_updates_self
+                        ));
+                        for (stat_type, value, amount) in &plan.stats_when_dropped {
+                            lines.push(format!("stat {stat_type} {value} {amount}"));
+                        }
+                    }
+                    LiveMenuEffect::AwardStat {
+                        stat_type,
+                        value,
+                        amount,
+                    } => lines.push(format!("stat {stat_type} {value} {amount}")),
+                    other => panic!("unexpected effect {other:?}"),
+                }
+            }
+            assert_eq!(
+                lines,
+                [
+                    "drop 10 runes:frost_stone thrower=true updateSelf=false",
+                    "stat minecraft:dropped runes:frost_stone 10",
+                    "stat minecraft:custom minecraft:drop 1",
+                    "drop 40 runes:fire_stone thrower=true updateSelf=false",
+                    "stat minecraft:dropped runes:fire_stone 40",
+                    "stat minecraft:custom minecraft:drop 1",
+                    "stat minecraft:used runes:small_rune_pouch 1",
+                ]
+            );
+            // The pouch is empty again: its cleared contents equal the prototype, so the patch
+            // holds nothing (`PatchedDataComponentMap.set`).
+            let held = jar
+                .item_stack_components(&mut host, used.held.as_ref().expect("held"))
+                .expect("encode")
+                .expect("modelled pouch");
+            assert_eq!((held.item_id.as_str(), held.count), (POUCH, 1));
+            assert_eq!(held.patch, Vec::new());
+            // `Entity.playSound` on the player is `Player.playSound`: the level's sound at the
+            // player, except them, in their sound source, pitch `0.8f + 0.25f * 0.4f`.
+            let sounds = host.take_sound_records();
+            assert_eq!(sounds.len(), 1, "{sounds:?}");
+            let SoundRecord::Play(sound) = &sounds[0] else {
+                panic!("a seed drawn without a sound: {sounds:?}");
+            };
+            assert_eq!(sound.sound_id, "minecraft:item.bundle.drop_contents");
+            assert_eq!(sound.except_player, Some(UUID));
+            assert_eq!(sound.volume, 0.8f32);
+            assert_eq!(sound.pitch, 0.8f32 + 0.25f32 * 0.4f32);
+        })
+        .expect("spawn test thread")
+        .join()
+        .unwrap();
 }

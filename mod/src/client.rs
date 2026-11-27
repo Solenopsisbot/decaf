@@ -116,14 +116,33 @@ impl Row {
         crate::block_use::note_failed_call(&mut self.menu_screen_failures, failure, counted)
     }
 
-    /// The verdict, qualified by the failures since (as the server row's summary is): a jar
-    /// whose screens failed never reads as an unqualified clean run.
+    /// The verdict, qualified by the failures and counted calls since (as the server row's
+    /// summary is, `JarRow::summary`): a jar whose screens failed, or that leaned on a call it
+    /// couldn't know (a client prediction among them), never reads as an unqualified clean run.
     fn summary(&self) -> String {
-        match self.menu_screen_failed {
-            0 => self.verdict.to_owned(),
-            1 => format!("{}, 1 menu-screen failure", self.verdict),
-            failed => format!("{}, {failed} menu-screen failures", self.verdict),
+        let plural = |count: usize, one: &str, many: &str| {
+            format!("{count} {}", if count == 1 { one } else { many })
+        };
+        let mut summary = self.verdict.to_owned();
+        if self.menu_screen_failed > 0 {
+            summary.push_str(", ");
+            summary.push_str(&plural(
+                self.menu_screen_failed,
+                "menu-screen failure",
+                "menu-screen failures",
+            ));
         }
+        // `counted` holds every call the client host counted since the jar loaded.
+        let counted: usize = self.counted.values().sum();
+        if counted > 0 {
+            summary.push_str(", ");
+            summary.push_str(&plural(
+                counted,
+                "counted call since start",
+                "counted calls since start",
+            ));
+        }
+        summary
     }
 
     fn json(&self) -> serde_json::Value {

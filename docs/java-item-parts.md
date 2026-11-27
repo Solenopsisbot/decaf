@@ -183,6 +183,30 @@ methods, and nothing in it names a mod.
    finds Kotlin lazy holders in a traced text with one automaton pass instead of a walk of every
    heap field per text, so a collection is linear in what it traces (`heap.rs` `LazyHolders`).
 
+**Counted, failed and exact (BUGS-3d34-round4 #2, #3).** A call that *counted* leaves Sunrise's
+vanilla answer standing (counted on the jar). A call that *failed* (Java threw, ran out of
+budget, or hit a host call the runtime refused; `ItemCallReport::failure`, or the runtime's own
+error) has no answer at all: the bridge logs it, keeps it in the row's `block_use.failures` and
+counts `item_stacked_on_other:failed` / `use_item:failed` / `item_destroyed:failed`, then
+refuses a click (handled, nothing moves) and answers a use `FAIL`. It never hands the click to
+Sunrise's vanilla swap as if the override had returned `false` (round 4's pouch onto cobblestone
+swapped that way, silently: a failed call's runtime rolls back with the host calls it counted).
+What failed there was `Item.canFitInsideContainerItems()` on a vanilla item, which the runtime
+now answers as 26.3 does (`Item`'s `true`, `false` for the 17 shulker boxes only: a Java 25
+capture over every registered item, `vanilla_item_data.rs`).
+
+A bundle's `use` drops its contents, then draws `level.getRandom().nextFloat()` for its sound's
+pitch. Vanilla's drop draws only entity randoms, but Sunrise carries the drop out after the call,
+through the swing, `item_toss` and `entity_join_level`, any of whose listeners may draw the level
+stream, where vanilla would run them before that draw; the SDK can't tell that none does (its
+only query says whether *any* mod listens, and this mod always listens to `entity_join_level`).
+So the draw counts (`live_menu::draws_no_level_random` has the evidence), and the use stops
+there, as the altar's take does (#665's rule (b)): the runtime says where the first counted draw
+fell (`CountedDrawStop`), and `server_use` applies what came before it, the cleared pouch and
+each drop with its stats (`player_drop_plan`), counts the draw, and carries out nothing after it
+(no sound, no `ITEM_USED`, `FAIL` as the result), provided the held stack wasn't written after
+the draw. The pouch empties; its drop-contents sound doesn't play.
+
 Tests, in the repo's usual pattern: javac fixtures for each façade with JDK 25 / game 26.3
 expected rows, then a real-jar test (`RUNES_JAR`) that inserts runes into a pouch through
 `overrideOtherStackedOnMe` and checks the encoded component, the bar width and colour, and the

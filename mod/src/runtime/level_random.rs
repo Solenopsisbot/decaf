@@ -82,15 +82,21 @@
 //! (`live_menu::draws_no_level_random`) marks the lend, and every lent draw
 //! after the mark is counted ([`DRAW_AFTER_DEFERRED_EFFECT`]). Off the list:
 //!
-//! - the criteria and the recipe unlock (`InventoryChangedCriterion`,
-//!   `RecipeCrafted`, `AwardRecipes`): in vanilla each can complete an
-//!   advancement at once, and `AdvancementRewards.grant` draws the level's
-//!   stream through its loot (`LootContext$Builder.create`, which falls back to
-//!   `ServerLevel.getRandom()`) or a reward function;
-//! - a drop: in 26.3 it draws only entity randoms (`ItemEntity.<init>(Level,
-//!   DDD,ItemStack)` its own `Entity.random`, `createItemStackToDrop` the
-//!   player's), but the embedder's drop path isn't verified to leave the level
-//!   stream alone.
+//! the criteria and the recipe unlock (`InventoryChangedCriterion`,
+//! `RecipeCrafted`, `AwardRecipes`): in vanilla each can complete an
+//! advancement at once, and `AdvancementRewards.grant` draws the level's
+//! stream through its loot (`LootContext$Builder.create`, which falls back to
+//! `ServerLevel.getRandom()`) or a reward function.
+//!
+//! A drop is off the list too. In 26.3 it draws only entity randoms
+//! (`ItemEntity.<init>(Level,DDD,ItemStack)` its own `Entity.random`,
+//! `createItemStackToDrop` the player's), but the embedder's drop runs other
+//! mods' listeners (`item_toss`, `entity_join_level`, the swing), which may
+//! draw the stream, after Java's draw where vanilla runs them before it
+//! (`live_menu::draws_no_level_random` gives the evidence). A bundle's `use`
+//! drops its contents, then draws its sound's pitch: that draw counts, and
+//! the lend keeps where it fell ([`DrawStop`]) for an embedder that stops the
+//! call there.
 //!
 //! The player's inventory, which Decaf writes back after the call, needs no
 //! mark: vanilla's `INVENTORY_CHANGED` fires only from `ServerPlayer$2
@@ -174,6 +180,30 @@ pub(crate) struct Lend {
     /// An effect that may draw this stream was recorded: later lent draws
     /// are out of vanilla's order.
     effect_pending: bool,
+    /// Where the lend's first counted draw fell ([`DrawStop`]), once one did.
+    stop: Option<DrawStop>,
+}
+
+/// What the running call had done when a lent draw first counted: an
+/// embedder that stops the call there (an item use that drops and then
+/// draws, `item_parts.rs`) carries out only what came before it.
+///
+/// Plain data, like the rest of the lend (`heap.rs` `HOLDS_NO_OBJECT`): the
+/// held stacks are kept as fingerprints (`item_parts::held_fingerprint`),
+/// never as object references.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DrawStop {
+    /// The host's counted calls just before this draw counted: equal to the
+    /// count at the call's start when this draw is the call's first counted
+    /// call.
+    pub(crate) counted_before: usize,
+    /// How many effects the running call had recorded
+    /// (`ActiveBlockUse::live_effects`).
+    pub(crate) effects: usize,
+    /// How many sound records the host held (`take_sound_records` order).
+    pub(crate) sounds: usize,
+    /// The running call's main- and off-hand stacks, as fingerprints.
+    pub(crate) held: [Option<String>; 2],
 }
 
 /// The lent stream, type-erased: a thin pointer to the `&mut dyn
@@ -254,6 +284,7 @@ impl StdHost {
             dimension: dimension.to_owned(),
             instance: instance.to_owned(),
             effect_pending: false,
+            stop: None,
         });
         // An unwind out of `run` restores the host's lend too (the slot is
         // restored by `_restore`), so an enclosing lend keeps answering.
@@ -294,6 +325,46 @@ impl StdHost {
         if let Some(lend) = self.level_random_lend.as_mut() {
             lend.effect_pending = true;
         }
+    }
+
+    /// Record where the lend's first counted draw fell ([`DrawStop`]), before
+    /// this draw is counted.
+    #[inline(never)]
+    fn note_draw_stop(&mut self) {
+        if self
+            .level_random_lend
+            .as_ref()
+            .is_none_or(|lend| lend.stop.is_some())
+        {
+            return;
+        }
+        let counted_before = self.unknown_host_call_count();
+        let sounds = self.level_sound.played_sounds.len();
+        let (effects, held) = match self.block_use.active_use.as_ref() {
+            Some(active) => (
+                active.live_effects.len(),
+                [
+                    active.player_data.main_hand.clone(),
+                    active.player_data.off_hand.clone(),
+                ],
+            ),
+            None => (0, [None, None]),
+        };
+        let held = held
+            .map(|stack| stack.and_then(|stack| crate::runtime::item_parts::held_fingerprint(self, &stack)));
+        if let Some(lend) = self.level_random_lend.as_mut() {
+            lend.stop = Some(DrawStop {
+                counted_before,
+                effects,
+                sounds,
+                held,
+            });
+        }
+    }
+
+    /// Where the running lend's first counted draw fell, if one did.
+    pub(crate) fn lent_draw_stop(&self) -> Option<&DrawStop> {
+        self.level_random_lend.as_ref()?.stop.as_ref()
     }
 
     /// Mark the stream of `dimension`'s open `instance` as no longer where
@@ -374,6 +445,9 @@ impl StdHost {
                 .unknown_host_calls
                 .entry(LEVEL_STREAM_UNKNOWN.to_owned())
                 .or_default() += 1;
+        }
+        if position_unknown || lend.effect_pending {
+            self.note_draw_stop();
         }
         if lend.effect_pending {
             *self
