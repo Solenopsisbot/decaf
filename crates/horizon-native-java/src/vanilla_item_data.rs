@@ -62,6 +62,48 @@ pub fn all_vanilla_data_component_ids() -> impl Iterator<Item = &'static str> {
     DATA_COMPONENT_FIELDS.iter().map(|(_, id)| *id)
 }
 
+/// `Item.canFitInsideContainerItems()` of a vanilla 26.3 item, `None` for an id that isn't one.
+///
+/// 26.3's `Item` answers `true` (`iconst_1; ireturn`) and `BlockItem` answers
+/// `!(getBlock() instanceof ShulkerBoxBlock)`; no other class of the server jar declares it.
+/// The items answering `false` ([`CANNOT_FIT_INSIDE_CONTAINER_ITEMS`]) were captured on Java 25
+/// by calling it on every `BuiltInRegistries.ITEM` entry after `Bootstrap.bootStrap()`
+/// (`vanilla_can_fit_inside_container_items_java25.txt`, from the oracle in
+/// `tests/fixtures/vanilla_can_fit_inside_container_items/`).
+pub(crate) fn vanilla_can_fit_inside_container_items(id: &str) -> Option<bool> {
+    if !is_vanilla_item(id) {
+        return None;
+    }
+    Some(
+        CANNOT_FIT_INSIDE_CONTAINER_ITEMS
+            .binary_search(&id)
+            .is_err(),
+    )
+}
+
+/// The vanilla 26.3 items whose `canFitInsideContainerItems()` is `false`: the 17 shulker boxes
+/// (of 1,658 registered items), sorted.
+#[rustfmt::skip]
+const CANNOT_FIT_INSIDE_CONTAINER_ITEMS: &[&str] = &[
+    "minecraft:black_shulker_box",
+    "minecraft:blue_shulker_box",
+    "minecraft:brown_shulker_box",
+    "minecraft:cyan_shulker_box",
+    "minecraft:gray_shulker_box",
+    "minecraft:green_shulker_box",
+    "minecraft:light_blue_shulker_box",
+    "minecraft:light_gray_shulker_box",
+    "minecraft:lime_shulker_box",
+    "minecraft:magenta_shulker_box",
+    "minecraft:orange_shulker_box",
+    "minecraft:pink_shulker_box",
+    "minecraft:purple_shulker_box",
+    "minecraft:red_shulker_box",
+    "minecraft:shulker_box",
+    "minecraft:white_shulker_box",
+    "minecraft:yellow_shulker_box",
+];
+
 #[rustfmt::skip]
 const VANILLA_ITEMS: &[&str] = &[
     "minecraft:abandoned_camp_map",
@@ -2535,3 +2577,39 @@ const VANILLA_RECIPE_TYPES: &[&str] = &[
     "minecraft:smoking",
     "minecraft:stonecutting",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `CANNOT_FIT_INSIDE_CONTAINER_ITEMS` is the Java 25 capture: the items whose
+    /// `canFitInsideContainerItems()` answered `false`, of a registry of the size it printed.
+    #[test]
+    fn can_fit_inside_container_items_is_the_java_25_capture() {
+        let capture = include_str!("vanilla_can_fit_inside_container_items_java25.txt");
+        let mut refused: Vec<&str> = Vec::new();
+        let mut total = None;
+        for line in capture.lines() {
+            match line.split('\t').collect::<Vec<_>>()[..] {
+                ["FALSE", id, _class] => refused.push(id),
+                ["TOTAL", count] => total = Some(count.parse::<usize>().unwrap()),
+                _ => panic!("unexpected capture line {line:?}"),
+            }
+        }
+        refused.sort_unstable();
+        assert_eq!(refused, CANNOT_FIT_INSIDE_CONTAINER_ITEMS);
+        assert_eq!(total, Some(VANILLA_ITEMS.len()));
+        for id in VANILLA_ITEMS {
+            assert_eq!(
+                vanilla_can_fit_inside_container_items(id),
+                Some(!refused.contains(id)),
+                "{id}"
+            );
+        }
+        // Not a 26.3 item: no answer (counted by the caller).
+        assert_eq!(
+            vanilla_can_fit_inside_container_items("demo:not_an_item"),
+            None
+        );
+    }
+}

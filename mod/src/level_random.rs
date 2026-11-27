@@ -50,16 +50,41 @@ impl LevelRandomStream for Lent<'_> {
     }
 }
 
-/// Report one block-use or live-menu call's counted calls on `row`, described by `what`
-/// (`menu 3`, `block runes:crafting_altar useWithoutItem`). The unmodelled host calls go into
-/// `block_use.unknown_host_calls` and a WARN. The level-stream draws the lend answered but counted
-/// for their position (`runtime/level_random.rs`) are no unmodelled call: they reach the jar's
-/// counted calls (its summary, report and stop line) with every other counted call, and are
-/// logged here as what they are.
+/// Report one block-use, live-menu or item-part call's counted calls on `row`, described by
+/// `what` (`menu 3`, `block runes:crafting_altar useWithoutItem`). The unmodelled host calls go
+/// into `block_use.unknown_host_calls` and a WARN. The level-stream draws the lend answered but
+/// counted for their position (`runtime/level_random.rs`) are no unmodelled call: they reach the
+/// jar's counted calls (its summary, report and stop line) with every other counted call, and
+/// are logged here as what they are.
 pub(crate) fn note_call_counts(row: &mut JarRow, what: &str, calls: &BTreeMap<String, usize>) {
-    let (draws, unmodelled): (BTreeMap<&String, &usize>, BTreeMap<&String, &usize>) = calls
-        .iter()
-        .partition(|(key, _)| is_counted_level_stream_draw(key));
+    note_call_counts_stopped(row, what, calls, None);
+}
+
+/// [`note_call_counts`] for a live-menu call that may have stopped at a counted step:
+/// `stopped` is the key of the call as a whole (`handleContainerClick`, `ServerPlayer.tick`),
+/// counted once because a step inside it counted on its own
+/// (`LiveMenuOutcome::stopped_at_counted_step`). That count says where the call stopped, not
+/// that a fact was missing: like the draws, it reaches the jar's counted calls but is no
+/// unmodelled host call, and is logged as the stop it is.
+pub(crate) fn note_call_counts_stopped(
+    row: &mut JarRow,
+    what: &str,
+    calls: &BTreeMap<String, usize>,
+    stopped: Option<&str>,
+) {
+    let mut draws = BTreeMap::new();
+    let mut stops = BTreeMap::new();
+    let mut unmodelled = BTreeMap::new();
+    for (key, count) in calls {
+        let kind = if is_counted_level_stream_draw(key) {
+            &mut draws
+        } else if Some(key.as_str()) == stopped {
+            &mut stops
+        } else {
+            &mut unmodelled
+        };
+        kind.insert(key, *count);
+    }
     let unmodelled_count: usize = unmodelled.values().copied().sum();
     row.block_use.unknown_host_calls += unmodelled_count;
     if unmodelled_count > 0 {
@@ -72,6 +97,12 @@ pub(crate) fn note_call_counts(row: &mut JarRow, what: &str, calls: &BTreeMap<St
     if draw_count > 0 {
         log::info!(
             "{LOG}: {}: {what} counted {draw_count} level-stream draw(s), answered from the live stream but not claimed to be at vanilla's position: {draws:?}",
+            row.id
+        );
+    }
+    if !stops.is_empty() {
+        log::info!(
+            "{LOG}: {}: {what} stopped at a counted step and was counted as a whole: {stops:?}",
             row.id
         );
     }
