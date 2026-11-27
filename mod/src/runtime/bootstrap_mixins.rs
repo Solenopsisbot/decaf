@@ -20,13 +20,15 @@
 //! Exactly when, and in which order:
 //!
 //! * A real Fabric 26.3 game reaches these points before any `main` entrypoint: the server in
-//!   `Bootstrap.bootStrap()` ([`SERVER_ORDER`]), the client in its `Main.main` up to
-//!   `Minecraft.<init>`, where Fabric runs the first entrypoint ([`CLIENT_ORDER`]: its
-//!   `Bootstrap.bootStrap()`, then `ClientBootstrap.bootstrap()`). Both lists were measured with a
+//!   `Bootstrap.bootStrap()` ([`SERVER_ORDER`]), the client in its `Main.main` and the start of
+//!   `Minecraft.<init>`, up to where Fabric Loader 0.20.1 runs the first entrypoint
+//!   ([`CLIENT_ORDER`]: its `Bootstrap.bootStrap()`, `ClientBootstrap.bootstrap()`, then the
+//!   constructor until `EntrypointPatch`'s hook, just before the last `Thread.currentThread()`
+//!   call ahead of the "Backend library: {}" log line, offset 555 in 26.3). Both lists were measured with a
 //!   JDK 25 agent on the real 26.3 jars (`tools/trace_bootstrap_clinit_order.py`). On the server
 //!   the target must also be a class it loads before mods
 //!   ([`crate::runtime::mixin_class_loading::server_loads_before_mods`], measured on Fabric); on the client,
-//!   reaching the point before `Minecraft.<init>` is that.
+//!   reaching the point before that hook is that.
 //! * Callbacks into different points run in the order the side's list reaches them, which is when
 //!   a `TAIL` callback runs, across all jars. A point the list reaches more than once, or on
 //!   another thread, has no one turn: its callbacks are counted. A pass whose hosts are not all on
@@ -65,7 +67,7 @@ use super::*;
 const SERVER_ORDER: &str = crate::runtime::vendored_bootstrap_clinit_order_26_3_txt::VENDORED_DATA;
 
 /// The same for the 26.3 client, up to where Fabric runs its first entrypoint in
-/// `Minecraft.<init>` (`tools/trace_bootstrap_clinit_order.py --side client`).
+/// `Minecraft.<init>` (offset 555; `tools/trace_bootstrap_clinit_order.py --side client`).
 const CLIENT_ORDER: &str = crate::runtime::vendored_bootstrap_clinit_order_26_3_client_txt::VENDORED_DATA;
 
 /// `CallbackInfo`'s descriptor as a handler's only parameter.

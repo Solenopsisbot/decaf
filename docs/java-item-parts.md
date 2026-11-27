@@ -75,7 +75,8 @@ methods, and nothing in it names a mod.
    ones), before any jar's entrypoint, in the order that side's bootstrap finishes those classes
    (`bootstrap_mixins.rs`; `bootstrap_clinit_order_26_3.txt` for the server and
    `bootstrap_clinit_order_26_3_client.txt` for the client, the real client's `Main` up to
-   where Fabric Loader 0.20.1 starts the entrypoints in `Minecraft.<init>`, both from
+   where Fabric Loader 0.20.1 starts the entrypoints in `Minecraft.<init>` (just before the
+   last `Thread.currentThread()` call ahead of the "Backend library: {}" log line), both from
    `tools/trace_bootstrap_clinit_order.py`, run with no network under `unshare -rn`). A `TAIL`
    into a static `()V` method the bootstrap ends once (`RangeSelectItemModelProperties
    .bootstrap()`) runs at that method's turn; any other shape that would apply is counted (a

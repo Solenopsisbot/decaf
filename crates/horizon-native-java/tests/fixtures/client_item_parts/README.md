@@ -31,9 +31,11 @@ print(":".join(out))
 PY
 )"
 javac -nowarn -cp "$CP" -d out demo/*.java oracle/net/fabricmc/api/ModInitializer.java oracle/*.java
-# No network (the client classes must never reach one), no display, a scratch home.
+# No network (the client classes must never reach one), no display, a scratch home; a failed
+# run must not leave a truncated java25.txt behind a successful sed.
+set -o pipefail
 unshare -rn true || { echo "needs a network namespace"; exit 1; }
-env -u DISPLAY -u WAYLAND_DISPLAY HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/home/.config" \
+env -u DISPLAY -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS -u _JAVA_OPTIONS -u WAYLAND_DISPLAY HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/home/.config" \
   XDG_CACHE_HOME="$SCRATCH/home/.cache" XDG_DATA_HOME="$SCRATCH/home/.local/share" \
   unshare -rn java -Djava.io.tmpdir="$SCRATCH/tmp" -cp "out:$CP" ClientItemPartsOracle \
   | sed 's/^\[[^]]*\] \[[^]]*\]: \[STDOUT\]: //' > java25.txt
