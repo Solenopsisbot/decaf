@@ -1,0 +1,15 @@
+white 0.5 7fffffff
+white 1.0 ffffffff
+white 0.0 00ffffff
+white -1.0E10 00ffffff
+white -Infinity 00ffffff
+white -9000000.0 00ffffff
+white 2.0 feffffff
+white NaN 00ffffff
+ceil 38.5 39
+ceil 39.0 39
+ceil 3.0E9 2147483647
+ceil Infinity 2147483647
+ceil NaN 0
+ceil -0.5 0
+ceil -3.0E9 -2147483648

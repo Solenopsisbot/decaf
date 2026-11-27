@@ -23,10 +23,14 @@ use std::sync::Arc;
 
 use horizon_native_java::{
     ExecutionBudget, ItemHook, StdHost, Value,
-    client_surface::{ClientSnapshot, ClientText, DrawOp, FontAnswers, FontQuestion, TextMetrics},
+    client_surface::{
+        ClientSnapshot, ClientText, DrawOp, FontAnswers, FontQuestion, TextMetrics, WidthOrder,
+    },
 };
 
 const JAVA25: &str = include_str!("fixtures/client_font/java25.txt");
+/// `oracle/FontCasesOracle.java`: 26.3's `Font.split` / `Font.width` of single inputs.
+const CASES25: &str = include_str!("fixtures/client_font/cases25.txt");
 
 const MOD_JSON: &str = r#"{"schemaVersion":1,"id":"demo","version":"1.0.0","environment":"*","entrypoints":{"main":["demo.Probe"]},"mixins":["demo.mixins.json"]}"#;
 const MIXINS_JSON: &str =
@@ -143,8 +147,9 @@ const STUBS: &[(&str, &str)] = &[
 ];
 
 /// The demo with `tooltip` as its component's source (the oracle's, or a counted variant's).
-fn fixture(test: &str, tooltip: &str) -> javac_fixture::Fixture {
+fn fixture(test: &str, tooltip: &str, stubs: &[(&str, &str)]) -> javac_fixture::Fixture {
     let mut sources = STUBS.to_vec();
+    sources.extend_from_slice(stubs);
     sources.extend_from_slice(&[
         (
             "demo/Label.java",
@@ -221,7 +226,12 @@ struct Demo {
 
 impl Demo {
     fn new(test: &str, tooltip: &str) -> Self {
-        let fixture = fixture(test, tooltip);
+        Self::new_with_stubs(test, tooltip, &[])
+    }
+
+    /// [`Self::new`] with more compile-only stubs.
+    fn new_with_stubs(test: &str, tooltip: &str, stubs: &[(&str, &str)]) -> Self {
+        let fixture = fixture(test, tooltip, stubs);
         let mut host = fixture
             .jar
             .seed_host(StdHost::new().with_environment_type("CLIENT"));
@@ -398,139 +408,227 @@ fn font_split_width_and_blit_sprite_match_java25() {
     assert_eq!(on_big_stack(run_script), expected);
 }
 
-/// Without the glyphs and translations (a frame whose metrics are empty, as an embedder without a
-/// glyph table has), the label's height counts on `Font.split` and records the question. The
-/// embedder answers it with its own font's lines ([`FontAnswers`]), and the next run answers from
-/// them: the questions shrink to the next unanswered one until none is left, and then the draws
-/// are those answers'. An empty text needs no glyph: its split is exact with no metrics at all.
+/// A fake embedder with no glyph table, as Sunrise is: the game's font is `metrics()` (the
+/// oracle's table and translations), asked text by text as Sunrise's `text_width` / `text_split`
+/// would be. Answers what it can; `false` for anything it can't.
+fn game_font(questions: &[FontQuestion], answers: &mut FontAnswers) -> bool {
+    let font = metrics();
+    for question in questions {
+        match question {
+            FontQuestion::Width(text) => {
+                let Some(width) = font.exact_width(text, WidthOrder::Logical) else {
+                    return false;
+                };
+                answers.widths.insert(text.clone(), width);
+            }
+            FontQuestion::Split(text, width) => {
+                let Some(lines) = font.exact_split(text, *width) else {
+                    return false;
+                };
+                answers.splits.insert((text.clone(), *width), lines);
+            }
+        }
+    }
+    true
+}
+
+/// A tooltip frame whose font holds only the embedder's answers (no glyph table).
+fn answered_frame(answers: &FontAnswers) -> Arc<ClientSnapshot> {
+    frame(TextMetrics {
+        answers: answers.clone(),
+        ..TextMetrics::default()
+    })
+}
+
+/// The path Sunrise runs: no glyph table, every text asked of the game's font between runs
+/// (`NativeJar::tooltip_image_with_font`), each probe's counts rewound, and the image then drawn
+/// in a later frame with the answers, as the factory's `draw_image` does. Every label's size and
+/// draws are the oracle's, and nothing stays counted.
 #[test]
-fn the_embedders_answers_answer_what_the_glyph_model_cannot() {
-    on_big_stack(|| {
+fn the_sunrise_path_asks_the_game_font_and_matches_java25() {
+    let expected: Vec<String> = JAVA25
+        .lines()
+        .filter(|line| draws_something(line))
+        .map(str::to_owned)
+        .collect();
+    let printed = on_big_stack(|| {
         let mut demo = Demo::new(
-            "client_font_answers",
+            "client_font_sunrise_path",
             include_str!("fixtures/client_font/demo/LabelTooltip.java"),
         );
         let budget = ExecutionBudget::UNBOUNDED;
-        let description = ClientText::Translatable("demo.label.description".into());
-        let title = ClientText::Translatable("demo.label.title".into());
-        let line = |text: &str| ClientText::Literal(text.into());
-
-        // An empty literal splits to no line whatever the font: with empty metrics, only the
-        // title's width (`getWidth`, asked first) is a question; once it is answered, the size
-        // is exact, the empty text's split included.
-        let empty = demo.component(5);
-        let mut title_only = FontAnswers::default();
-        for answered in [false, true] {
-            if answered {
-                title_only.widths.insert(title.clone(), 50);
-            }
-            let metrics = TextMetrics {
-                answers: title_only.clone(),
-                ..TextMetrics::default()
-            };
-            demo.host.begin_client_frame(frame(metrics), &[]);
-            let size = demo
-                .fixture
-                .jar
-                .tooltip_component_size(&mut demo.host, &empty, &budget);
-            let questions = demo.host.end_client_frame().font_questions;
-            if answered {
-                let size = size.exact().expect("the empty label's size is exact");
-                assert_eq!((size.width, size.height), (50, 24));
-                assert_eq!(questions, Vec::new());
-            } else {
-                assert!(!size.report.exact());
-                assert_eq!(questions, [FontQuestion::Width(title.clone())]);
-            }
-        }
-
-        let component = demo.component(1);
-        let mut answers = FontAnswers::default();
-        let mut asked = Vec::new();
-        let draws = loop {
-            let metrics = TextMetrics {
-                answers: answers.clone(),
-                ..TextMetrics::default()
-            };
-            demo.host.begin_client_frame(frame(metrics), &[]);
+        let translations = metrics().translations;
+        let mut out = Vec::new();
+        for kind in 1..=5 {
+            let component = demo.component(kind);
             let jar = &demo.fixture.jar;
-            let size = jar.tooltip_component_size(&mut demo.host, &component, &budget);
-            let drawn = size.clone().exact().and_then(|size| {
-                jar.draw_tooltip_component_image(
+            let image = jar
+                .tooltip_image_with_font(
                     &mut demo.host,
                     &component,
-                    10,
-                    20,
-                    size.width,
-                    size.height,
+                    &answered_frame,
+                    16,
+                    &mut game_font,
                     &budget,
                 )
+                .unwrap_or_else(|| {
+                    panic!(
+                        "kind {kind}: no image: {:?}",
+                        demo.host.unknown_host_calls()
+                    )
+                });
+            // A run stops at its first unanswered text: kind 1 asks the title's width, the
+            // description's split, each of its six lines' widths and the count label's, a run
+            // each (ten in all).
+            assert!(image.runs > 1, "kind {kind} asked nothing");
+            if kind == 1 {
+                assert_eq!(image.runs, 10);
+            }
+            let size = image.size;
+            out.push(format!(
+                "label kind={kind} width={} height={}",
+                size.width, size.height
+            ));
+            out.push(format!(
+                "  draw at 10,20 box {}x{}",
+                size.width, size.height
+            ));
+            demo.host
+                .begin_client_frame(answered_frame(&image.answers), &[]);
+            let drawn = jar.draw_tooltip_component_image(
+                &mut demo.host,
+                &component,
+                10,
+                20,
+                size.width,
+                size.height,
+                &budget,
+            );
+            assert_eq!(demo.host.end_client_frame().font_questions, Vec::new());
+            let draws = drawn
+                .clone()
                 .exact()
-            });
-            let questions = demo.host.end_client_frame().font_questions;
-            if let Some(draws) = drawn {
-                assert_eq!(questions, Vec::new());
-                break draws;
-            }
-            assert!(!questions.is_empty(), "a counted run asks something");
-            for question in questions {
-                asked.push(question.clone());
-                match question {
-                    // The game's font wraps the description in two lines.
-                    FontQuestion::Split(text, 40) if text == description => {
-                        answers
-                            .splits
-                            .insert((text, 40), vec![line("Can hold mixed"), line("stacks")]);
-                    }
-                    FontQuestion::Width(text) if text == title => {
-                        answers.widths.insert(text, 50);
-                    }
-                    FontQuestion::Width(text) if text == line("Can hold mixed") => {
-                        answers.widths.insert(text, 61);
-                    }
-                    FontQuestion::Width(text) if text == line("stacks") => {
-                        answers.widths.insert(text, 31);
-                    }
-                    FontQuestion::Width(text) if text == line("Iq2") => {
-                        answers.widths.insert(text, 16);
-                    }
-                    other => panic!("unexpected question {other:?}"),
-                }
-            }
-        };
+                .unwrap_or_else(|| panic!("kind {kind}: {:?}", drawn.report));
+            out.extend(draws.iter().map(|op| print(op, &translations)));
+            demo.host.release(&component);
+        }
+        // Every probe's refusals were rewound; the runs that answered counted nothing.
         assert_eq!(
-            asked,
-            [
-                FontQuestion::Width(title.clone()),
-                FontQuestion::Split(description.clone(), 40),
-                FontQuestion::Width(line("Can hold mixed")),
-                FontQuestion::Width(line("stacks")),
-                FontQuestion::Width(line("Iq2")),
-            ]
+            demo.host.unknown_host_call_count(),
+            0,
+            "{:?}",
+            demo.host.unknown_host_calls()
         );
-        let printed: Vec<String> = draws
-            .iter()
-            .map(|op| print(op, &metrics().translations))
-            .collect();
-        // height = 2 lines * 9 + 24 = 42; width = max(40, 50) = 50.
-        assert_eq!(
-            printed,
-            [
-                "  text \"Can hold mixed\" 10 20 -5592406 true",
-                "  text \"stacks\" 10 29 -5592406 true",
-                "  sprite gui_textured minecraft:container/bundle/slot_background 10 38 24 24 -1",
-                "  sprite gui_textured demo:bar 34 38 61 13 -2130771968",
-                "  sprite gui_textured demo:bar 34 51 30 11 2147483647",
-                "  text \"Can hold mixed\" 28 40 -1 true",
-                "  text \"Pouch Label\" 10 53 -256 true",
-                "  text \"Iq2\" 2 62 -1 true",
-            ]
+        out
+    });
+    assert_eq!(printed, expected);
+}
+
+/// A probe that counts anything but the font's refusals keeps its counts, and no image is
+/// answered. Here `getWidth` first reaches a class whose `<clinit>` stores a counted call's
+/// placeholder in a `static final`, then asks the font: a rewind would drop that count, and the
+/// next run (which doesn't run `<clinit>` again) would read the placeholder with nothing counted.
+#[test]
+fn a_probe_that_counted_more_than_the_font_keeps_its_counts() {
+    let source = include_str!("fixtures/client_font/demo/LabelTooltip.java")
+        .replace(
+            "    return Math.max(WRAP, font.width(TITLE));",
+            "    Object kept = Kept.VALUE;\n    return Math.max(WRAP, font.width(TITLE)) + (kept == null ? 1 : 0);",
+        )
+        .replace(
+            "  private final Label label;",
+            "  static final class Kept {\n    static final Object VALUE = net.minecraft.util.Unmodelled.make();\n  }\n\n  private final Label label;",
+        );
+    assert!(source.contains("Kept.VALUE") && source.contains("Unmodelled.make()"));
+    on_big_stack(move || {
+        let mut demo = Demo::new_with_stubs(
+            "client_font_kept_placeholder",
+            &source,
+            &[(
+                "net/minecraft/util/Unmodelled.java",
+                "package net.minecraft.util; public final class Unmodelled { public static Object make() { throw new AssertionError(); } }",
+            )],
+        );
+        let budget = ExecutionBudget::UNBOUNDED;
+        let component = demo.component(4);
+        let jar = &demo.fixture.jar;
+        let mut asked = 0;
+        let image = jar.tooltip_image_with_font(
+            &mut demo.host,
+            &component,
+            &answered_frame,
+            8,
+            &mut |questions, answers| {
+                asked += 1;
+                game_font(questions, answers)
+            },
+            &budget,
+        );
+        assert_eq!(image, None);
+        // The first run asked the title's width, but what else it counted keeps it from being
+        // a probe: nothing was answered, and both counts stand.
+        assert_eq!(asked, 0);
+        let counted: BTreeMap<String, usize> = demo.host.unknown_host_calls().into_iter().collect();
+        assert!(
+            counted
+                .keys()
+                .any(|key| key.starts_with("net/minecraft/util/Unmodelled#make")),
+            "{counted:?}"
+        );
+        assert!(
+            counted
+                .keys()
+                .any(|key| key.starts_with("net/minecraft/client/gui/Font#width")),
+            "{counted:?}"
         );
     });
 }
 
+/// Every row of `cases25.txt` (26.3's `Font.split` and `Font.width` of single inputs, on the
+/// oracle's table): the glyph model's answer is the oracle's.
+#[test]
+fn split_and_width_cases_match_java25() {
+    let unescape = |text: &str| text.replace("\\n", "\n").replace("\\\\", "\\");
+    let font = metrics();
+    let mut checked = 0;
+    for line in CASES25.lines() {
+        if let Some(rest) = line.strip_prefix("split \"") {
+            let (text, rest) = rest.split_once("\" ").unwrap();
+            let (width, rest) = rest.split_once(' ').unwrap();
+            let (count, lines) = rest.split_once(' ').unwrap();
+            let lines = lines.strip_prefix('[').unwrap().strip_suffix(']').unwrap();
+            let expected: Vec<ClientText> = if count == "0" {
+                Vec::new()
+            } else {
+                lines
+                    .split('|')
+                    .map(|line| ClientText::Literal(unescape(line)))
+                    .collect()
+            };
+            assert_eq!(expected.len(), count.parse::<usize>().unwrap(), "{line}");
+            let text = ClientText::Literal(unescape(text));
+            assert_eq!(
+                font.exact_split(&text, width.parse().unwrap()),
+                Some(expected),
+                "{line}"
+            );
+            checked += 1;
+        } else if let Some(rest) = line.strip_prefix("width \"") {
+            let (text, width) = rest.rsplit_once("\" ").unwrap();
+            let text = ClientText::Literal(unescape(text));
+            assert_eq!(
+                font.exact_width(&text, WidthOrder::Logical),
+                Some(width.parse().unwrap()),
+                "{line}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 29);
+}
+
 /// A glyph past the table and a translation the frame lacks are no answer: counted, with the
-/// question recorded. Neither falls back to the table's fallback advance or the key.
+/// question recorded. Neither is guessed (no fallback advance, no key for a translation).
 #[test]
 fn an_unknown_glyph_or_translation_counts() {
     on_big_stack(|| {
@@ -543,13 +641,7 @@ fn an_unknown_glyph_or_translation_counts() {
         let cafe = demo.component(2);
         let described = demo.component(1);
         let jar = &demo.fixture.jar;
-        demo.host.begin_client_frame(
-            frame(TextMetrics {
-                fallback: 6.0,
-                ..metrics()
-            }),
-            &[],
-        );
+        demo.host.begin_client_frame(frame(metrics()), &[]);
         let size = jar.tooltip_component_size(&mut demo.host, &cafe, &budget);
         assert!(!size.report.exact());
         assert!(

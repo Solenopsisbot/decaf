@@ -218,7 +218,9 @@ pub use level_random::{
     is_counted_level_stream_draw,
 };
 mod client_item_parts;
-pub use client_item_parts::{ClientItemOutcome, ItemModelHolder, TooltipComponentSize};
+pub use client_item_parts::{
+    ClientItemOutcome, ItemModelHolder, TooltipComponentSize, TooltipImage,
+};
 mod item_parts;
 pub use item_parts::{
     GAME_PROTOTYPE_COMPONENTS, ItemBarOutcome, ItemCallReport, ItemClick, ItemClickDirection,
@@ -4899,9 +4901,9 @@ impl StdHost {
     /// what it asks (a tooltip component's font questions, `client_font.rs`) and then runs it
     /// again with the answers: [`Self::rewind_unknown_calls`] drops what the discarded probe
     /// counted, so only the run whose result is used counts. The probe's own result must be
-    /// thrown away, and the call must be one the game itself repeats (a tooltip component's
-    /// `getHeight` / `extractImage`, which vanilla runs every frame), so running it twice is no
-    /// observable difference.
+    /// thrown away, the call must be one the game itself repeats (a tooltip component's
+    /// `getHeight` / `extractImage`, which vanilla runs every frame), and what the probe counted
+    /// must be only what the answers remove ([`Self::unknown_calls_since`]).
     pub fn unknown_calls_mark(&self) -> UnknownCallsMark {
         UnknownCallsMark(self.unknown_host_calls.clone())
     }
@@ -4909,6 +4911,21 @@ impl StdHost {
     /// Put the counted-call record back to `mark` ([`Self::unknown_calls_mark`]).
     pub fn rewind_unknown_calls(&mut self, mark: UnknownCallsMark) {
         self.unknown_host_calls = mark.0;
+    }
+
+    /// What was counted since `mark`, by key: the record a rewind to `mark` would drop. An
+    /// embedder rewinds only when this is exactly what it means to drop (a tooltip run's font
+    /// refusals, `ClientFrameOutput::font_refusals`); anything else the run counted may have
+    /// been kept by the jar (a counted call's placeholder stored in a static during a class's
+    /// first `<clinit>`, which the next run doesn't repeat), so it must stand.
+    pub fn unknown_calls_since(&self, mark: &UnknownCallsMark) -> BTreeMap<String, usize> {
+        self.unknown_host_calls
+            .iter()
+            .filter_map(|(key, &count)| {
+                let before = mark.0.get(key).copied().unwrap_or(0);
+                (count > before).then(|| (key.clone(), count - before))
+            })
+            .collect()
     }
 
     /// Serializer object identities registered for client recipe synchronization.

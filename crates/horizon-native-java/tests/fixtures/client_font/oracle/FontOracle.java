@@ -81,22 +81,8 @@ public final class FontOracle {
     }
   }
 
-  public static void main(String[] args) throws Exception {
-    java.lang.reflect.Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
-    theUnsafe.setAccessible(true);
-    Unsafe unsafe = (Unsafe) theUnsafe.get(null);
-    SharedConstants.tryDetectVersion();
-    Bootstrap.bootStrap();
-    Constructor<ClientLanguage> make =
-        ClientLanguage.class.getDeclaredConstructor(Map.class, boolean.class);
-    make.setAccessible(true);
-    Language.inject(
-        make.newInstance(
-            Map.of(
-                "demo.label.description", "Can hold mixed stacks of runes",
-                "demo.label.title", "Pouch Label"),
-            false));
-
+  /** 26.3's own Font over a glyph provider whose every advance is {@link #advance}. */
+  static Font font() {
     GlyphSource glyphs =
         new GlyphSource() {
           @Override
@@ -117,7 +103,7 @@ public final class FontOracle {
             throw new AssertionError("no obfuscated text here");
           }
         };
-    Font font =
+    return
         new Font(
             new Font.Provider() {
               @Override
@@ -130,6 +116,25 @@ public final class FontOracle {
                 throw new AssertionError("no effect glyph here");
               }
             });
+  }
+
+  public static void main(String[] args) throws Exception {
+    java.lang.reflect.Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+    theUnsafe.setAccessible(true);
+    Unsafe unsafe = (Unsafe) theUnsafe.get(null);
+    SharedConstants.tryDetectVersion();
+    Bootstrap.bootStrap();
+    Constructor<ClientLanguage> make =
+        ClientLanguage.class.getDeclaredConstructor(Map.class, boolean.class);
+    make.setAccessible(true);
+    Language.inject(
+        make.newInstance(
+            Map.of(
+                "demo.label.description", "Can hold mixed stacks of runes",
+                "demo.label.title", "Pouch Label"),
+            false));
+
+    Font font = font();
 
     for (int kind = 1; kind <= 5; kind++) {
       ClientTooltipComponent component = new LabelTooltip(new Label(kind));

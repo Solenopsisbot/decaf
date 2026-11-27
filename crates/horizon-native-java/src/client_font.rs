@@ -69,14 +69,22 @@ const WIDTH_FORMATTED_TEXT: &str = "(Lnet/minecraft/network/chat/FormattedText;)
 const WIDTH_CHAR_SEQUENCE: &str = "(Lnet/minecraft/util/FormattedCharSequence;)I";
 const SPLIT: &str = "(Lnet/minecraft/network/chat/FormattedText;I)Ljava/util/List;";
 
-/// `Mth.ceil(float)`: `(int) f`, plus one when `f` is above it (Java's saturating `f2i`).
-fn mth_ceil(value: f32) -> i32 {
-    let truncated = value as i32;
-    if value > truncated as f32 {
-        truncated.wrapping_add(1)
-    } else {
-        truncated
-    }
+/// 26.3 `Mth.ceil(float)`: `(int) Math.ceil((double) f)` (offsets 0-6). Java's `d2i` saturates
+/// (and answers 0 for NaN), as Rust's `as` does: `3e9f` and `+inf` are `Integer.MAX_VALUE`.
+pub(crate) fn mth_ceil(value: f32) -> i32 {
+    f64::from(value).ceil() as i32
+}
+
+/// The order a `Font.width` sums its glyphs in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidthOrder {
+    /// The text's own order: `width(String)` and `width(FormattedText)` run
+    /// `StringDecomposer.iterateFormatted` over it.
+    Logical,
+    /// A `FormattedCharSequence`'s, which `Language.getVisualOrder` made: `width(FormattedCharSequence)`
+    /// and `centeredText` of a component (`getVisualOrderText()`). For bidirectional text that
+    /// order is not the logical one, and a float sum can round differently.
+    Visual,
 }
 
 impl TextMetrics {
@@ -107,18 +115,18 @@ impl TextMetrics {
     }
 
     /// `Font.width` of plain text: `Mth.ceil` of `StringSplitter.stringWidth`, the advances summed
-    /// in a `float` (`MutableFloat.add`). `None` when a glyph is past the table, or when a partial
-    /// sum rounds: then the order the glyphs are summed in (a component's visual order, which
-    /// `Font.width(FormattedCharSequence)` sums, can differ from its logical one) could change
-    /// the answer, so no order-free answer exists.
-    pub(crate) fn plain_width(&self, text: &str) -> Option<i32> {
+    /// in a `float` (`MutableFloat.add`) in the text's order. `None` when a glyph is past the
+    /// table, and, for a [`WidthOrder::Visual`] sum, when a partial sum rounds: the glyphs are
+    /// then summed in an order the model doesn't know (bidirectional text reorders), which could
+    /// change the answer. A sum with no rounding is the same in every order.
+    pub(crate) fn plain_width(&self, text: &str, order: WidthOrder) -> Option<i32> {
         let mut total = 0.0f32;
         let mut wide = 0.0f64;
         for c in text.chars() {
             let advance = self.advance(c)?;
             total += advance;
             wide += f64::from(advance);
-            if f64::from(total) != wide {
+            if order == WidthOrder::Visual && f64::from(total) != wide {
                 return None;
             }
         }
@@ -192,17 +200,18 @@ impl TextMetrics {
         Some(lines)
     }
 
-    /// `Font.width` of `text`, exactly: the embedder's answer, else the glyph model's.
-    pub(crate) fn exact_width(&self, text: &ClientText) -> Option<i32> {
+    /// `Font.width` of `text` summed in `order`, exactly: the embedder's answer, else the glyph
+    /// model's.
+    pub fn exact_width(&self, text: &ClientText, order: WidthOrder) -> Option<i32> {
         if let Some(width) = self.answers.widths.get(text) {
             return Some(*width);
         }
-        self.plain_width(self.plain(text)?)
+        self.plain_width(self.plain(text)?, order)
     }
 
     /// `Font.split(text, width)`, exactly: the embedder's lines, else the glyph model's (each a
     /// plain literal).
-    pub(crate) fn exact_split(&self, text: &ClientText, width: i32) -> Option<Vec<ClientText>> {
+    pub fn exact_split(&self, text: &ClientText, width: i32) -> Option<Vec<ClientText>> {
         if let Some(lines) = self.answers.splits.get(&(text.clone(), width)) {
             return Some(lines.clone());
         }
@@ -216,8 +225,7 @@ impl StdHost {
     /// or a `FormattedCharSequence` (a split line), and `split(FormattedText, int)`. `None`
     /// refuses (counted): an argument that is no text the surface reads, or a text no source
     /// answers exactly ([`TextMetrics::exact_width`], [`TextMetrics::exact_split`]), whose
-    /// question is then recorded. Outside a screen frame `width` keeps the surface's lenient
-    /// answer (the table, then its fallback advance); a screen frame's font answers only exactly.
+    /// question is then recorded. Every frame's font answers only exactly.
     pub(super) fn font_call(
         &mut self,
         frame: &ClientSnapshot,
@@ -229,18 +237,19 @@ impl StdHost {
             // `StringSplitter.stringWidth(String)` answers 0 for null (offsets 0-5).
             ("width", WIDTH_STRING) if *arg == Value::Ref(None) => Some(Value::Int(0)),
             ("width", WIDTH_STRING) => {
-                let text = string_text(arg).or_else(|| self.lenient_text(frame, arg))?;
-                self.frame_width(frame, text).map(Value::Int)
+                let text = string_text(arg)?;
+                self.frame_width(frame, text, WidthOrder::Logical)
+                    .map(Value::Int)
             }
             ("width", WIDTH_FORMATTED_TEXT) => {
-                let text = self
-                    .component_text(arg)
-                    .or_else(|| self.lenient_text(frame, arg))?;
-                self.frame_width(frame, text).map(Value::Int)
+                let text = self.component_text(arg)?;
+                self.frame_width(frame, text, WidthOrder::Logical)
+                    .map(Value::Int)
             }
             ("width", WIDTH_CHAR_SEQUENCE) => {
                 let text = self.char_sequence_text(arg)?;
-                self.frame_width(frame, text).map(Value::Int)
+                self.frame_width(frame, text, WidthOrder::Visual)
+                    .map(Value::Int)
             }
             ("split", SPLIT) => {
                 let text = self.component_text(arg)?;
@@ -252,24 +261,17 @@ impl StdHost {
         }
     }
 
-    /// Outside a screen frame, `Font.width` reads its argument as the surface always has
-    /// (`text_arg`: any text a jar hands it, cut to the surface's bound), for the lenient width
-    /// such a frame answers; a screen frame's font reads only what it measures exactly.
-    fn lenient_text(&self, frame: &ClientSnapshot, value: &Value) -> Option<ClientText> {
-        if frame.screen_scope {
-            return None;
-        }
-        super::text_arg(value, &self.component_states)
-    }
-
-    /// `Font.width` of `text` in `frame`: exact, else (outside a screen frame) the lenient
-    /// table sum, else the question is recorded and `None`.
-    pub(super) fn frame_width(&mut self, frame: &ClientSnapshot, text: ClientText) -> Option<i32> {
-        if let Some(width) = frame.metrics.exact_width(&text) {
+    /// `Font.width` of `text` summed in `order` in `frame`: exact, else the question is recorded
+    /// and `None`. No frame guesses: a fallback advance, a missing translation read as its key,
+    /// a style or font ignored would each be an answer the game might not give.
+    pub(super) fn frame_width(
+        &mut self,
+        frame: &ClientSnapshot,
+        text: ClientText,
+        order: WidthOrder,
+    ) -> Option<i32> {
+        if let Some(width) = frame.metrics.exact_width(&text, order) {
             return Some(width);
-        }
-        if !frame.screen_scope {
-            return Some(frame.metrics.width(&frame.metrics.resolve(&text)));
         }
         self.ask_font(FontQuestion::Width(text));
         None
@@ -289,7 +291,10 @@ impl StdHost {
         None
     }
 
+    /// Record `question`, and that the refusal the caller is about to make is the font's
+    /// ([`ClientFrameOutput::font_refusals`](super::ClientFrameOutput::font_refusals)).
     fn ask_font(&mut self, question: FontQuestion) {
+        self.client.font_refusal_pending = true;
         let questions = &mut self.client.font_questions;
         if questions.len() < MAX_FONT_QUESTIONS && !questions.contains(&question) {
             questions.push(question);
@@ -346,7 +351,7 @@ impl StdHost {
 
 /// A `String` argument's text: the jar's string itself, never an object it might be, and never
 /// one past the surface's text bound (whose width would be of a cut text).
-fn string_text(value: &Value) -> Option<ClientText> {
+pub(super) fn string_text(value: &Value) -> Option<ClientText> {
     if crate::jar_object::is_object(value) || crate::host_component::is_component(value) {
         return None;
     }
@@ -369,17 +374,27 @@ fn within_bound(text: ClientText) -> Option<ClientText> {
 
 #[cfg(test)]
 mod tests {
+    //! Expected values are rows of `tests/fixtures/client_font/cases25.txt`: 26.3's own
+    //! `Font.split` / `Font.width` / `Mth.ceil` on Java 25.0.5 (`oracle/FontCasesOracle.java`),
+    //! over the same advance table (`fixture_client_font.rs` checks every row of that file
+    //! against the runtime too). Refusals are the model's own (no oracle row: a counted case).
     use super::*;
 
-    /// A table where `a`..`z` are 6 wide but `i` (2) and `l` (3), and a space is 4.
+    /// The oracle's advance table (`FontOracle.advance`), for chars 0..127.
     fn metrics() -> TextMetrics {
-        let mut advances = vec![0.0f32; 128];
-        for c in 'a'..='z' {
-            advances[c as usize] = 6.0;
-        }
-        advances['i' as usize] = 2.0;
-        advances['l' as usize] = 3.0;
-        advances[' ' as usize] = 4.0;
+        let advances = (0u8..128)
+            .map(|c| match c as char {
+                c if (c as u32) < 32 => 0.0,
+                ' ' => 4.0,
+                c if "i!.,:;'|".contains(c) => 2.0,
+                'l' => 3.0,
+                c if "tI[]".contains(c) => 4.0,
+                c if "fk<>{}()\"*".contains(c) => 5.0,
+                'q' => 5.5,
+                '@' | '~' => 7.0,
+                _ => 6.0,
+            })
+            .collect();
         TextMetrics {
             advances,
             ..TextMetrics::default()
@@ -391,36 +406,57 @@ mod tests {
     }
 
     #[test]
-    fn wraps_at_the_last_space_and_drops_it() {
-        // "ab cd" is 6+6+4+6+6 = 28; at 20 the `c` (sum 22) breaks at the space.
-        assert_eq!(split("ab cd", 20), ["ab", "cd"]);
-        assert_eq!(split("ab cd", 28), ["ab cd"]);
+    fn splits_as_26_3_does() {
+        for (text, width, java) in [
+            ("ab cd", 20, &["ab", "cd"][..]),
+            ("ab cd", 28, &["ab cd"]),
+            ("abcd", 13, &["ab", "cd"]),
+            ("a\nb", 100, &["a", "b"]),
+            ("a\n", 100, &["a", ""]),
+            ("a\n\n", 100, &["a", "", ""]),
+            ("", 100, &[]),
+            ("ab", 0, &["a", "b"]),
+            ("ab", -5, &["a", "b"]),
+            ("qqqqqqq qq", 40, &["qqqqqqq", "qq"]),
+            ("  lead", 10, &[" ", "le", "a", "d"]),
+            ("trailing   ", 30, &["trailin", "g   "]),
+            ("\n", 5, &["", ""]),
+            ("ab  cd", 12, &["ab", "", "cd"]),
+        ] {
+            assert_eq!(split(text, width), java, "{text:?} at {width}");
+        }
     }
 
     #[test]
-    fn a_word_wider_than_the_line_breaks_at_a_character() {
-        assert_eq!(split("abcd", 13), ["ab", "cd"]);
+    fn widths_round_up_as_26_3_does() {
+        let metrics = metrics();
+        for (text, java) in [("q", 6), ("qq", 11), ("qqq", 17), ("Iq6", 16), ("", 0)] {
+            for order in [WidthOrder::Logical, WidthOrder::Visual] {
+                assert_eq!(metrics.plain_width(text, order), Some(java), "{text:?}");
+            }
+        }
     }
 
     #[test]
-    fn newlines_force_breaks_and_a_trailing_one_leaves_an_empty_line() {
-        assert_eq!(split("a\nb", 100), ["a", "b"]);
-        assert_eq!(split("a\n", 100), ["a", ""]);
-        assert_eq!(split("a\n\n", 100), ["a", "", ""]);
-        assert_eq!(split("", 100), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_width_below_one_wraps_at_one_pixel() {
-        assert_eq!(split("ab", 0), ["a", "b"]);
-        assert_eq!(split("ab", -5), ["a", "b"]);
+    fn mth_ceil_saturates_as_26_3_does() {
+        for (value, java) in [
+            (38.5, 39),
+            (39.0, 39),
+            (3e9, i32::MAX),
+            (f32::INFINITY, i32::MAX),
+            (f32::NAN, 0),
+            (-0.5, 0),
+            (-3e9, i32::MIN),
+        ] {
+            assert_eq!(mth_ceil(value), java, "{value}");
+        }
     }
 
     #[test]
     fn an_unknown_glyph_or_a_styled_text_is_no_answer() {
         let metrics = metrics();
         assert_eq!(metrics.plain_split("a\u{3042}", 100), None);
-        assert_eq!(metrics.plain_width("\u{3042}"), None);
+        assert_eq!(metrics.plain_width("\u{3042}", WidthOrder::Logical), None);
         assert_eq!(metrics.plain(&ClientText::Literal("§lab".into())), None);
         assert_eq!(
             metrics.plain(&ClientText::Translatable("missing".into())),
@@ -429,14 +465,16 @@ mod tests {
         assert_eq!(metrics.plain(&ClientText::Json("{}".into())), None);
     }
 
+    /// A sum in the text's own order answers whatever rounds; one in a visual order the model
+    /// doesn't know answers only when no partial sum rounds.
     #[test]
-    fn widths_round_up_and_refuse_a_rounding_sum() {
+    fn only_a_visual_sum_refuses_rounding() {
         let mut metrics = metrics();
-        metrics.advances['a' as usize] = 2.5;
-        assert_eq!(metrics.plain_width("a"), Some(3));
-        assert_eq!(metrics.plain_width("aa"), Some(5));
         metrics.advances['b' as usize] = 0.1;
-        assert_eq!(metrics.plain_width("bbb"), None);
+        let logical = metrics.plain_width("bbb", WidthOrder::Logical);
+        // 0.1f + 0.1f + 0.1f is 0.3 and a little: `Mth.ceil` makes it 1.
+        assert_eq!(logical, Some(1));
+        assert_eq!(metrics.plain_width("bbb", WidthOrder::Visual), None);
     }
 
     #[test]
@@ -448,7 +486,7 @@ mod tests {
             .answers
             .splits
             .insert((text.clone(), 10), vec![ClientText::Literal("ab".into())]);
-        assert_eq!(metrics.exact_width(&text), Some(14));
+        assert_eq!(metrics.exact_width(&text, WidthOrder::Visual), Some(14));
         assert_eq!(
             metrics.exact_split(&text, 10),
             Some(vec![ClientText::Literal("ab".into())])

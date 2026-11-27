@@ -36,9 +36,12 @@ use std::collections::BTreeMap;
 
 use crate::runtime::item_parts::{ItemCallReport, ItemHook};
 use crate::runtime::jdk_call::Site;
+use std::sync::Arc;
+
+use crate::runtime::client_surface::{ClientSnapshot, DrawOp, FontAnswers, FontQuestion};
 use crate::runtime::{
     ExecutionBudget, Host, MethodRef, MixinInjectionPlan, MixinSide, MixinSkipReason, NativeError,
-    NativeJar, Runtime, StdHost, Value, block_use, client_surface::DrawOp, game_object,
+    NativeJar, Runtime, StdHost, Value, block_use, game_object,
 };
 
 const RANGE_SELECT_PROPERTY: &str =
@@ -85,6 +88,18 @@ pub struct ItemModelHolder {
 pub struct TooltipComponentSize {
     pub width: i32,
     pub height: i32,
+}
+
+/// A tooltip component measured and drawn exactly ([`NativeJar::tooltip_image_with_font`]): its
+/// size, the draws of `extractImage` in its own box at `(0, 0)`, and the font answers the run used
+/// (which a later `extractImage` frame needs again).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TooltipImage {
+    pub size: TooltipComponentSize,
+    pub draws: Vec<DrawOp>,
+    pub answers: FontAnswers,
+    /// How many runs it took: one, plus one per round of font questions answered.
+    pub runs: usize,
 }
 
 /// The client level an item model property sees: an object of its own whose every member counts
@@ -448,6 +463,69 @@ impl NativeJar {
             let height = ask(rt, "getHeight")?;
             Ok(Some(TooltipComponentSize { width, height }))
         })
+    }
+
+    /// Measure `component` and draw it once in its own box, each run in a frame `frame` makes
+    /// from the font answers so far, answering the font's questions between runs with `answer`
+    /// (the game's own `Font.width` / `Font.split`; `false` when it can't). `None` when a run
+    /// counted for any other reason, a question went unanswered, or `max_runs` ran out: the last
+    /// run's counts then stand.
+    ///
+    /// A run that only asked the font is a probe: its result is thrown away and its counted calls
+    /// rewound ([`StdHost::rewind_unknown_calls`]), so only the run whose image is used counts.
+    /// It is rewound only when everything it counted is the font's refusals
+    /// ([`crate::runtime::client_surface::ClientFrameOutput::font_refusals`]): a counted call's placeholder
+    /// can outlive the run (a class's `<clinit>`, first reached in that run, stores it in a static
+    /// the next run reads without counting), so a probe that counted anything else keeps its
+    /// counts and the image is refused. `getHeight`, `getWidth` and `extractImage` are run again
+    /// as vanilla runs them every frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tooltip_image_with_font(
+        &self,
+        host: &mut StdHost,
+        component: &Value,
+        frame: &dyn Fn(&FontAnswers) -> Arc<ClientSnapshot>,
+        max_runs: usize,
+        answer: &mut dyn FnMut(&[FontQuestion], &mut FontAnswers) -> bool,
+        budget: &ExecutionBudget,
+    ) -> Option<TooltipImage> {
+        let mut answers = FontAnswers::default();
+        for run in 1..=max_runs {
+            let mark = host.unknown_calls_mark();
+            host.begin_client_frame(frame(&answers), &[]);
+            let size = self.tooltip_component_size(host, component, budget).exact();
+            let draws = size.and_then(|size| {
+                self.draw_tooltip_component_image(
+                    host,
+                    component,
+                    0,
+                    0,
+                    size.width,
+                    size.height,
+                    budget,
+                )
+                .exact()
+            });
+            let out = host.end_client_frame();
+            if let (Some(size), Some(draws)) = (size, draws) {
+                return Some(TooltipImage {
+                    size,
+                    draws,
+                    answers,
+                    runs: run,
+                });
+            }
+            let only_the_font = host.unknown_calls_since(&mark) == out.font_refusals;
+            if run == max_runs
+                || out.font_questions.is_empty()
+                || !only_the_font
+                || !answer(&out.font_questions, &mut answers)
+            {
+                return None;
+            }
+            host.rewind_unknown_calls(mark);
+        }
+        None
     }
 
     /// A client tooltip component's `extractImage(font, x, y, width, height, graphics)` (`width`

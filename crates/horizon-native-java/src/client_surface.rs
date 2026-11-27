@@ -79,7 +79,7 @@ mod config;
 // `Font.width` / `Font.split`: the glyph model and the embedder's answers.
 #[path = "client_font.rs"]
 mod font;
-pub use font::{FontAnswers, FontQuestion};
+pub use font::{FontAnswers, FontQuestion, WidthOrder};
 
 /// `Minecraft.getInstance()`, and every client listener's `Minecraft`.
 pub const MINECRAFT: &str = "client/minecraft";
@@ -504,16 +504,13 @@ fn blit_sprite_overload(descriptor: &str) -> Option<SpriteTint> {
 }
 
 /// 26.3 `ARGB.white(float alpha)`: `as8BitChannel(alpha) << 24 | 0xFFFFFF`, where
-/// `as8BitChannel` is `Mth.floor(alpha * 255.0f)` (Java's saturating `f2i`, then one down when
-/// the float is below it). An alpha outside `[0, 1]` wraps in the shift as Java's `ishl` does.
+/// `as8BitChannel` is `Mth.floor(alpha * 255.0f)` and `Mth.floor(float)` is
+/// `(int) Math.floor((double) f)` (offsets 0-6): the float product widened, floored as a double,
+/// then Java's saturating `d2i` (Rust's `as`; NaN is 0). An alpha outside `[0, 1]` shifts its
+/// channel's low byte into the alpha as Java's `ishl` does: `-1e10f`, `-inf` and `-9e6f` floor to
+/// `Integer.MIN_VALUE`, whose shifted byte is 0, so their colour is `0x00FFFFFF`.
 fn argb_white(alpha: f32) -> u32 {
-    let scaled = alpha * 255.0;
-    let truncated = scaled as i32;
-    let channel = if scaled < truncated as f32 {
-        truncated.wrapping_sub(1)
-    } else {
-        truncated
-    };
+    let channel = f64::from(alpha * 255.0).floor() as i32;
     (channel.wrapping_shl(24) | 0x00ff_ffff) as u32
 }
 const RENDER_PIPELINES: &str = "net/minecraft/client/renderer/RenderPipelines";
@@ -665,82 +662,19 @@ pub struct ClientLevel {
 
 /// What `Font.width` and `Font.split` need: the game font's advances and the translations a
 /// translatable component resolves to, and the game's own answers for exact texts
-/// (`client_font.rs`). Built by the game and shared.
+/// (`client_font.rs`). Built by the game and shared. Every answer is exact or counted: a glyph past
+/// the table, a translation the table lacks, a style the model doesn't read, each counts and is
+/// asked ([`ClientFrameOutput::font_questions`]).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextMetrics {
     /// Advance of each char below `advances.len()`, in GUI pixels (`GlyphInfo.getAdvance(false)`
     /// in the default font).
     pub advances: Vec<f32>,
-    /// The advance of a char past the table, for the lenient `Font.width` outside a screen
-    /// frame. `Font.split`, and `Font.width` in a screen frame, never use it: a glyph past the
-    /// table counts there.
-    pub fallback: f32,
     /// Translation key → text, for translatable components.
     pub translations: BTreeMap<String, String>,
     /// The game's `Font.width` / `Font.split` of exact texts, which an embedder fills from its
     /// own font after a frame asked for them ([`ClientFrameOutput::font_questions`]).
     pub answers: FontAnswers,
-}
-
-impl TextMetrics {
-    /// `Font.width` of plain text: the advances' sum, rounded up; a `§`
-    /// formatting code and the char after it take no width.
-    pub fn width(&self, text: &str) -> i32 {
-        let mut total = 0.0f32;
-        let mut chars = text.chars();
-        while let Some(c) = chars.next() {
-            if c == '§' {
-                chars.next();
-                continue;
-            }
-            total += self
-                .advances
-                .get(c as usize)
-                .copied()
-                .unwrap_or(self.fallback);
-        }
-        total.ceil() as i32
-    }
-
-    /// The text a [`ClientText`] reads as: a translatable one's translation,
-    /// else its key (vanilla shows the key of a missing translation).
-    pub fn resolve<'a>(&'a self, text: &'a ClientText) -> std::borrow::Cow<'a, str> {
-        match text {
-            ClientText::Literal(text) => text.as_str().into(),
-            ClientText::Translatable(key) => self
-                .translations
-                .get(key)
-                .map_or(key.as_str(), String::as_str)
-                .into(),
-            ClientText::Json(json) => {
-                let mut out = String::new();
-                if let Ok(json) = serde_json::from_str(json) {
-                    self.flatten(&json, &mut out);
-                }
-                out.into()
-            }
-        }
-    }
-
-    /// A component JSON's text in order, translations resolved (their
-    /// arguments are not substituted for the width).
-    fn flatten(&self, json: &serde_json::Value, out: &mut String) {
-        use serde_json::Value as Json;
-        match json {
-            Json::String(text) => out.push_str(text),
-            Json::Object(object) => {
-                if let Some(Json::String(text)) = object.get("text") {
-                    out.push_str(text);
-                } else if let Some(Json::String(key)) = object.get("translate") {
-                    out.push_str(self.translations.get(key).map_or(key, String::as_str));
-                }
-                if let Some(Json::Array(extra)) = object.get("extra") {
-                    extra.iter().for_each(|part| self.flatten(part, out));
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 /// The client state one firing sees, snapshotted by the game.
@@ -938,6 +872,12 @@ pub struct ClientFrameOutput {
     /// counted), in the order first asked: what an embedder answers ([`FontAnswers`]) before it
     /// runs the call again.
     pub font_questions: Vec<FontQuestion>,
+    /// The counted calls those questions refused, by the key `StdHost::unknown_host_calls`
+    /// counts them under (`net/minecraft/client/gui/Font#width…`, a `GuiGraphicsExtractor`
+    /// draw that measured or wrapped). An embedder that runs a call again with its answers may
+    /// drop exactly these from a discarded run, and nothing else that run counted
+    /// ([`crate::StdHost::unknown_calls_since`]).
+    pub font_refusals: BTreeMap<String, usize>,
 }
 
 /// How a `KeyMapping` was constructed.
@@ -1002,6 +942,12 @@ pub(crate) struct ClientState {
     pub(crate) screen_backdrop: bool,
     /// The frame's unanswered font questions (`client_font.rs`).
     font_questions: Vec<FontQuestion>,
+    /// A font question was just asked, so the refusal the surface makes next is the font's:
+    /// set by `ask_font`, taken by `refuse_client_call`, and cleared as each client call starts,
+    /// so it never outlives the call that asked.
+    font_refusal_pending: bool,
+    /// The counted keys of the font's refusals this frame, with how many.
+    font_refusals: BTreeMap<String, usize>,
     /// `Font.split` line handles (`client/char-sequence/<n>`) → their text, for this frame: a
     /// line kept into a later frame is no longer read (its use counts).
     char_sequences: BTreeMap<String, ClientText>,
@@ -1565,6 +1511,9 @@ impl StdHost {
 
     fn refuse_client_call(&mut self, r: &MethodRef) -> NativeError {
         let key = format!("{}#{}{}", r.owner, r.name, r.descriptor);
+        if std::mem::take(&mut self.client.font_refusal_pending) {
+            *self.client.font_refusals.entry(key.clone()).or_default() += 1;
+        }
         *self.unknown_host_calls.entry(key).or_default() += 1;
         NativeError::UnknownHostCall(r.clone())
     }
@@ -1643,6 +1592,8 @@ impl StdHost {
         state.tasks.clear();
         state.sounds.clear();
         state.font_questions.clear();
+        state.font_refusal_pending = false;
+        state.font_refusals.clear();
         state.char_sequences.clear();
         let lines = state.frame.as_ref().and_then(|f| {
             f.tooltip_stack.as_ref()?;
@@ -1708,6 +1659,7 @@ impl StdHost {
             }),
             sounds: std::mem::take(&mut self.client.sounds),
             font_questions: std::mem::take(&mut self.client.font_questions),
+            font_refusals: std::mem::take(&mut self.client.font_refusals),
         }
     }
 
@@ -1981,6 +1933,8 @@ impl StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Option<Result<Value, NativeError>> {
+        // A font question belongs to the call that asked it (`ClientState::font_refusal_pending`).
+        self.client.font_refusal_pending = false;
         // Style and TextColor are value handles used by server-side mods too;
         // ChatFormatting constants are text markers produced by this surface.
         if let Some(text) = crate::game_object::text(receiver)
@@ -2855,7 +2809,7 @@ impl StdHost {
                 let v = ints(2, 3)?;
                 let shadow = int_arg(args, 5).is_none_or(|v| v != 0);
                 let x = if r.name == "centeredText" {
-                    v[0] - self.frame_width(frame, text.clone())? / 2
+                    v[0] - self.frame_width(frame, text.clone(), font::WidthOrder::Visual)? / 2
                 } else {
                     v[0]
                 };
@@ -3070,15 +3024,17 @@ impl StdHost {
                     Err(None) => return None,
                 };
                 let v = ints(2, 3)?;
-                // A text at the surface's bound may be a cut one, whose width is not the text's.
-                let at_bound = matches!(&text, ClientText::Literal(t) | ClientText::Translatable(t)
-                    if t.chars().count() >= MAX_TEXT);
-                if frame.screen_scope && at_bound {
-                    return None;
-                }
-                // `x - font.width(text) / 2`, Java's integer division; a screen frame's font
-                // answers only exactly (`client_font.rs`).
-                let width = self.frame_width(frame, text.clone())?;
+                // `x - font.width(text) / 2`, Java's integer division, the width exact
+                // (`client_font.rs`): `width(String)` sums the string in its own order; the
+                // component overload measures `getVisualOrderText()`.
+                let (measured, order) = if descriptor
+                    .starts_with("(Lnet/minecraft/client/gui/Font;Ljava/lang/String;")
+                {
+                    (font::string_text(arg)?, font::WidthOrder::Logical)
+                } else {
+                    (self.component_text(arg)?, font::WidthOrder::Visual)
+                };
+                let width = self.frame_width(frame, measured, order)?;
                 self.client.text(text, v[0] - width / 2, v[1], v[2] as u32, true)
             }
             _ => return None,
@@ -3572,7 +3528,6 @@ mod tests {
             gui_size: [320, 240],
             metrics: Arc::new(TextMetrics {
                 advances: vec![6.0; 128],
-                fallback: 6.0,
                 translations: BTreeMap::from([("hud.example.title".into(), "Title".into())]),
                 answers: Default::default(),
             }),
@@ -3636,17 +3591,23 @@ mod tests {
         assert_eq!(input_key_name(true, 4), "key.mouse.4");
     }
 
+    /// `ARGB.white(float)` against Java 25.0.5 on the 26.3 jar (the `white` rows of
+    /// `tests/fixtures/client_font/edge25.txt`): in range, the saturating `Mth.floor` far below it, a
+    /// channel past 255 shifting its low byte, and NaN.
     #[test]
-    fn font_width_skips_formatting_codes_and_rounds_up() {
-        let metrics = TextMetrics {
-            advances: vec![5.5; 128],
-            fallback: 8.0,
-            translations: BTreeMap::new(),
-            answers: Default::default(),
-        };
-        assert_eq!(metrics.width("ab"), 11);
-        assert_eq!(metrics.width("§cab"), 11);
-        assert_eq!(metrics.width("a\u{4e2d}"), 14);
+    fn argb_white_floors_as_a_double_and_saturates() {
+        for (alpha, java) in [
+            (0.5, 0x7fff_ffff),
+            (1.0, 0xffff_ffff),
+            (0.0, 0x00ff_ffff),
+            (-1e10, 0x00ff_ffff),
+            (f32::NEG_INFINITY, 0x00ff_ffff),
+            (-9e6, 0x00ff_ffff),
+            (2.0, 0xfeff_ffff),
+            (f32::NAN, 0x00ff_ffff),
+        ] {
+            assert_eq!(argb_white(alpha), java, "{alpha}");
+        }
     }
 
     /// The façade's draw calls land as ops in GUI pixels: the pose moves and

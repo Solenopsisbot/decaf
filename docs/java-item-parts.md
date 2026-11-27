@@ -157,9 +157,14 @@ methods, and nothing in it names a mod.
    `item` / `itemDecorations` of a runtime stack record `DrawOp::Stack`.
    *In Sunrise* the tooltip's font is the game's: Sunrise has no glyph table, so the mod asks
    each text the component measures or wraps of `ClientTextClientHost::text_width` /
-   `text_split` (vanilla's `Font.width` / `Font.split`) and runs it again with the answers,
-   rewinding the discarded probe's counts. An empty pouch's image draws. A pouch holding runes
-   still shows none: see "Upstream" (the stack count).
+   `text_split` (vanilla's `Font.width` / `Font.split`) and runs it again with the answers
+   (`NativeJar::tooltip_image_with_font`). A discarded run's counts are rewound only when all it
+   counted was the font's refusals (`ClientFrameOutput::font_refusals`); a run that counted
+   anything else keeps its counts and the image is refused, since a counted call's placeholder
+   can outlive the run (a `<clinit>` storing it in a static). A rune slot paints as 26.3's
+   `itemDecorations` does (offsets 16-40: `itemBar`, `itemCooldown`, then `itemCount`):
+   `DrawContext::item_stack` draws the model, bar and cooldown, and the count text follows at
+   `itemCount`'s place, `x + 19 - 2 - font.width(s)`, `y + 9`, white with a shadow.
    An embedder hands the game's prototype values of every item a jar component's stored contents
    name (`NativeJar::record_item_prototype`; the mod seeds each registered item id in the NBT),
    since the type's codec reads them while it decodes.
@@ -183,28 +188,16 @@ answered by the slot the click resolved.
 The upstream gap these bugs did show is the unread `fabric:load_conditions` key
 ([mod-plan.md](mod-plan.md), "Fork seams needed").
 
-### A tooltip image's stacks with a count
+### A tooltip image's stacks
 
-A pouch's slots draw `item(stack, x, y, seed)` and then `itemDecorations(font, stack, x, y)`:
-the model, then the count text, then the durability bar and the cooldown over them. At the
-`3d34bbe63d` SDK the only draw of a stack with its decorations is `DrawContext::item_stack` (SDK
-`host/draw.rs:106`): the model and "its slot decorations, except the count" (`item` and
-`item_model`, `:65` and `:32`, draw an icon alone). Drawing the count
-after it puts the text over the bar and the cooldown, where vanilla puts them over the text; and
-the mod can't tell when a bar or cooldown shows (no read of either; `host/players.rs:11` has only
-the cooldown group). So the mod draws a stack only when its count is 1, and a pouch of runes
-(counts 10, 64) counts `bridge: tooltip_image:undrawable_stack_count` and shows no image.
-
-The smallest addition: let `item_stack` take the count text as vanilla's
-`itemDecorations(font, stack, x, y, text)` does, drawn in vanilla's order (count, bar,
-cooldown), with `None` for the stack's own count:
-
-```rust
-fn item_stack_decorated(&mut self, stack: &ItemStack, at: [f32; 2], count: Option<&str>) -> bool;
-```
-
-or a `GuiDraw::Stack { stack, x, y, count: Option<String> }` op for `gui_paint`, which would also
-keep a tooltip's draws in one buffer.
+No addition is needed at the pin. 26.3's `itemDecorations(font, stack, x, y, text)` draws the
+bar, then the cooldown, then the count (offsets 16-40), and `DrawContext::item_stack` (SDK
+`host/draw.rs:106`, at the pin Sunrise's `native_item_stack`,
+`sunrise-client/src/game/native_hooks/base.rs:4394`) draws the model, the bar and the cooldown with
+an empty count into the batch the GUI ops share, so the count text drawn after it is vanilla's
+order. Sunrise main has since added `GuiCanvas::item_decorations(stack, at, count)` through
+`DrawContext::draw_gui` (`sunrise-mod-vocab/src/client/gui_canvas.rs:214`), the future path once
+the pin moves past it: one call for the whole of `itemDecorations`, count included.
 
 ### Settled: the clicked slot's rules from `item_stacked_on_other`
 

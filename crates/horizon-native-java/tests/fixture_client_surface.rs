@@ -92,7 +92,6 @@ fn frame(x: Option<f64>) -> Arc<ClientSnapshot> {
         gui_size: [320, 240],
         metrics: Arc::new(TextMetrics {
             advances: vec![6.0; 128],
-            fallback: 6.0,
             translations: BTreeMap::new(),
             answers: Default::default(),
         }),
@@ -564,7 +563,6 @@ fn frame_in_world(x: f64) -> Arc<ClientSnapshot> {
         gui_size: [320, 240],
         metrics: Arc::new(TextMetrics {
             advances: vec![6.0; 128],
-            fallback: 6.0,
             translations: BTreeMap::new(),
             answers: Default::default(),
         }),
@@ -877,12 +875,13 @@ public class TwoScreensMod {
     // init() override centering "Hopper" (6 chars * 6px = 36px -> (176 - 36) / 2 = 70),
     // subclass `private int leftPos = 12345` does NOT clobber AbstractContainerScreen.leftPos (72),
     // AbstractContainerMenu.addSlot (5 Container slots) + addStandardInventorySlots (36 PlayerInventory slots).
+    // The title is a component, as the embedder hands one (`mod/src/menu_screen.rs`
+    // `title_value`): the font measures a `FormattedText` only exactly.
+    let hopper_title =
+        horizon_native_java::screen_models::component_from_json(r#"{"text":"Hopper"}"#)
+            .expect("a literal component");
     let hopper_layout = jar
-        .open_client_screen(
-            &mut host,
-            hopper_type.clone(),
-            Value::Ref(Some("Hopper".into())),
-        )
+        .open_client_screen(&mut host, hopper_type.clone(), hopper_title.clone())
         .unwrap();
     assert_eq!(hopper_layout.layout.image_width, 176);
     assert_eq!(hopper_layout.layout.image_height, 133);
@@ -906,7 +905,7 @@ public class TwoScreensMod {
     assert_standard_player_slots(&hopper_layout.layout.slots[5..], 5, 51);
 
     let hopper_draws = jar
-        .draw_client_screen_bg(&mut host, hopper_type, Value::Ref(Some("Hopper".into())))
+        .draw_client_screen_bg(&mut host, hopper_type, hopper_title)
         .unwrap();
     assert_eq!(
         hopper_draws,

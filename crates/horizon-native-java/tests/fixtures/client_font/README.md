@@ -33,7 +33,17 @@ PY
 )"
 javac -nowarn -cp "$CP" -d out demo/*.java oracle/net/fabricmc/api/ModInitializer.java oracle/*.java
 unshare -rn java -cp "out:$CP" FontOracle | sed 's/^\[[^]]*\] \[[^]]*\]: \[STDOUT\]: //' > java25.txt
+unshare -rn java -cp "out:$CP" FontCasesOracle | sed 's/^\[[^]]*\] \[[^]]*\]: \[STDOUT\]: //' > cases25.txt
 ```
+
+`cases25.txt` is `oracle/FontCasesOracle.java`: the same `Font` (`FontOracle.font()`) asked for
+`Font.split` and `Font.width` of single literals, and 26.3's `Mth.ceil` of edge floats. Its rows
+are the expected values of `client_font.rs`'s unit tests, and `split_and_width_cases_match_java25`
+checks every split and width row against the runtime.
 
 The recorder prints every `blitSprite` it is handed, a zero-sized one too; 26.3 draws nothing for
 one in any `gui.scaling`, so the test leaves those lines out (`draws_something`).
+
+`edge25.txt` is `oracle/EdgeOracle.java` (26.3's own `ARGB.white(float)` and `Mth.ceil(float)`,
+no bootstrap needed): the rows `client_surface.rs`'s `argb_white_floors_as_a_double_and_saturates`
+and `client_font.rs`'s `mth_ceil_saturates_as_26_3_does` assert.

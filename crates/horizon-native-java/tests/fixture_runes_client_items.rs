@@ -38,7 +38,9 @@ use std::sync::Arc;
 use horizon_native_java::{
     ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemHook, ItemModelHolder, NativeJar, Nbt,
     NbtCompound, RuntimeComponentValue, StdHost, Value,
-    client_surface::{ClientSnapshot, ClientText, DrawOp, TextMetrics},
+    client_surface::{
+        ClientSnapshot, ClientText, DrawOp, FontAnswers, FontQuestion, TextMetrics, WidthOrder,
+    },
 };
 
 const JAVA25: &str = include_str!("fixtures/runes_client_items/java25.txt");
@@ -74,19 +76,53 @@ fn advances() -> Vec<f32> {
         .collect()
 }
 
-/// A tooltip's screen frame (the embedder's is one) whose font is the oracle's.
-fn tooltip_frame() -> Arc<ClientSnapshot> {
+/// The oracle's font: its advance table and translations.
+fn oracle_font() -> TextMetrics {
+    TextMetrics {
+        advances: advances(),
+        translations: TRANSLATIONS
+            .iter()
+            .map(|(key, text)| ((*key).to_owned(), (*text).to_owned()))
+            .collect(),
+        ..TextMetrics::default()
+    }
+}
+
+/// A tooltip's screen frame (the embedder's is one) whose font is `metrics`.
+fn screen_frame(metrics: TextMetrics) -> Arc<ClientSnapshot> {
     Arc::new(ClientSnapshot {
         screen_scope: true,
-        metrics: Arc::new(TextMetrics {
-            advances: advances(),
-            translations: TRANSLATIONS
-                .iter()
-                .map(|(key, text)| ((*key).to_owned(), (*text).to_owned()))
-                .collect(),
-            ..TextMetrics::default()
-        }),
+        metrics: Arc::new(metrics),
         ..ClientSnapshot::default()
+    })
+}
+
+/// A tooltip frame whose font is the oracle's glyph table.
+fn tooltip_frame() -> Arc<ClientSnapshot> {
+    screen_frame(oracle_font())
+}
+
+/// A tooltip frame with no glyph table, as Sunrise's is, holding only the game font's answers.
+fn answered_frame(answers: &FontAnswers) -> Arc<ClientSnapshot> {
+    screen_frame(TextMetrics {
+        answers: answers.clone(),
+        ..TextMetrics::default()
+    })
+}
+
+/// A fake embedder whose game font is the oracle's, asked text by text as Sunrise's
+/// `text_width` / `text_split` are (`mod/src/client_item_parts.rs`).
+fn game_font(questions: &[FontQuestion], answers: &mut FontAnswers) -> bool {
+    let font = oracle_font();
+    questions.iter().all(|question| match question {
+        FontQuestion::Width(text) => font
+            .exact_width(text, WidthOrder::Logical)
+            .map(|width| answers.widths.insert(text.clone(), width))
+            .is_some(),
+        FontQuestion::Split(text, width) => font
+            .exact_split(text, *width)
+            .map(|lines| answers.splits.insert((text.clone(), *width), lines))
+            .is_some(),
     })
 }
 
@@ -435,6 +471,48 @@ fn run(jar_path: &Path) {
         .filter(|line| draws_something(line))
         .collect();
     assert_eq!(printed, expected);
+
+    // The path Sunrise runs: no glyph table, each text asked of the game's font between runs
+    // (`NativeJar::tooltip_image_with_font`), the image drawn later with the answers. The same
+    // sizes and draws, and the probes' counts rewound.
+    let mut sunrise = Vec::new();
+    for (name, stack) in [("empty", &empty), ("partly", &partly), ("full", &full)] {
+        let component = make_component(&mut host, stack);
+        let image = jar
+            .tooltip_image_with_font(
+                &mut host,
+                &component,
+                &answered_frame,
+                8,
+                &mut game_font,
+                &budget,
+            )
+            .unwrap_or_else(|| panic!("{name}: no image: {:?}", host.unknown_host_calls()));
+        let size = image.size;
+        sunrise.push(format!(
+            "pouch {name} width={} height={}",
+            size.width, size.height
+        ));
+        sunrise.push(format!("  draw at 8,8 box {}x{}", size.width, size.height));
+        host.begin_client_frame(answered_frame(&image.answers), &[]);
+        let drawn = jar.draw_tooltip_component_image(
+            &mut host,
+            &component,
+            8,
+            8,
+            size.width,
+            size.height,
+            &budget,
+        );
+        host.end_client_frame();
+        let draws = drawn
+            .clone()
+            .exact()
+            .unwrap_or_else(|| panic!("{name}: {:?}", drawn.report));
+        sunrise.extend(draws.iter().map(print));
+        host.release(&component);
+    }
+    assert_eq!(sunrise, expected);
     assert_eq!(
         host.unknown_host_call_count(),
         0,
