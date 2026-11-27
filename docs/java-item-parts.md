@@ -195,9 +195,31 @@ bar, then the cooldown, then the count (offsets 16-40), and `DrawContext::item_s
 `host/draw.rs:106`, at the pin Sunrise's `native_item_stack`,
 `sunrise-client/src/game/native_hooks/base.rs:4394`) draws the model, the bar and the cooldown with
 an empty count into the batch the GUI ops share, so the count text drawn after it is vanilla's
-order. Sunrise main has since added `GuiCanvas::item_decorations(stack, at, count)` through
-`DrawContext::draw_gui` (`sunrise-mod-vocab/src/client/gui_canvas.rs:214`), the future path once
-the pin moves past it: one call for the whole of `itemDecorations`, count included.
+order.
+
+The pin also has `DrawContext::gui_draw_item_with(stack, at, text)` (SDK `host/draw.rs:291`,
+Sunrise's `native_gui_draw_item_with`): the model and the whole of `itemDecorations`, count
+included. The mod keeps `item_stack` and its own count text because `item_stack` answers whether
+it drew (false for an unknown item or an empty stack), which the mod counts and refuses on;
+`gui_draw_item_with` answers nothing. The cost: both end in Sunrise's `draw_item_decorations`,
+which draws another Sunrise mod's item decorator (`native_item_decorations`) last, after the
+count; with `item_stack` that decorator is drawn before the mod's count text, so where the two
+overlap the count lands on top of it. Vanilla has no such decorator, so this only differs with
+another Sunrise mod's slot decorations on a stack in a jar's tooltip image.
+
+Sunrise main has since added `GuiCanvas::item_decorations(stack, at, count)` through
+`DrawContext::draw_gui` (`sunrise-mod-vocab/src/client/gui_canvas.rs:214`), the path once
+the pin moves past it: one call for the whole of `itemDecorations`, count included, that can refuse.
+
+### Widths Sunrise answers
+
+A `FontQuestion::Width` carries no summing order (`client_font.rs` `WidthOrder`), and the mod
+answers each with `ClientTextClientHost::text_width`, the game's `Font.width(FormattedText)`,
+which sums in the text's own order. A width the runtime takes in visual order (a split line's,
+`centeredText` of a component's `getVisualOrderText()`) is answered by that logical sum too, so on
+Sunrise's path the glyph model's refusal of a rounding visual sum doesn't apply. The two sums
+differ only for bidirectional text whose advances round when added, which the default font's
+(whole and half pixels) never do.
 
 ### Settled: the clicked slot's rules from `item_stacked_on_other`
 

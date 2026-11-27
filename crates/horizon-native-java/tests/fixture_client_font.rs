@@ -584,6 +584,85 @@ fn a_probe_that_counted_more_than_the_font_keeps_its_counts() {
     });
 }
 
+/// A font question asked inside a `<clinit>` fails the initializer, and the class stays erroneous:
+/// a rerun would fail on it with nothing counted and nothing asked. So that run is no probe either:
+/// its count stands (and nothing is answered), rather than an image refused with nothing counted.
+/// Here `getWidth` hands its font to `Held` and reads `Kept.WIDTH`, whose initializer measures the
+/// title with it.
+#[test]
+fn a_font_question_inside_a_clinit_keeps_its_count() {
+    let source = include_str!("fixtures/client_font/demo/LabelTooltip.java")
+        .replace(
+            "    return Math.max(WRAP, font.width(TITLE));",
+            "    Held.font = font;\n    return Math.max(WRAP, Kept.WIDTH);",
+        )
+        .replace(
+            "  private final Label label;",
+            "  static final class Held {\n    static Font font;\n  }\n\n  static final class Kept {\n    static final int WIDTH = Held.font.width(TITLE);\n  }\n\n  private final Label label;",
+        );
+    assert!(source.contains("Kept.WIDTH") && source.contains("Held.font.width(TITLE)"));
+    on_big_stack(move || {
+        let mut demo = Demo::new("client_font_clinit_question", &source);
+        let budget = ExecutionBudget::UNBOUNDED;
+        let component = demo.component(4);
+        let jar = &demo.fixture.jar;
+        let mut asked = 0;
+        let image = jar.tooltip_image_with_font(
+            &mut demo.host,
+            &component,
+            &answered_frame,
+            16,
+            &mut |questions, answers| {
+                asked += 1;
+                game_font(questions, answers)
+            },
+            &budget,
+        );
+        assert_eq!(image, None);
+        assert_eq!(asked, 0, "a run that failed a class is no probe");
+        let counted: BTreeMap<String, usize> = demo.host.unknown_host_calls().into_iter().collect();
+        assert!(
+            counted
+                .keys()
+                .any(|key| key.starts_with("net/minecraft/client/gui/Font#width")),
+            "{counted:?}"
+        );
+    });
+}
+
+/// Outside a screen frame (a HUD layer's, a client event's), `Font.width` is as exact as in one:
+/// a glyph past the table counts and is asked, never measured by a fallback advance.
+#[test]
+fn a_hud_frames_width_of_an_unknown_glyph_counts_and_asks() {
+    let source = include_str!("fixtures/client_font/demo/LabelTooltip.java").replace(
+        "Component.translatable(\"demo.label.title\")",
+        "Component.literal(\"Pouch\\u00e9\")",
+    );
+    assert!(source.contains("Pouch\\u00e9"));
+    on_big_stack(move || {
+        let mut demo = Demo::new("client_font_hud_width", &source);
+        let budget = ExecutionBudget::UNBOUNDED;
+        let component = demo.component(4);
+        let jar = &demo.fixture.jar;
+        let hud = Arc::new(ClientSnapshot {
+            screen_scope: false,
+            gui_size: [320, 240],
+            metrics: Arc::new(metrics()),
+            ..ClientSnapshot::default()
+        });
+        demo.host.begin_client_frame(hud, &[]);
+        let size = jar.tooltip_component_size(&mut demo.host, &component, &budget);
+        let out = demo.host.end_client_frame();
+        assert!(!size.report.exact());
+        let title = ClientText::Literal("Pouch\u{e9}".into());
+        assert_eq!(out.font_questions, [FontQuestion::Width(title)]);
+        let key =
+            "net/minecraft/client/gui/Font#width(Lnet/minecraft/network/chat/FormattedText;)I";
+        assert_eq!(out.font_refusals, BTreeMap::from([(key.to_owned(), 1)]));
+        assert_eq!(size.report.unknown_host_calls.get(key), Some(&1));
+    });
+}
+
 /// Every row of `cases25.txt` (26.3's `Font.split` and `Font.width` of single inputs, on the
 /// oracle's table): the glyph model's answer is the oracle's.
 #[test]

@@ -2891,16 +2891,14 @@ impl StdHost {
             {
                 let stack = args.get(1)?;
                 let v = ints(2, 2)?;
+                // The count text is a `String` (`(Font, ItemStack, II, String)`): the jar's string
+                // itself, uncut (`font::string_text` refuses one past the surface's bound, whose
+                // drawn text would be a cut one), and `null` for the stack's own count.
                 let count = match args.get(4) {
-                    Some(arg) => match text_arg(arg, &self.component_states) {
-                        Some(t) => Some(Some(match t {
-                            ClientText::Literal(s) | ClientText::Translatable(s) => s,
-                            ClientText::Json(json) => serde_json::from_str(&json)
-                                .map(|json| crate::runtime::facade_text::plain(&json))
-                                .unwrap_or_default(),
-                        })),
-                        None if *arg == Value::Ref(None) => Some(None),
-                        None => return None,
+                    Some(Value::Ref(None)) => Some(None),
+                    Some(arg) => match font::string_text(arg)? {
+                        ClientText::Literal(text) => Some(Some(text)),
+                        _ => return None,
                     },
                     None => None,
                 };

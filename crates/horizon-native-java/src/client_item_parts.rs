@@ -477,7 +477,10 @@ impl NativeJar {
     /// ([`crate::client_surface::ClientFrameOutput::font_refusals`]): a counted call's placeholder
     /// can outlive the run (a class's `<clinit>`, first reached in that run, stores it in a static
     /// the next run reads without counting), so a probe that counted anything else keeps its
-    /// counts and the image is refused. `getHeight`, `getWidth` and `extractImage` are run again
+    /// counts and the image is refused. So does one that left a class erroneous: a font question
+    /// inside a `<clinit>` fails the initializer, the class stays erroneous for the session, and a
+    /// rerun would fail on it with nothing counted or asked. The class stays erroneous either way
+    /// (the runtime has no rerun of a failed `<clinit>`); the counts say why. `getHeight`, `getWidth` and `extractImage` are run again
     /// as vanilla runs them every frame.
     #[allow(clippy::too_many_arguments)]
     pub fn tooltip_image_with_font(
@@ -515,7 +518,10 @@ impl NativeJar {
                     runs: run,
                 });
             }
-            let only_the_font = host.unknown_calls_since(&mark) == out.font_refusals;
+            // A run that counted anything but the font's refusals, or that left a class
+            // erroneous (a refusal inside a `<clinit>`), is no probe: its effects outlive it.
+            let only_the_font = host.unknown_calls_since(&mark) == out.font_refusals
+                && !host.classes_failed_since(&mark);
             if run == max_runs
                 || out.font_questions.is_empty()
                 || !only_the_font

@@ -686,7 +686,10 @@ mod tests {
     use mod_api::__private::game::BackendRefOf;
     use mod_api::{Backend, BackendRef, Host, ItemStack, Text};
 
-    /// The oracle's advance table (`FontOracle.advance` in `fixtures/client_font`).
+    /// The oracle's advance table (`FontOracle.advance` in `fixtures/client_font`) for the space,
+    /// `i ! . , : ; ' |`, `l` and `t I [ ]`, and 6 for every other printable character: the
+    /// oracle's 5, 5.5 and 7 (`f k < > { } ( ) " *`, `q`, `@ ~`) are left out, since these tests'
+    /// texts use none of them and this font answers whole pixels.
     fn advance(c: char) -> Option<i32> {
         Some(match c {
             ' ' => 4,

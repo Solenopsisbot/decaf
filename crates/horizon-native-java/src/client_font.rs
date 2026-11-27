@@ -466,7 +466,9 @@ mod tests {
     }
 
     /// A sum in the text's own order answers whatever rounds; one in a visual order the model
-    /// doesn't know answers only when no partial sum rounds.
+    /// doesn't know answers only when no partial sum rounds. No oracle row: the 0.1 advance is
+    /// this test's own, and the expected 1 is `Mth.ceil` (rows in `cases25.txt`) of Java's
+    /// `0.1f + 0.1f + 0.1f`, which is `0.3f` and a little.
     #[test]
     fn only_a_visual_sum_refuses_rounding() {
         let mut metrics = metrics();

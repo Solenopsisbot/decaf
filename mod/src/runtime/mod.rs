@@ -4029,9 +4029,13 @@ const MAX_PERSISTENT_INITIALIZED_CLASSES: usize = 1 << 20;
 const MAX_PERSISTENT_IO_ENTRIES: usize = 4096;
 const MAX_PERSISTENT_IO_BYTES: usize = 16 * 1024 * 1024;
 
-/// A copy of a host's counted-call record ([`StdHost::unknown_calls_mark`]).
+/// A copy of a host's counted-call record, and of the classes it holds as erroneous
+/// ([`StdHost::unknown_calls_mark`]).
 #[derive(Clone, Debug)]
-pub struct UnknownCallsMark(BTreeMap<String, usize>);
+pub struct UnknownCallsMark {
+    counted: BTreeMap<String, usize>,
+    erroneous: std::collections::BTreeSet<String>,
+}
 
 /// Deterministic, game-independent mappings for the small standard-library
 /// surface commonly reached during mod bootstrap.
@@ -4908,12 +4912,36 @@ impl StdHost {
     /// `getHeight` / `extractImage`, which vanilla runs every frame), and what the probe counted
     /// must be only what the answers remove ([`Self::unknown_calls_since`]).
     pub fn unknown_calls_mark(&self) -> UnknownCallsMark {
-        UnknownCallsMark(self.unknown_host_calls.clone())
+        UnknownCallsMark {
+            counted: self.unknown_host_calls.clone(),
+            erroneous: self.erroneous_class_records(),
+        }
     }
 
     /// Put the counted-call record back to `mark` ([`Self::unknown_calls_mark`]).
     pub fn rewind_unknown_calls(&mut self, mark: UnknownCallsMark) {
-        self.unknown_host_calls = mark.0;
+        self.unknown_host_calls = mark.counted;
+    }
+
+    /// The persistent runtime's erroneous-class records (`class_init.rs`): a class whose
+    /// `<clinit>` failed, which every later use refuses (`NoClassDefFoundError`, or the runtime's
+    /// "failed to initialize earlier").
+    fn erroneous_class_records(&self) -> std::collections::BTreeSet<String> {
+        self.persistent_initialized_classes
+            .iter()
+            .filter(|entry| class_init::is_erroneous_record(entry))
+            .cloned()
+            .collect()
+    }
+
+    /// Whether a class became erroneous since `mark`. A run that did is no probe to throw away:
+    /// the failure outlives it (a font refusal inside a `<clinit>` leaves the class erroneous, and
+    /// the next run's use of it fails with nothing counted and nothing asked), so its counts
+    /// must stand.
+    pub fn classes_failed_since(&self, mark: &UnknownCallsMark) -> bool {
+        self.erroneous_class_records()
+            .iter()
+            .any(|entry| !mark.erroneous.contains(entry))
     }
 
     /// What was counted since `mark`, by key: the record a rewind to `mark` would drop. An
@@ -4925,7 +4953,7 @@ impl StdHost {
         self.unknown_host_calls
             .iter()
             .filter_map(|(key, &count)| {
-                let before = mark.0.get(key).copied().unwrap_or(0);
+                let before = mark.counted.get(key).copied().unwrap_or(0);
                 (count > before).then(|| (key.clone(), count - before))
             })
             .collect()
