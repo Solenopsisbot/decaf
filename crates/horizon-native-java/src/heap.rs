@@ -219,6 +219,12 @@ impl StdHost {
         self.cached_collections.len()
     }
 
+    /// How many sub-lists the host keeps a class for (`List.subList`'s `getClass`): each as long
+    /// as its list, so this follows the live sub-lists, not how many a jar made.
+    pub fn sub_list_class_count(&self) -> usize {
+        self.sub_list_class_names.len()
+    }
+
     /// How many `Map.Entry` objects the host keeps (`host_map_entry.rs`): each as long as
     /// something reaches it, so this follows the live entries, not how many a jar walked.
     pub fn map_entry_count(&self) -> usize {
@@ -689,6 +695,10 @@ impl StdHost {
         self.view_kinds.retain(|key, _| keep(key));
         self.sub_lists.retain(|key, _| keep(key));
         self.detached_sub_lists.retain(|key| keep(key));
+        // The class a sub-list reports (`getClass`), keyed by the list's own collection: it goes
+        // with the list. Unpruned, every `subList` a draw made stayed here for good (#609 round 5:
+        // a pouch tooltip's `subList` per make).
+        self.sub_list_class_names.retain(|key, _| keep(key));
         self.iterator_sources.retain(|key, _| keep(key));
         self.iterator_last.retain(|key, _| keep(key));
         self.list_iterators.retain(|key, _| keep(key));

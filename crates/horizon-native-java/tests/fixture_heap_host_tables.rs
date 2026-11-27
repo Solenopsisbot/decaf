@@ -5,8 +5,9 @@
 //! collector, so `System.getProperties()` lost what a jar put into it after
 //! a collection, and every fresh map's views stayed cached forever.
 //!
-//! `fixtures/heap_host_tables/demo/Rc226d.java` runs unchanged on both sides
-//! (its `main` on Java 25 is `java25.txt`); `Roots.java` needs Fabric's
+//! `fixtures/heap_host_tables/demo/Rc226d.java` and `SubListTick.java` run
+//! unchanged on both sides (their `main`s on Java 25 are `java25.txt`);
+//! `Roots.java` needs Fabric's
 //! loader, so its answer is the one before any collection, which a
 //! collection must not change.
 
@@ -51,6 +52,10 @@ fn fixture() -> javac_fixture::Fixture {
         (
             "demo/Rc226d.java".to_owned(),
             include_str!("fixtures/heap_host_tables/demo/Rc226d.java").to_owned(),
+        ),
+        (
+            "demo/SubListTick.java".to_owned(),
+            include_str!("fixtures/heap_host_tables/demo/SubListTick.java").to_owned(),
         ),
         (
             "demo/Roots.java".to_owned(),
@@ -152,5 +157,31 @@ fn a_fresh_maps_views_go_with_the_map() {
         most = most.max(host.cached_collection_count());
     }
     assert!(most < 10_000, "{most} cached collections");
+    assert!(host.unknown_host_calls().is_empty());
+}
+
+/// A fresh sub-list per call keeps no class row once the list is collected: the host's
+/// `getClass` answer for a sub-list (`sub_list_class_names`) follows the live lists, not how
+/// many were made. Unpruned, a pouch tooltip's per-frame `subList` left one row a draw for good
+/// (#609 round 5, about 116 bytes a draw). Every call answers Java 25's classes.
+#[test]
+fn a_fresh_sub_lists_class_goes_with_the_list() {
+    let fixture = fixture();
+    let mut host = fixture.jar.seed_host(StdHost::new());
+    let oracle = expected("subListTick");
+    let mark = host.call_log_mark();
+    let collections = host.collection_count();
+    let mut most = 0;
+    for call_number in 0..20_000 {
+        assert_eq!(
+            call(&fixture, &mut host, "demo/SubListTick", "tick"),
+            oracle,
+            "call {call_number}"
+        );
+        host.rewind_call_log(mark);
+        most = most.max(host.sub_list_class_count());
+    }
+    assert!(host.collection_count() > collections + 2, "collections ran");
+    assert!(most < 5_000, "{most} sub-list classes kept");
     assert!(host.unknown_host_calls().is_empty());
 }

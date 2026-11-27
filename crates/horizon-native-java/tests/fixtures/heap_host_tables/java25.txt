@@ -1,3 +1,4 @@
 setup=ok
 check=v|v|7seven|00|true;00,00,00,00,00,00,00,00,00,00;00000000-0000-0001-0000-000000000002,00000000-0000-0003-0000-000000000004,fr_CA;true[a]
 mapTick=3 plain=3
+subListTick=java.util.ArrayList$SubList|java.util.AbstractList$SubList|2,5
