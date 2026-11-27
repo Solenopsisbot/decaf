@@ -10,7 +10,10 @@
 //!
 //! This test draws a pouch's fullness property, its item bar and its tooltip image (made and
 //! drawn) as the client bridge does (`mod/src/client_item_parts.rs`, `mod/src/client.rs`): each
-//! in a transient scope over a stack built fresh from the game's form. It checks two things:
+//! in a transient scope over a stack built fresh from the game's form. (The tooltip text and the
+//! creative tab build ran outside a scope until #609 round 6 bug G, so each hovered frame and each
+//! tab build rooted its rows for good; `mod/src/client_dispatch_tests.rs` pins those bridges.)
+//! It checks two things:
 //! - **Every host and jar table.** Each top-level field of `StdHost` and `NativeJar` is measured
 //!   by its `Debug` text (both derive it, so no hand-kept list can miss a table). This is checked
 //!   right after a collection, so garbage waiting for the next one doesn't count. No field may
@@ -21,7 +24,8 @@
 //! Every draw's answer must equal the first draw's, and nothing may count.
 //!
 //! `RUNES_JAR` names the jar; the test is skipped without it (CI has no corpus). The ignored
-//! `pouch_draw_rss_probe` reports process RSS over 10,000 frames in a release build.
+//! `pouch_draw_rss_probe` reports process RSS over 10,000 frames in a release build, and each
+//! collection's time, live set and the draws between collections.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
@@ -632,6 +636,7 @@ fn rss_probe(jar_path: &Path) {
     let mut rig = Rig::new(jar_path);
     let mut phases = phases(&mut rig);
     let Rig { jar, host, .. } = &mut rig;
+    let phases_per_frame = phases.len();
     let mut frame = |host: &mut StdHost| {
         for (_, draw) in phases.iter_mut() {
             draw(jar, host);
@@ -642,6 +647,23 @@ fn rss_probe(jar_path: &Path) {
     }
     let (rss0, live0) = (rss_kib().unwrap_or(0), live_bytes());
     let start = std::time::Instant::now();
+    // Each collection's time and live set, and the draws since the one before.
+    let mut collections: Vec<(f64, usize, usize)> = Vec::new();
+    let (mut seen, mut since) = (host.collection_count(), 0usize);
+    let mut frame = |host: &mut StdHost| {
+        frame(host);
+        since += phases_per_frame;
+        if host.collection_count() != seen {
+            seen = host.collection_count();
+            let stats = host.last_collection().expect("a collection ran");
+            collections.push((
+                stats.elapsed.as_secs_f64() * 1e3,
+                stats.entries_after,
+                since,
+            ));
+            since = 0;
+        }
+    };
     // The slowest frames of each block show whether collections slow down with uptime.
     eprintln!("frames  RSS MiB  live MiB  collections  frame p99 ms  max ms");
     for step in 1..=10 {
@@ -663,7 +685,30 @@ fn rss_probe(jar_path: &Path) {
             times[999]
         );
     }
-    let draws = 10_000.0 * 6.0;
+    drop(frame);
+    let mut times: Vec<f64> = collections.iter().map(|(ms, _, _)| *ms).collect();
+    times.sort_by(f64::total_cmp);
+    let mut gaps: Vec<usize> = collections.iter().map(|(_, _, since)| *since).collect();
+    gaps.sort_unstable();
+    if !times.is_empty() {
+        let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+        eprintln!(
+            "{} collections: p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms; draws between p50 {}, max {}; \
+             live entries max {}",
+            times.len(),
+            at(0.5),
+            at(0.99),
+            times[times.len() - 1],
+            gaps[gaps.len() / 2],
+            gaps[gaps.len() - 1],
+            collections
+                .iter()
+                .map(|(_, live, _)| *live)
+                .max()
+                .unwrap_or(0)
+        );
+    }
+    let draws = 10_000.0 * phases_per_frame as f64;
     eprintln!(
         "10,000 frames ({draws} draws) in {:?}: RSS {:+.1} bytes a draw, live {:+.1} bytes a draw",
         start.elapsed(),

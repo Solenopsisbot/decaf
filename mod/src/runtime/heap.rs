@@ -92,6 +92,8 @@ pub struct JavaHeap {
     live: usize,
     /// Collections this host's heap has had ([`StdHost::collection_count`]).
     collections: usize,
+    /// What the last collection walked and kept ([`StdHost::last_collection`]).
+    last: Option<CollectionStats>,
     /// Texts the storing caller holds outside the host (the game-hook tier's
     /// fields on game objects), roots of this store's collection only.
     roots: Vec<String>,
@@ -121,6 +123,22 @@ impl JavaHeap {
         self.fields
             .get(&format!("{object}|{owner}#{name_descriptor}"))
     }
+}
+
+/// What one collection walked and kept ([`StdHost::last_collection`]): a diagnostic for
+/// embedders and probes. Nothing reads it to decide anything.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CollectionStats {
+    /// Entries ([`StdHost::heap_entry_counts`] summed) when the collection started.
+    pub entries_before: usize,
+    /// Entries it kept.
+    pub entries_after: usize,
+    /// Root texts the trace started from.
+    pub roots: usize,
+    /// Collectable markers it indexed (every object it could free).
+    pub markers: usize,
+    /// Wall time the collection took.
+    pub elapsed: std::time::Duration,
 }
 
 /// An open transient scope of recipe-model rows ([`StdHost::begin_transient_rows`]); close it with
@@ -301,10 +319,22 @@ impl StdHost {
 
     pub(crate) fn take_resident_heap(&mut self) -> JavaHeap {
         let (live, collections) = (self.heap.live, self.heap.collections);
+        let last = self.heap.last.take();
         let heap = std::mem::take(&mut self.heap);
         self.heap.live = live;
         self.heap.collections = collections;
+        self.heap.last = last;
         heap
+    }
+
+    /// What the last collection walked and kept, if one ran.
+    pub fn last_collection(&self) -> Option<&CollectionStats> {
+        self.heap.last.as_ref()
+    }
+
+    /// Each table the collection trigger counts ([`heap_entries`]), by name, as it stands now.
+    pub fn heap_entry_counts(&self) -> Vec<(&'static str, usize)> {
+        heap_entry_counts(&self.heap, self).to_vec()
     }
 
     /// How many collections this host's resident heap has had: what a test checks to know the
@@ -320,6 +350,7 @@ impl StdHost {
     pub(crate) fn store_resident_heap(&mut self, mut heap: JavaHeap) -> Result<(), NativeError> {
         heap.live = self.heap.live;
         heap.collections = self.heap.collections;
+        heap.last = self.heap.last.take();
         let roots = std::mem::take(&mut heap.roots);
         let entries = heap_entries(&heap, self);
         // Collect once the heap doubled past what the last collection kept
@@ -332,9 +363,17 @@ impl StdHost {
             && (entries > heap.live.saturating_mul(2).saturating_add(COLLECT_SLACK)
                 || over_count_guard(&heap))
         {
-            collect(&mut heap, self, &roots);
+            let started = std::time::Instant::now();
+            let (root_count, markers) = collect(&mut heap, self, &roots);
             heap.collections += 1;
             heap.live = heap_entries(&heap, self);
+            heap.last = Some(CollectionStats {
+                entries_before: entries,
+                entries_after: heap.live,
+                roots: root_count,
+                markers,
+                elapsed: started.elapsed(),
+            });
             let bytes = heap_bytes(&heap, self);
             self.heap = heap;
             if bytes > MAX_RESIDENT_BYTES {
@@ -820,26 +859,37 @@ fn kotlin_lazy_field_handle(key: &str) -> Option<&str> {
     key.strip_prefix(KOTLIN_LAZY_FIELD_PREFIX)
 }
 
+/// The entries the collection trigger counts: run on every store, so it allocates nothing.
 fn heap_entries(heap: &JavaHeap, host: &StdHost) -> usize {
-    heap.fields.len()
-        + heap.arrays.len()
-        + heap.string_builders.len()
-        + heap.enum_constants.len()
-        + host.mutable_collections.len()
-        + host.repeated_collections.len()
-        + host.set_from_map_views.len()
-        + host.random_sources.len()
-        + host.iterators.len()
-        + host.component_states.len()
-        + host.ranged_attributes.len()
-        + host.voxel_shapes.len()
-        + host.block_states.len()
-        + host.entity_registration.entry_count()
-        + host.tool_material.entry_count()
-        + host.vec2.entry_count()
-        + host.guava_tables.entry_count()
-        + host.recipes.entry_count()
-        + host.block_use.entry_count()
+    heap_entry_counts(heap, host).iter().map(|(_, n)| n).sum()
+}
+
+/// The tables [`heap_entries`] counts, by name.
+fn heap_entry_counts(heap: &JavaHeap, host: &StdHost) -> [(&'static str, usize); 19] {
+    [
+        ("fields", heap.fields.len()),
+        ("arrays", heap.arrays.len()),
+        ("string_builders", heap.string_builders.len()),
+        ("enum_constants", heap.enum_constants.len()),
+        ("mutable_collections", host.mutable_collections.len()),
+        ("repeated_collections", host.repeated_collections.len()),
+        ("set_from_map_views", host.set_from_map_views.len()),
+        ("random_sources", host.random_sources.len()),
+        ("iterators", host.iterators.len()),
+        ("component_states", host.component_states.len()),
+        ("ranged_attributes", host.ranged_attributes.len()),
+        ("voxel_shapes", host.voxel_shapes.len()),
+        ("block_states", host.block_states.len()),
+        (
+            "entity_registration",
+            host.entity_registration.entry_count(),
+        ),
+        ("tool_material", host.tool_material.entry_count()),
+        ("vec2", host.vec2.entry_count()),
+        ("guava_tables", host.guava_tables.entry_count()),
+        ("recipes", host.recipes.entry_count()),
+        ("block_use", host.block_use.entry_count()),
+    ]
 }
 
 fn over_count_bound(heap: &JavaHeap) -> bool {
@@ -1853,7 +1903,10 @@ impl DeadSet {
 /// caller's `extra` texts, and the contents of every object that is not
 /// collectable. Edges: an object's instance fields, array elements,
 /// collection elements and iterator snapshot.
-pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String]) {
+///
+/// Answers how many root texts the trace started from and how many collectable markers it
+/// indexed ([`CollectionStats`]).
+pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String]) -> (usize, usize) {
     let render_live = if host.render_objects.is_empty() {
         BTreeSet::new()
     } else {
@@ -1862,7 +1915,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
         render_roots.extend(extra.iter().map(String::as_str));
         crate::runtime::render_math::reachable_keys(&host.render_objects, render_roots)
     };
-    let (dead, reached_kotlin_lazy, limit, live, live_menu) = {
+    let (dead, reached_kotlin_lazy, limit, live, live_menu, root_count, marker_count) = {
         let collectable = Collectable::new(heap, host);
         if collectable.markers.is_empty() {
             drop(collectable);
@@ -1872,8 +1925,10 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
             if host.retained_shape_probes {
                 host.retained_shape_probes = has_live_shape_probe(heap, host, extra);
             }
-            return;
+            return (0, 0);
         }
+        let marker_count = collectable.markers.len();
+        let root_count;
         let mut reached = vec![false; collectable.markers.len()];
         let mut pending: Vec<u32> = Vec::with_capacity(collectable.markers.len() / 2);
         let mut reached_kotlin_lazy: FxHashSet<String> = FxHashSet::default();
@@ -1922,6 +1977,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
                     }
                 }
             }
+            root_count = roots.len();
             for text in roots {
                 if has_lazy {
                     mark_kotlin_lazy_states(
@@ -2111,7 +2167,15 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
                 live_menu.push(number);
             }
         }
-        (dead, reached_kotlin_lazy, limit, live, live_menu)
+        (
+            dead,
+            reached_kotlin_lazy,
+            limit,
+            live,
+            live_menu,
+            root_count,
+            marker_count,
+        )
     };
     let keep = |marker: &str| !dead.contains(marker);
     host.freed_objects.rebuild(limit, live);
@@ -2192,6 +2256,7 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
     if host.retained_shape_probes {
         host.retained_shape_probes = has_live_shape_probe(heap, host, extra);
     }
+    (root_count, marker_count)
 }
 
 impl<H: Host> Runtime<'_, H> {
@@ -2260,6 +2325,7 @@ impl<H: Host> Runtime<'_, H> {
             next_array: self.next_array,
             live: 0,
             collections: 0,
+            last: None,
             roots,
             heap_flags: self.heap_flags,
         };
