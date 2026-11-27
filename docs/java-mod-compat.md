@@ -1038,7 +1038,9 @@ it returns and back out before the next, so a listener walks the objects its ent
 captured in its lambda, and the next callback sees what it changed. When a store finds the heap doubled since the
 last collection, it drops what nothing reaches from the jar's statics, the host's own tables (call log,
 registrations, payload handlers, holders) or a game object's Mixin fields; a collectable marker is found wherever
-another value's text embeds it. Past 65,536 fields, 8,192 arrays or 32 MiB after collection the store is refused
+another value's text embeds it. The runtime's stack, template and component-patch rows are roots, except those made
+inside an embedder's transient scope (`StdHost::begin_transient_rows`: a client draw, a server item hook), which live
+only while something reaches them once the scope closes (#609 round 4). Past 65,536 fields, 8,192 arrays or 32 MiB after collection the store is refused
 and the callback that grew it fails. Fields a Mixin adds to a game object stay per object in `GameHookState`.
 A failed callback keeps what it wrote, as a JVM would. Class initialization follows JVMS §5.5 (`src/class_init.rs`):
 the superclass and the superinterfaces that declare a default method first, then `<clinit>`; a same-thread re-entry

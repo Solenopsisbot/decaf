@@ -31,13 +31,16 @@
 //!   contents' own stacks, and the labels are centred with `Font.width`.
 
 use std::collections::BTreeMap;
+#[path = "support/javac_fixture.rs"]
+mod javac_fixture;
+
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
 use horizon_native_java::{
-    ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemHook, ItemModelHolder, NativeJar, Nbt,
-    NbtCompound, RuntimeComponentValue, StdHost, Value,
+    ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemHook, ItemModelHolder, ItemStackRequest,
+    NativeJar, Nbt, NbtCompound, RuntimeComponentValue, StdHost, Value,
     client_surface::{
         ClientSnapshot, ClientText, DrawOp, FontAnswers, FontQuestion, TextMetrics, WidthOrder,
     },
@@ -518,5 +521,407 @@ fn run(jar_path: &Path) {
         0,
         "{:?}",
         host.unknown_host_calls()
+    );
+    // A pouch on screen, drawn as the client bridge draws it every frame (#609 round 4 bug 1):
+    // its fullness on a stack built fresh in a transient scope. Every answer is the bytecode's
+    // `10/256`, nothing counts, and the heap and the stack rows don't grow with the draws.
+    let counted = host.unknown_host_call_count();
+    let fields = host.resident_heap().instance_fields();
+    let request = ItemStackRequest {
+        item_override: Some(pouch_item.clone()),
+        item_id: POUCH.to_owned(),
+        count: 1,
+        patch: vec![(
+            CONTENTS.to_owned(),
+            Some(RuntimeComponentValue::Nbt(contents(&[(RUNE, 10)]))),
+        )],
+        defaults: defaults.clone(),
+        named_prototypes: vec![(RUNE.to_owned(), defaults.clone())],
+        ..ItemStackRequest::default()
+    };
+    let start = std::time::Instant::now();
+    for draw in 0..2_000 {
+        let value = host.with_transient_rows(|host| {
+            let stack = jar
+                .build_item_stack(host, request.clone())
+                .expect("pouch stack");
+            jar.range_select_property_value(
+                host,
+                &property,
+                &stack,
+                ItemModelHolder::default(),
+                0,
+                &budget,
+            )
+        });
+        assert_eq!(
+            value.clone().exact(),
+            Some(0.0390625),
+            "draw {draw}: {:?}",
+            value.report
+        );
+    }
+    eprintln!(
+        "2000 pouch fullness draws: {:?}; rows {:?}; fields {fields} -> {}",
+        start.elapsed(),
+        host.recipe_row_counts(),
+        host.resident_heap().instance_fields()
+    );
+    assert_eq!(
+        host.unknown_host_call_count(),
+        counted,
+        "{:?}",
+        host.unknown_host_calls()
+    );
+    assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+    assert!(
+        host.recipe_row_counts().0 <= 2048,
+        "{:?}",
+        host.recipe_row_counts()
+    );
+
+    // Its tooltip, made as the bridge makes it on every frame it shows: one transient scope over
+    // a fresh stack, `getTooltipImage`, `create` and every font pass of `tooltip_image_with_font`
+    // (the probes it rewinds included). Each make answers the first's size and draws, nothing
+    // counts, and the rows the passes made don't outlive them.
+    // A partly filled pouch draws counts only; an empty one wraps its description with
+    // `Font.split`, which the passes ask the game's font about (a probe rewound each make).
+    let empty_request = ItemStackRequest {
+        patch: Vec::new(),
+        named_prototypes: Vec::new(),
+        ..request.clone()
+    };
+    let mut first: [Option<(i32, i32, Vec<String>)>; 2] = [None, None];
+    let mut probed = false;
+    for make in 0..200 {
+        let request = if make % 2 == 0 {
+            &request
+        } else {
+            &empty_request
+        };
+        let (component, image) = host.with_transient_rows(|host| {
+            let stack = jar
+                .build_item_stack(host, request.clone())
+                .expect("pouch stack");
+            let component = make_component(host, &stack);
+            let image = jar.tooltip_image_with_font(
+                host,
+                &component,
+                &answered_frame,
+                8,
+                &mut game_font,
+                &budget,
+            );
+            (component, image)
+        });
+        let image = image
+            .unwrap_or_else(|| panic!("make {make}: no image: {:?}", host.unknown_host_calls()));
+        probed |= image.runs > 1;
+        let made = (
+            image.size.width,
+            image.size.height,
+            image.draws.iter().map(print).collect::<Vec<_>>(),
+        );
+        match &first[make % 2] {
+            None => first[make % 2] = Some(made),
+            Some(first) => assert_eq!(&made, first, "make {make}"),
+        }
+        host.release(&component);
+    }
+    assert!(probed, "the font passes ran (a probe was rewound)");
+    eprintln!(
+        "200 pouch tooltip makes: rows {:?}; fields {}",
+        host.recipe_row_counts(),
+        host.resident_heap().instance_fields()
+    );
+    assert_eq!(
+        host.unknown_host_call_count(),
+        counted,
+        "{:?}",
+        host.unknown_host_calls()
+    );
+    assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+    assert!(
+        host.recipe_row_counts().0 <= 2048,
+        "{:?}",
+        host.recipe_row_counts()
+    );
+}
+
+/// What one draw of a pouch costs, phase by phase, as the bridge runs each (a transient scope, a
+/// fresh stack), on the real jar's client host with 12,000 more live objects on its heap (a
+/// javac ballast run on the same host). Prints mean / p50 / p99 / max µs per draw, and how many
+/// collections ran. Not a check: run it in a release build,
+/// `RUNES_JAR=... cargo test --release --test fixture_runes_client_items -- --ignored --nocapture`.
+#[test]
+#[ignore = "a timing probe: run it in a release build"]
+fn pouch_draw_cost_probe() {
+    let Some(jar_path) = std::env::var_os("RUNES_JAR") else {
+        eprintln!("RUNES_JAR is unset; pouch draw cost probe skipped");
+        return;
+    };
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || probe(Path::new(&jar_path)))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+const BALLAST: &str = "package demo;\n\
+     import java.util.ArrayList; import java.util.List; import net.fabricmc.api.ModInitializer;\n\
+     public final class Ballast implements ModInitializer {\n\
+       public record Cell(int n, Cell next) {}\n\
+       public static final List<Cell> HELD = new ArrayList<>();\n\
+       @Override public void onInitialize() {\n\
+         Cell last = null;\n\
+         for (int i = 0; i < 12000; i++) { last = new Cell(i, last); HELD.add(last); }\n\
+       }\n\
+     }\n";
+
+fn probe(jar_path: &Path) {
+    let jar = NativeJar::from_path(jar_path).expect("load RUNES_JAR");
+    let mut host = jar
+        .try_seed_host(
+            StdHost::new()
+                .with_game_version("26.3")
+                .with_environment_type("CLIENT"),
+        )
+        .expect("seed Runes client host");
+    let budget = ExecutionBudget::UNBOUNDED;
+    jar.run_bootstrap_static_injectors(&mut host, &budget);
+    for entry in jar.discover_entrypoints("main") {
+        jar.execute(&entry.class, entry.method.as_deref(), "main", &mut host)
+            .expect("run Runes main");
+    }
+    let ballast = javac_fixture::Fixture::build(
+        "runes_probe_ballast",
+        &[
+            (
+                "net/fabricmc/api/ModInitializer.java",
+                "package net.fabricmc.api; public interface ModInitializer { void onInitialize(); }",
+            ),
+            ("demo/Ballast.java", BALLAST),
+        ],
+    );
+    ballast
+        .jar
+        .execute("demo.Ballast", None, "main", &mut host)
+        .expect("ballast");
+    let fields = host.resident_heap().instance_fields();
+    let pouch_item = item(&host, POUCH);
+    let defaults: Vec<(String, Option<Nbt>)> = GAME_PROTOTYPE_COMPONENTS
+        .iter()
+        .map(|id| ((*id).to_owned(), None))
+        .chain([(CONTENTS.to_owned(), None)])
+        .collect();
+    let request = ItemStackRequest {
+        item_override: Some(pouch_item.clone()),
+        item_id: POUCH.to_owned(),
+        count: 1,
+        patch: vec![(
+            CONTENTS.to_owned(),
+            Some(RuntimeComponentValue::Nbt(contents(&[
+                (RUNE, 10),
+                ("runes:frost_stone", 20),
+            ]))),
+        )],
+        defaults: defaults.clone(),
+        named_prototypes: vec![
+            (RUNE.to_owned(), defaults.clone()),
+            ("runes:frost_stone".to_owned(), defaults.clone()),
+        ],
+        ..ItemStackRequest::default()
+    };
+    let (_, codec) = &host.client_range_select_properties()[0];
+    let codec = codec.clone();
+    let property = jar
+        .decode_range_select_property(&mut host, &codec, &pouch_model_node(jar_path), &budget)
+        .exact()
+        .and_then(Result::ok)
+        .expect("fullness node");
+    let overrides = jar.item_overrides(&pouch_item, &host);
+    let owner = overrides.owners[&ItemHook::TooltipImage].clone();
+    let counted = host.unknown_host_call_count();
+    eprintln!("probe heap: {fields} live fields");
+
+    let report = |name: &str,
+                  host: &mut StdHost,
+                  draws: usize,
+                  mut draw: Box<dyn FnMut(&mut StdHost) + '_>| {
+        // Warm up: the first draws initialise classes and fill the heap's garbage.
+        for _ in 0..50 {
+            host.with_transient_rows(|host| draw(host));
+        }
+        let collections = host.collection_count();
+        let mut times: Vec<u128> = (0..draws)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                host.with_transient_rows(|host| draw(host));
+                start.elapsed().as_nanos()
+            })
+            .collect();
+        times.sort_unstable();
+        let mean = times.iter().sum::<u128>() / times.len() as u128;
+        let at = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+        eprintln!(
+            "{name:<34} mean {:>7.1} µs  p50 {:>7.1}  p99 {:>8.1}  max {:>9.1}  collections {}",
+            mean as f64 / 1e3,
+            at(0.5) as f64 / 1e3,
+            at(0.99) as f64 / 1e3,
+            *times.last().unwrap() as f64 / 1e3,
+            host.collection_count() - collections
+        );
+    };
+    let built = jar.build_item_stack(&mut host, request.clone()).unwrap();
+    host.retain(&built);
+    // `PROBE_ONLY=get|build` loops one phase for a sampling profiler to attach to.
+    match std::env::var("PROBE_ONLY").as_deref() {
+        Ok("get") => loop {
+            host.with_transient_rows(|host| {
+                jar.range_select_property_value(
+                    host,
+                    &property,
+                    &built,
+                    ItemModelHolder::default(),
+                    0,
+                    &budget,
+                )
+            });
+        },
+        Ok("build") => loop {
+            host.with_transient_rows(|host| {
+                jar.build_item_stack(host, request.clone()).unwrap();
+            });
+        },
+        _ => {}
+    }
+    report(
+        "build_item_stack (decode)",
+        &mut host,
+        2000,
+        Box::new(|host| {
+            jar.build_item_stack(host, request.clone()).unwrap();
+        }),
+    );
+    report(
+        "property get (prebuilt stack)",
+        &mut host,
+        2000,
+        Box::new(|host| {
+            let value = jar.range_select_property_value(
+                host,
+                &property,
+                &built,
+                ItemModelHolder::default(),
+                0,
+                &budget,
+            );
+            assert_eq!(value.exact(), Some(30.0 / 256.0));
+        }),
+    );
+    report(
+        "property draw (build + get)",
+        &mut host,
+        2000,
+        Box::new(|host| {
+            let stack = jar.build_item_stack(host, request.clone()).unwrap();
+            let value = jar.range_select_property_value(
+                host,
+                &property,
+                &stack,
+                ItemModelHolder::default(),
+                0,
+                &budget,
+            );
+            assert_eq!(value.exact(), Some(30.0 / 256.0));
+        }),
+    );
+    report(
+        "item_bar draw (build + 3 calls)",
+        &mut host,
+        2000,
+        Box::new(|host| {
+            let stack = jar.build_item_stack(host, request.clone()).unwrap();
+            let bar = jar
+                .item_bar(host, &pouch_item, &overrides, &stack, false, &budget)
+                .unwrap();
+            assert!(bar.report.exact(), "{:?}", bar.report);
+        }),
+    );
+    let make = |host: &mut StdHost, stack: &Value| {
+        let data = jar
+            .item_tooltip_image(host, &pouch_item, &owner, stack, &budget)
+            .exact()
+            .flatten()
+            .unwrap();
+        let component = jar
+            .client_tooltip_component(host, &data, &budget)
+            .exact()
+            .unwrap();
+        host.release(&data);
+        component
+    };
+    report(
+        "tooltip make (build..font passes)",
+        &mut host,
+        500,
+        Box::new(|host| {
+            let stack = jar.build_item_stack(host, request.clone()).unwrap();
+            let component = make(host, &stack);
+            let image = jar
+                .tooltip_image_with_font(
+                    host,
+                    &component,
+                    &answered_frame,
+                    8,
+                    &mut game_font,
+                    &budget,
+                )
+                .expect("image");
+            assert!(image.size.width > 0);
+            host.release(&component);
+        }),
+    );
+    let component = make(&mut host, &built);
+    let image = jar
+        .tooltip_image_with_font(
+            &mut host,
+            &component,
+            &answered_frame,
+            8,
+            &mut game_font,
+            &budget,
+        )
+        .expect("image");
+    report(
+        "tooltip draw (extractImage)",
+        &mut host,
+        2000,
+        Box::new(|host| {
+            host.begin_client_frame(answered_frame(&image.answers), &[]);
+            let drawn = jar.draw_tooltip_component_image(
+                host,
+                &component,
+                8,
+                8,
+                image.size.width,
+                image.size.height,
+                &budget,
+            );
+            host.end_client_frame();
+            assert!(drawn.report.exact());
+        }),
+    );
+    assert_eq!(
+        host.unknown_host_call_count(),
+        counted,
+        "{:?}",
+        host.unknown_host_calls()
+    );
+    eprintln!(
+        "after: {} live fields, rows {:?}",
+        host.resident_heap().instance_fields(),
+        host.recipe_row_counts()
     );
 }

@@ -456,19 +456,39 @@ impl NativeJar {
         mut opaque_keys: Vec<String>,
     ) -> Result<Value, NativeError> {
         let mut plain = Vec::with_capacity(patch.len());
-        let mut decoded = Vec::new();
+        let mut decoded: Vec<(String, Value)> = Vec::new();
+        // Each decode ends with a store of the heap, which may collect: a value decoded earlier
+        // is held only here until the stack takes it, so it is retained until then.
+        let release = |host: &mut StdHost, decoded: &[(String, Value)]| {
+            decoded.iter().for_each(|(_, value)| host.release(value));
+        };
         for (id, entry) in patch {
             match entry {
                 Some(RuntimeComponentValue::Nbt(nbt)) => {
-                    match self.decode_item_component(host, &id, &nbt)? {
-                        Some(value) => decoded.push((id, value)),
-                        None => opaque_keys.push(id),
+                    match self.decode_item_component(host, &id, &nbt) {
+                        Ok(Some(value)) => {
+                            host.retain(&value);
+                            decoded.push((id, value));
+                        }
+                        Ok(None) => opaque_keys.push(id),
+                        Err(error) => {
+                            release(host, &decoded);
+                            return Err(error);
+                        }
                     }
                 }
                 other => plain.push((id, other)),
             }
         }
-        opaque_keys.extend(self.record_item_prototype(host, item_id, defaults)?);
+        match self.record_item_prototype(host, item_id, defaults) {
+            Ok(keys) => opaque_keys.extend(keys),
+            Err(error) => {
+                release(host, &decoded);
+                return Err(error);
+            }
+        }
+        // Nothing below stores the heap, so the holds can go before the stack takes them.
+        release(host, &decoded);
         let stack = host.make_host_item_stack_with_components(
             item_override,
             item_id,
@@ -512,19 +532,38 @@ impl NativeJar {
                 // A vanilla type's value has no codec Decaf runs here: the prototype stays
                 // unknown and a read of it counts.
                 Some(_) if component_type_value(host, &id).is_none() => None,
-                Some(nbt) => self.decode_item_component(host, &id, &nbt)?.map(Some),
+                Some(nbt) => match self.decode_item_component(host, &id, &nbt) {
+                    Ok(value) => value.map(Some),
+                    Err(error) => {
+                        prototype
+                            .values()
+                            .flatten()
+                            .for_each(|held| host.release(held));
+                        return Err(error);
+                    }
+                },
             };
             match value {
                 Some(value) => {
-                    prototype.insert(id, value);
+                    // Held only here until the host records it; the next decode may collect.
+                    if let Some(held) = &value {
+                        host.retain(held);
+                    }
+                    // A component named twice keeps its last value, as the map does: the hold
+                    // on the one it replaces goes with it.
+                    if let Some(Some(replaced)) = prototype.insert(id, value) {
+                        host.release(&replaced);
+                    }
                 }
                 // A default Decaf can't decode leaves the prototype unknown: reads count.
                 None => opaque_keys.push(id),
             }
         }
+        let held: Vec<Value> = prototype.values().flatten().cloned().collect();
         if !prototype.is_empty() {
             host.recipes.set_game_prototype(item_id, prototype);
         }
+        held.iter().for_each(|value| host.release(value));
         Ok(opaque_keys)
     }
 
@@ -554,6 +593,48 @@ impl NativeJar {
             }
         }
         Ok(Some(out))
+    }
+}
+
+/// What a Java `ItemStack` for a game stack is built from: [`NativeJar::make_item_stack`]'s
+/// arguments, and the prototype values of every item its jar components name, recorded first
+/// ([`NativeJar::record_item_prototype`]), since the components' codecs read them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ItemStackRequest {
+    pub item_override: Option<Value>,
+    pub item_id: String,
+    pub count: i32,
+    pub patch: Vec<(String, Option<RuntimeComponentValue>)>,
+    pub defaults: Vec<(String, Option<Nbt>)>,
+    pub opaque_components: bool,
+    pub opaque_keys: Vec<String>,
+    /// `(item id, its prototype values)` for each item the components name.
+    pub named_prototypes: Vec<(String, Vec<(String, Option<Nbt>)>)>,
+}
+
+impl NativeJar {
+    /// A Java `ItemStack` built from `request`: the named items' prototypes recorded, then
+    /// [`Self::make_item_stack`]. A new stack each call: the game's stack has no identity an
+    /// embedder could key a reused one on (two equal pouches in two slots are two objects), and
+    /// a decode may read state outside the stack, so no build is reused.
+    pub fn build_item_stack(
+        &self,
+        host: &mut StdHost,
+        request: ItemStackRequest,
+    ) -> Result<Value, NativeError> {
+        for (item_id, defaults) in request.named_prototypes {
+            self.record_item_prototype(host, &item_id, defaults)?;
+        }
+        self.make_item_stack(
+            host,
+            request.item_override,
+            &request.item_id,
+            request.count,
+            request.patch,
+            request.defaults,
+            request.opaque_components,
+            request.opaque_keys,
+        )
     }
 }
 
@@ -653,7 +734,7 @@ impl NativeJar {
     /// Install `player`'s server-side context (`block_use.rs`'s `ActiveBlockUse`) with an
     /// `Inventory` filled from `facts`, run `run`, and report its counted calls.
     #[allow(clippy::too_many_arguments)]
-    fn run_server_item_call<T>(
+    fn run_server_item_call<T: crate::runtime::client_item_parts::AnswerRoot>(
         &self,
         host: &mut StdHost,
         player: &BlockUsePlayerData,
@@ -710,10 +791,16 @@ impl NativeJar {
         });
         let mut roots = vec![level, player_value, inventory];
         roots.extend_from_slice(extra_roots);
+        // The answer is the invocation's result, so the store that ends it keeps what the answer
+        // names: `use`'s `InteractionResult` is a `Success` handle whose row (`block_use`'s
+        // `interaction_results`, holding the held item it was transformed to) a collection in
+        // that store would otherwise drop before it is decoded (#609 review).
         let mut out = None;
         let result = self.with_persistent_runtime_with_budget(host, &roots, budget, |rt| {
-            out = Some(run(rt, &call)?);
-            Ok(Value::Void)
+            let answer = run(rt, &call)?;
+            let root = answer.root();
+            out = Some(answer);
+            Ok(root)
         });
         let finished = host.block_use.active_use.take();
         host.block_use.active_use = previous;

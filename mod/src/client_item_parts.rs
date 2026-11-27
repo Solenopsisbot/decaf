@@ -37,7 +37,8 @@ use mod_api::{
 
 use super::{LoadedJar, State};
 use crate::runtime::{
-    ExecutionBudget, ItemHook, ItemModelHolder, StackComponents, TooltipComponentSize, Value,
+    ExecutionBudget, ItemHook, ItemModelHolder, StackComponents, TooltipComponentSize,
+    TooltipImage, Value,
     client_surface::{ClientSnapshot, ClientText, DrawOp, FontAnswers, FontQuestion, TextMetrics},
 };
 
@@ -213,32 +214,38 @@ fn property_value(
             .map(|entry| entry.value.clone())
     });
     let jar_types = crate::item_parts::persistent_jar_types(&loaded.host);
-    let Some(stack) = crate::item_parts::java_stack(
-        host,
-        &loaded.jar,
-        &mut loaded.host,
-        item_override,
-        input.stack,
-        &jar_types,
-    ) else {
+    let context = input.context;
+    let jar = &loaded.jar;
+    // A draw runs every frame: the stack it builds, and everything else it makes, is garbage
+    // once it has its number.
+    let outcome = loaded.host.with_transient_rows(|jar_host| {
+        let stack = crate::item_parts::java_stack(
+            host,
+            jar,
+            jar_host,
+            item_override,
+            input.stack,
+            &jar_types,
+        )?;
+        Some(jar.range_select_property_value(
+            jar_host,
+            &property.held.value,
+            &stack,
+            ItemModelHolder {
+                level: context.level.is_some(),
+                owner: context.owner.is_some(),
+            },
+            context.seed,
+            &ExecutionBudget::within(JAR_BUDGET),
+        ))
+    });
+    let Some(outcome) = outcome else {
         note(
             loaded,
             &format!("range_select_property:{}:stack unreadable", property.id),
         );
         return 0.0;
     };
-    let context = input.context;
-    let outcome = loaded.jar.range_select_property_value(
-        &mut loaded.host,
-        &property.held.value,
-        &stack,
-        ItemModelHolder {
-            level: context.level.is_some(),
-            owner: context.owner.is_some(),
-        },
-        context.seed,
-        &ExecutionBudget::within(JAR_BUDGET),
-    );
     loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
     outcome.exact().unwrap_or(0.0)
 }
@@ -282,49 +289,68 @@ impl State {
             .get(&ItemHook::TooltipImage)?
             .clone();
         let jar_types = crate::item_parts::persistent_jar_types(&loaded.host);
-        let Some(value) = crate::item_parts::java_stack(
-            host,
-            &loaded.jar,
-            &mut loaded.host,
-            Some(item.clone()),
-            stack,
-            &jar_types,
-        ) else {
-            note(loaded, "tooltip_image:stack unreadable");
-            return None;
-        };
-        let budget = ExecutionBudget::within(JAR_BUDGET);
-        let image = loaded
-            .jar
-            .item_tooltip_image(&mut loaded.host, &item, &owner, &value, &budget)
-            .exact();
-        let data = match image {
-            Some(Some(data)) => data,
-            // `Optional.empty()`: no image, exactly.
-            Some(None) => return None,
-            None => {
+        let jar = &loaded.jar;
+        // Asked on every frame the tooltip shows. One transient scope covers the whole make,
+        // every font pass included (a rewound probe pass too): what the calls make is garbage once
+        // the component is measured (the component itself is retained). The passes rerun only
+        // the component; the stack is built once, before them.
+        let mut texts = BTreeMap::new();
+        let made = loaded.host.with_transient_rows(|jar_host| {
+            let Some(value) = crate::item_parts::java_stack(
+                host,
+                jar,
+                jar_host,
+                Some(item.clone()),
+                stack,
+                &jar_types,
+            ) else {
+                return TooltipMade::Unreadable;
+            };
+            let budget = ExecutionBudget::within(JAR_BUDGET);
+            let image = jar
+                .item_tooltip_image(jar_host, &item, &owner, &value, &budget)
+                .exact();
+            let data = match image {
+                Some(Some(data)) => data,
+                // `Optional.empty()`: no image, exactly.
+                Some(None) => return TooltipMade::Empty,
+                None => return TooltipMade::ImageCounted,
+            };
+            let component = jar
+                .client_tooltip_component(jar_host, &data, &budget)
+                .exact();
+            jar_host.release(&data);
+            let Some(component) = component else {
+                return TooltipMade::Empty;
+            };
+            // A draw that would count paints nothing: Sunrise would keep an empty box where
+            // vanilla draws the image. The image is drawn once here, in its own box, to know, and
+            // the font questions it asks are answered by the game's font before the run that
+            // counts.
+            let image = jar.tooltip_image_with_font(
+                jar_host,
+                &component,
+                &tooltip_frame,
+                FONT_RUNS,
+                &mut |questions, answers| {
+                    answer_font_questions(host, questions, answers, &mut texts)
+                },
+                &budget,
+            );
+            TooltipMade::Measured(component, image)
+        });
+        let (component, image) = match made {
+            TooltipMade::Unreadable => {
+                note(loaded, "tooltip_image:stack unreadable");
+                return None;
+            }
+            TooltipMade::Empty => return None,
+            TooltipMade::ImageCounted => {
                 loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
                 return None;
             }
+            TooltipMade::Measured(component, image) => (component, image),
         };
-        let component = loaded
-            .jar
-            .client_tooltip_component(&mut loaded.host, &data, &budget)
-            .exact();
-        loaded.host.release(&data);
-        let component = component?;
-        // A draw that would count paints nothing: Sunrise would keep an empty box where vanilla
-        // draws the image. The image is drawn once here, in its own box, to know, and the font
-        // questions it asks are answered by the game's font before the run that counts.
-        let mut texts = BTreeMap::new();
-        let image = loaded.jar.tooltip_image_with_font(
-            &mut loaded.host,
-            &component,
-            &tooltip_frame,
-            FONT_RUNS,
-            &mut |questions, answers| answer_font_questions(host, questions, answers, &mut texts),
-            &budget,
-        );
         let drawable = image.and_then(|image| {
             let Some(forms) = tooltip_forms(host, &image.draws, image.answers, texts) else {
                 note(loaded, "tooltip_image:undrawable_stack_form");
@@ -365,19 +391,22 @@ impl State {
         let Some(loaded) = self.jars.get_mut(data.held.jar) else {
             return;
         };
-        loaded
-            .host
-            .begin_client_frame(tooltip_frame(&data.forms.answers), &[]);
-        let outcome = loaded.jar.draw_tooltip_component_image(
-            &mut loaded.host,
-            &data.held.value,
-            x,
-            y,
-            width,
-            height,
-            &ExecutionBudget::within(JAR_BUDGET),
-        );
-        loaded.host.end_client_frame();
+        let jar = &loaded.jar;
+        // Drawn every frame the tooltip shows: what the draw makes is garbage once it painted.
+        let outcome = loaded.host.with_transient_rows(|jar_host| {
+            jar_host.begin_client_frame(tooltip_frame(&data.forms.answers), &[]);
+            let outcome = jar.draw_tooltip_component_image(
+                jar_host,
+                &data.held.value,
+                x,
+                y,
+                width,
+                height,
+                &ExecutionBudget::within(JAR_BUDGET),
+            );
+            jar_host.end_client_frame();
+            outcome
+        });
         let Some(ops) = outcome.exact() else {
             loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
             return;
@@ -408,6 +437,18 @@ impl State {
             }
         }
     }
+}
+
+/// How making a tooltip image ended ([`State::java_tooltip_image`]).
+enum TooltipMade {
+    /// The game stack has no Java stack (counted by the caller).
+    Unreadable,
+    /// No image: `Optional.empty()`, or a component `create` that counted.
+    Empty,
+    /// `getTooltipImage` counted.
+    ImageCounted,
+    /// The component (retained), and its measured image when every font pass ended exactly.
+    Measured(Value, Option<TooltipImage>),
 }
 
 /// A frame for a tooltip component's Java code: no player, no level, nothing a screen reads; its

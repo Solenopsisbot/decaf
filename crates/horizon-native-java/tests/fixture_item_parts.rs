@@ -13,9 +13,9 @@ mod javac_fixture;
 
 use horizon_native_java::{
     BlockUsePlayerData, ExecutionBudget, GAME_PROTOTYPE_COMPONENTS, ItemClick, ItemClickDirection,
-    ItemDestroyed, ItemHook, ItemUse, LiveMenuEffect, MenuPlayerFacts, NativeJar, Nbt, NbtCompound,
-    PlayerContainer, RuntimeComponentValue, StdHost, Value, level_sound::SoundRecord,
-    player_drop_plan,
+    ItemDestroyed, ItemHook, ItemStackRequest, ItemUse, LiveMenuEffect, MenuPlayerFacts, NativeJar,
+    Nbt, NbtCompound, PlayerContainer, RuntimeComponentValue, StdHost, Value,
+    level_sound::SoundRecord, player_drop_plan,
 };
 
 const UUID: u128 = 0x0000_7a11_0000_0000_0000_0000_0000_0001;
@@ -165,7 +165,9 @@ const STUBS: &[(&str, &str)] = &[
         "package net.minecraft.world;\n\
          public interface InteractionResult {\n\
            Success SUCCESS = null; Success SUCCESS_SERVER = null; Fail FAIL = null;\n\
-           final class Success implements InteractionResult {}\n\
+           final class Success implements InteractionResult {\n\
+             public Success heldItemTransformedTo(net.minecraft.world.item.ItemStack stack) { throw new AssertionError(); }\n\
+           }\n\
            final class Fail implements InteractionResult {}\n\
          }",
     ),
@@ -658,4 +660,425 @@ fn tally_item_overrides_match_java25() {
         assert_eq!(got, want, "line {}", index + 1);
     }
     assert_eq!(lines.len(), expected.len(), "{lines:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// Client draws over a large live heap (#609 round 4 bug 1)
+// ---------------------------------------------------------------------------
+//
+// In game, a pouch on screen froze the client for minutes: every draw of its model property and
+// bar built a fresh Java stack (decoding its component with the jar's codec), each one stayed a
+// root of the heap collector for good, so the live set grew every frame, and each collection
+// walked every heap field once per traced text. These draw the tally's bar 10,000 times the way
+// the client bridge does, over a heap that holds 12,000 live objects as a real mod's does, and
+// check every answer against the oracle's line, nothing counted, the heap and the stack rows
+// staying bounded, and a time bound the old collector misses by far.
+
+/// Many live objects on the resident heap: a static list of linked cells.
+const BALLAST: &str = "package demo;\n\
+     import java.util.ArrayList; import java.util.List; import net.fabricmc.api.ModInitializer;\n\
+     /** Holds many live objects, as a real mod's heap does. */\n\
+     public final class Ballast implements ModInitializer {\n\
+       public record Cell(int n, Cell next) {}\n\
+       public static final List<Cell> HELD = new ArrayList<>();\n\
+       @Override public void onInitialize() {\n\
+         Cell last = null;\n\
+         for (int i = 0; i < 12000; i++) { last = new Cell(i, last); HELD.add(last); }\n\
+       }\n\
+     }\n";
+
+/// The tally the oracle's bar line is for (after its `take` click): `{count: 5, last:
+/// "minecraft:diamond"}`.
+fn oracle_tally() -> Nbt {
+    Nbt::Compound(NbtCompound::from([
+        ("count".to_owned(), Nbt::Int(5)),
+        (
+            "last".to_owned(),
+            Nbt::String("minecraft:diamond".to_owned()),
+        ),
+    ]))
+}
+
+/// The oracle's `bar ...` line.
+fn oracle_bar_line() -> &'static str {
+    JAVA25
+        .lines()
+        .find(|line| line.starts_with("bar "))
+        .expect("the oracle prints the bar")
+}
+
+/// What the client bridge builds a tally stack from (`mod/src/item_parts.rs`
+/// `java_stack_request`): the tally in the patch, the prototype holding none.
+fn tally_request(item: &Value, tally: Nbt) -> ItemStackRequest {
+    let mut defaults: Vec<(String, Option<Nbt>)> = GAME_PROTOTYPE_COMPONENTS
+        .iter()
+        .map(|id| ((*id).to_owned(), None))
+        .collect();
+    defaults.push((TALLY.to_owned(), None));
+    ItemStackRequest {
+        item_override: Some(item.clone()),
+        item_id: TALLY_ITEM.to_owned(),
+        count: 1,
+        patch: vec![(TALLY.to_owned(), Some(RuntimeComponentValue::Nbt(tally)))],
+        defaults,
+        ..ItemStackRequest::default()
+    }
+}
+
+/// A host with the demo's item registered and the ballast on its heap.
+fn ballast_host(fixture: &javac_fixture::Fixture) -> (StdHost, Value) {
+    let jar = &fixture.jar;
+    let mut host = StdHost::new();
+    jar.execute("demo.Probe", None, "main", &mut host)
+        .expect("demo onInitialize");
+    jar.execute("demo.Ballast", None, "main", &mut host)
+        .expect("ballast onInitialize");
+    assert!(
+        host.resident_heap().instance_fields() >= 24_000,
+        "the ballast is live: {} fields",
+        host.resident_heap().instance_fields()
+    );
+    let item = host
+        .registrations()
+        .iter()
+        .find(|entry| entry.registry == "minecraft:item" && entry.id == TALLY_ITEM)
+        .expect("the tally item is registered")
+        .value
+        .clone();
+    (host, item)
+}
+
+fn ballast_fixture() -> javac_fixture::Fixture {
+    let mut sources = STUBS.to_vec();
+    sources.extend_from_slice(&[
+        (
+            "demo/Tally.java",
+            include_str!("fixtures/item_parts/demo/Tally.java"),
+        ),
+        (
+            "demo/Probe.java",
+            include_str!("fixtures/item_parts/demo/Probe.java"),
+        ),
+        (
+            "demo/TallyItem.java",
+            include_str!("fixtures/item_parts/demo/TallyItem.java"),
+        ),
+        ("demo/Ballast.java", BALLAST),
+    ]);
+    javac_fixture::Fixture::build("item_parts_ballast", &sources)
+}
+
+fn bar_line(bar: &horizon_native_java::ItemBarOutcome) -> String {
+    format!(
+        "bar visible={} width={} color={}",
+        bar.visible.expect("visible"),
+        bar.width.expect("width"),
+        bar.color.expect("color")
+    )
+}
+
+/// `draws` bar draws as the client bridge makes them: in a transient scope, each on the stack
+/// `stack` gives. Panics on any answer but the oracle's; returns the time taken.
+fn draw_bars(
+    jar: &NativeJar,
+    host: &mut StdHost,
+    item: &Value,
+    draws: usize,
+    stack: impl Fn(&NativeJar, &mut StdHost) -> Value,
+) -> std::time::Duration {
+    let overrides = jar.item_overrides(item, host);
+    let expected = oracle_bar_line();
+    let start = std::time::Instant::now();
+    for draw in 0..draws {
+        let bar = host.with_transient_rows(|host| {
+            let stack = stack(jar, host);
+            jar.item_bar(
+                host,
+                item,
+                &overrides,
+                &stack,
+                false,
+                &ExecutionBudget::UNBOUNDED,
+            )
+            .expect("bar")
+        });
+        assert!(bar.report.exact(), "draw {draw}: {:?}", bar.report);
+        assert_eq!(bar_line(&bar), expected, "draw {draw}");
+    }
+    start.elapsed()
+}
+
+fn on_big_stack(body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(body)
+        .expect("spawn")
+        .join()
+        .unwrap();
+}
+
+/// The client bridge's path: 10,000 bar draws over a large heap, each on a stack built fresh in a
+/// transient scope. Every answer is the oracle's and nothing counts; the stacks and what their
+/// components decoded to are collected (the collections ran: most of the 10,000 stacks are gone),
+/// so the heap and the rows stay bounded by the collection trigger. Wall time is printed, not
+/// asserted (CI machines vary); on main this heap's one collection took ~130 s in debug.
+#[test]
+fn ten_thousand_bar_draws_over_a_large_heap_stay_exact_and_bounded() {
+    on_big_stack(|| {
+        let fixture = ballast_fixture();
+        let jar = &fixture.jar;
+        let (mut host, item) = ballast_host(&fixture);
+        let counted = host.unknown_host_call_count();
+        let fields = host.resident_heap().instance_fields();
+        let request = tally_request(&item, oracle_tally());
+        let collections = host.collection_count();
+        let draws = 10_000;
+        let elapsed = draw_bars(jar, &mut host, &item, draws, |jar, host| {
+            jar.build_item_stack(host, request.clone())
+                .expect("tally stack")
+        });
+        let (rows, collectable) = host.recipe_row_counts();
+        eprintln!(
+            "{draws} bar draws over {fields} live fields: {elapsed:?} ({:?} per draw); rows {rows} ({collectable} collectable); fields now {}",
+            elapsed / draws as u32,
+            host.resident_heap().instance_fields()
+        );
+        assert_eq!(
+            host.unknown_host_call_count(),
+            counted,
+            "{:?}",
+            host.unknown_host_calls()
+        );
+        // Garbage lives at most until the heap doubles past what the last collection kept.
+        assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+        assert_eq!(rows, collectable, "every draw's stack is collectable");
+        assert!(host.collection_count() > collections, "the collector ran");
+        assert!(rows < draws / 2, "{rows} of {draws} stacks are left");
+    });
+}
+
+/// A server click as the bridge runs it (`mod/src/item_parts.rs` `server_click`): the inventory
+/// and the carried stack built in a transient scope, the click run, its stacks read back, the
+/// scope closed. 2,000 of them answer the oracle's insert click every time, count nothing, and
+/// leave the rows and the heap bounded: a long-lived server kept every stack of every click.
+#[test]
+fn two_thousand_server_clicks_leave_the_heap_bounded() {
+    on_big_stack(|| {
+        let fixture = fixture();
+        let jar = &fixture.jar;
+        let mut host = StdHost::new();
+        jar.execute("demo.Probe", None, "main", &mut host)
+            .expect("demo onInitialize");
+        host.server_player_created(UUID, 1, 0);
+        host.set_host_deferred_server_sound_seeds(true);
+        let item = host
+            .registrations()
+            .iter()
+            .find(|entry| entry.registry == "minecraft:item" && entry.id == TALLY_ITEM)
+            .expect("the tally item is registered")
+            .value
+            .clone();
+        let mut defaults: Vec<(String, Option<Nbt>)> = GAME_PROTOTYPE_COMPONENTS
+            .iter()
+            .map(|id| ((*id).to_owned(), None))
+            .collect();
+        defaults.push((TALLY.to_owned(), None));
+        let tally = ItemStackRequest {
+            item_override: Some(item.clone()),
+            item_id: TALLY_ITEM.to_owned(),
+            count: 1,
+            defaults,
+            ..ItemStackRequest::default()
+        };
+        // The oracle's insert click and the sound before it.
+        let lines: Vec<&str> = JAVA25.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.starts_with("click insert "))
+            .expect("the oracle's insert click");
+        let expected = &lines[at - 1..=at];
+        let counted = host.unknown_host_call_count();
+        let collections = host.collection_count();
+        let clicks = 2_000;
+        let start = std::time::Instant::now();
+        for n in 0..clicks {
+            let printed = host.with_transient_rows(|host| {
+                let mut inventory = vec![StdHost::empty_item_stack(); 36];
+                inventory[0] = jar.build_item_stack(host, tally.clone()).unwrap();
+                inventory[1] = host.make_item_stack_for_id("minecraft:diamond", 5, false);
+                let carried = host.make_item_stack_for_id("minecraft:stone", 10, false);
+                let mut out = Vec::new();
+                click(
+                    jar,
+                    host,
+                    &item,
+                    "insert",
+                    ItemClickDirection::OtherStackedOnMe,
+                    0,
+                    &carried,
+                    false,
+                    &mut inventory,
+                    &mut out,
+                );
+                out
+            });
+            assert_eq!(printed, expected, "click {n}");
+        }
+        let (rows, collectable) = host.recipe_row_counts();
+        eprintln!(
+            "{clicks} server clicks: {:?}; rows {rows} ({collectable} collectable); fields {}",
+            start.elapsed(),
+            host.resident_heap().instance_fields()
+        );
+        assert_eq!(
+            host.unknown_host_call_count(),
+            counted,
+            "{:?}",
+            host.unknown_host_calls()
+        );
+        assert_eq!(rows, collectable, "every click's stack is collectable");
+        assert!(host.collection_count() > collections, "the collector ran");
+        assert!(rows < 4_096, "{rows} rows are left after {clicks} clicks");
+        assert!(host.resident_heap().instance_fields() < 4_096);
+    });
+}
+
+/// An item whose `use` answers a `Success` it built (`SUCCESS.heldItemTransformedTo(..)`), with
+/// garbage enough that the store ending the call collects. Registered by `TransformProbe`.
+const TRANSFORM_ITEM: &str = "package demo;\n\
+     import net.minecraft.world.InteractionHand; import net.minecraft.world.InteractionResult;\n\
+     import net.minecraft.world.entity.player.Player; import net.minecraft.world.item.Item;\n\
+     import net.minecraft.world.level.Level;\n\
+     public class TransformItem extends Item {\n\
+       public record Garbage(int n) {}\n\
+       private final int garbage;\n\
+       public TransformItem(Properties properties, int garbage) { super(properties); this.garbage = garbage; }\n\
+       @Override public InteractionResult use(Level level, Player player, InteractionHand hand) {\n\
+         Object last = null;\n\
+         for (int i = 0; i < garbage; i++) { last = new Garbage(i); }\n\
+         return InteractionResult.SUCCESS.heldItemTransformedTo(player.getItemInHand(hand).copyWithCount(2));\n\
+       }\n\
+     }\n";
+
+const TRANSFORM_PROBE: &str = "package demo;\n\
+     import net.fabricmc.api.ModInitializer; import net.minecraft.core.Registry;\n\
+     import net.minecraft.core.registries.BuiltInRegistries; import net.minecraft.core.registries.Registries;\n\
+     import net.minecraft.resources.Identifier; import net.minecraft.resources.ResourceKey;\n\
+     import net.minecraft.world.item.Item;\n\
+     public final class TransformProbe implements ModInitializer {\n\
+       @Override public void onInitialize() {\n\
+         register(\"transform_calm\", 0);\n\
+         register(\"transform_busy\", 4000);\n\
+       }\n\
+       private static void register(String name, int garbage) {\n\
+         Identifier id = Identifier.fromNamespaceAndPath(\"demo\", name);\n\
+         Registry.register(BuiltInRegistries.ITEM, id,\n\
+             new TransformItem(new Item.Properties().setId(ResourceKey.create(Registries.ITEM, id)), garbage));\n\
+       }\n\
+     }\n";
+
+/// `use` answering a `Success` it built: the result is a root of the store that ends the call,
+/// so its row (and the held item it was transformed to) is still there to decode when a
+/// collection ran in that store (#609 review: the server runner persisted `Void`, the row was
+/// pruned, and the embedder kept vanilla's answer). The busy item's 4,000 objects of garbage
+/// make that store collect; the calm item is the same call with none.
+#[test]
+fn a_use_result_survives_a_collection_in_its_own_store() {
+    on_big_stack(|| {
+        let mut sources = STUBS.to_vec();
+        sources.extend_from_slice(&[
+            (
+                "demo/Tally.java",
+                include_str!("fixtures/item_parts/demo/Tally.java"),
+            ),
+            (
+                "demo/Probe.java",
+                include_str!("fixtures/item_parts/demo/Probe.java"),
+            ),
+            (
+                "demo/TallyItem.java",
+                include_str!("fixtures/item_parts/demo/TallyItem.java"),
+            ),
+            ("demo/TransformItem.java", TRANSFORM_ITEM),
+            ("demo/TransformProbe.java", TRANSFORM_PROBE),
+        ]);
+        let fixture = javac_fixture::Fixture::build("item_parts_transform", &sources);
+        let jar = &fixture.jar;
+        let mut host = StdHost::new();
+        jar.execute("demo.TransformProbe", None, "main", &mut host)
+            .expect("probe onInitialize");
+        host.server_player_created(UUID, 1, 0);
+        let mut answers = Vec::new();
+        for name in ["demo:transform_calm", "demo:transform_busy"] {
+            let item = host
+                .registrations()
+                .iter()
+                .find(|entry| entry.registry == "minecraft:item" && entry.id == name)
+                .expect("registered")
+                .value
+                .clone();
+            let collections = host.collection_count();
+            let (line, collected) = host.with_transient_rows(|host| {
+                let held = jar
+                    .build_item_stack(
+                        host,
+                        ItemStackRequest {
+                            item_override: Some(item.clone()),
+                            item_id: name.to_owned(),
+                            count: 5,
+                            ..ItemStackRequest::default()
+                        },
+                    )
+                    .unwrap();
+                let mut inventory = vec![StdHost::empty_item_stack(); 36];
+                inventory[0] = held.clone();
+                let used = jar
+                    .item_use(
+                        host,
+                        &player(Some(held)),
+                        "minecraft:overworld",
+                        &facts(&inventory),
+                        &item,
+                        "demo/TransformItem",
+                        &ItemUse {
+                            hand: "MAIN_HAND".to_owned(),
+                        },
+                        &ExecutionBudget::UNBOUNDED,
+                    )
+                    .expect("use");
+                assert!(used.report.exact(), "{name}: {:?}", used.report);
+                let collected = host.collection_count() > collections;
+                let line = match used.result {
+                    Some(horizon_native_java::InteractionResultValue::Success {
+                        item_context,
+                        ..
+                    }) => {
+                        let transformed = item_context
+                            .held_item_transformed_to
+                            .expect("heldItemTransformedTo");
+                        format!(
+                            "SUCCESS was_item={} transformed={}",
+                            item_context.was_item_interaction,
+                            stack_line(jar, host, &transformed)
+                        )
+                    }
+                    other => format!("{other:?}"),
+                };
+                (line, collected)
+            });
+            answers.push((name, line, collected));
+        }
+        eprintln!("{answers:#?}");
+        // The busy use collected in its own store; the calm one didn't.
+        assert!(!answers[0].2 && answers[1].2, "{answers:?}");
+        // `copyWithCount(2)` of the five held.
+        assert_eq!(
+            answers[0].1,
+            "SUCCESS was_item=true transformed=2 demo:transform_calm tally=none"
+        );
+        assert_eq!(
+            answers[1].1,
+            "SUCCESS was_item=true transformed=2 demo:transform_busy tally=none"
+        );
+    });
 }

@@ -275,6 +275,23 @@ pub(crate) struct RecipeState {
     /// (`Item.components()`): what the item-part bridge read from the game
     /// (`NativeJar::make_item_stack`). They answer before the runtime's own prototype model.
     pub(crate) game_prototypes: BTreeMap<String, BTreeMap<String, Option<Value>>>,
+    /// How many transient scopes are open ([`crate::runtime::StdHost::begin_transient_rows`]).
+    transient_depth: usize,
+    /// The rows minted while a scope is open. They are roots like any other until the outermost
+    /// scope closes, so nothing the embedder holds between its calls inside the scope can be
+    /// collected under it; then they become [`Self::collectable_rows`].
+    sealing_rows: Vec<String>,
+    /// The rows minted inside a transient scope that has closed: ordinary objects of the heap
+    /// collector, kept only while something reaches them (`heap::collect`), their values edges
+    /// rather than roots. Every other row is a root for the host's life, as before: an embedder
+    /// may hold any stack, template or patch it was handed, and the collector can't see what it
+    /// holds.
+    ///
+    /// Why the split: before it every row was a root, so the client's draw paths, which build
+    /// a fresh `ItemStack` for each draw of a jar item (its model property, bar and tooltip),
+    /// kept every stack and every object its jar component decoded to, for good. The live set
+    /// grew each frame, and collections grew with it until one froze the game.
+    pub(crate) collectable_rows: BTreeSet<String>,
 }
 
 impl RecipeState {
@@ -291,10 +308,107 @@ impl RecipeState {
             .extend(values);
     }
 
+    /// A fresh row key, `<prefix>/<n>`. Every row of every table here is minted by this, so
+    /// it is the one place a transient scope marks rows collectable. The key holds no `#`, so
+    /// the collector never reads it as a heap allocation number (`heap::note_numbers`).
     fn next_key(&mut self, prefix: &str) -> String {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
-        format!("{prefix}/{id}")
+        let key = format!("{prefix}/{id}");
+        if self.transient_depth > 0 {
+            self.sealing_rows.push(key.clone());
+        }
+        key
+    }
+
+    /// Open a transient scope (see [`Self::collectable_rows`]); returns the depth to restore.
+    pub(crate) fn enter_transient(&mut self) -> usize {
+        let depth = self.transient_depth;
+        self.transient_depth = depth.saturating_add(1);
+        depth
+    }
+
+    /// Close the scope [`Self::enter_transient`] opened. Closing the outermost one seals what
+    /// the scopes minted: those rows are collectable from now on. A scope never closed (an
+    /// embedder that unwound past it) leaves its rows roots, as rows were before scopes.
+    pub(crate) fn leave_transient(&mut self, depth: usize) {
+        self.transient_depth = depth;
+        if depth == 0 {
+            // A row the scope minted and something already dropped (none can be: rows go only in
+            // a collection, which keeps every unsealed row) still names nothing.
+            let sealed: Vec<String> = std::mem::take(&mut self.sealing_rows)
+                .into_iter()
+                .filter(|key| self.row_exists(key))
+                .collect();
+            self.collectable_rows.extend(sealed);
+        }
+    }
+
+    /// Whether any table holds the row `key`.
+    fn row_exists(&self, key: &str) -> bool {
+        self.stacks.contains_key(key)
+            || self.templates.contains_key(key)
+            || self.patches.contains_key(key)
+            || self.patch_builders.contains_key(key)
+            || self.ingredients.contains_key(key)
+            || self.holders.contains_key(key)
+            || self.common_infos.contains_key(key)
+            || self.custom_data.contains_key(key)
+            || self.tooltip_displays.contains_key(key)
+    }
+
+    /// The values the row `key` holds, which name other objects: a stack's item and
+    /// component values, a template's or patch's component values, a holder's id and value.
+    /// Custom data, tooltip displays, ingredients and common infos hold no object (NBT, ids,
+    /// flags). The collector follows these from a collectable row ([`Self::collectable_rows`])
+    /// it reached; a root row's are roots ([`Self::root_texts`]).
+    pub(crate) fn row_values<'a>(&'a self, key: &str) -> Vec<&'a Value> {
+        let mut out = Vec::new();
+        if let Some(stack) = self.stacks.get(key) {
+            out.extend(stack.item_value.iter());
+            out.extend(stack.patch.entries.values().flatten());
+        }
+        if let Some(template) = self.templates.get(key) {
+            out.extend(template.patch.entries.values().flatten());
+        }
+        if let Some(patch) = self
+            .patches
+            .get(key)
+            .or_else(|| self.patch_builders.get(key))
+        {
+            out.extend(patch.entries.values().flatten());
+        }
+        if let Some(holder) = self.holders.get(key) {
+            out.push(&holder.id);
+            out.push(&holder.value);
+        }
+        out
+    }
+
+    /// Drop every collectable row the collector didn't reach (`keep` false). A root row is
+    /// never collectable, so `keep` holds for it.
+    pub(crate) fn prune_rows(&mut self, keep: impl Fn(&str) -> bool) {
+        if self.collectable_rows.is_empty() {
+            return;
+        }
+        let dropped: Vec<String> = self
+            .collectable_rows
+            .iter()
+            .filter(|key| !keep(key))
+            .cloned()
+            .collect();
+        for key in &dropped {
+            self.stacks.remove(key);
+            self.templates.remove(key);
+            self.patches.remove(key);
+            self.patch_builders.remove(key);
+            self.ingredients.remove(key);
+            self.holders.remove(key);
+            self.common_infos.remove(key);
+            self.custom_data.remove(key);
+            self.tooltip_displays.remove(key);
+            self.collectable_rows.remove(key);
+        }
     }
 
     pub(crate) fn alloc_stack(&mut self, stack: LiveStack) -> Value {
@@ -412,11 +526,19 @@ impl RecipeState {
         self.patches.get(handle.key())
     }
 
+    /// The values of every root row (not [`Self::collectable_rows`]), the game prototypes and
+    /// the loaded recipes.
     pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
         fn push_val<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
             out.extend(crate::runtime::heap::value_texts(value));
         }
-        for stack in self.stacks.values() {
+        let root = |key: &String| !self.collectable_rows.contains(key);
+        for stack in self
+            .stacks
+            .iter()
+            .filter(|(key, _)| root(key))
+            .map(|(_, stack)| stack)
+        {
             if let Some(item) = &stack.item_value {
                 push_val(item, out);
             }
@@ -424,7 +546,12 @@ impl RecipeState {
                 push_val(val, out);
             }
         }
-        for tpl in self.templates.values() {
+        for tpl in self
+            .templates
+            .iter()
+            .filter(|(key, _)| root(key))
+            .map(|(_, tpl)| tpl)
+        {
             for val in tpl.patch.entries.values().flatten() {
                 push_val(val, out);
             }
@@ -434,12 +561,23 @@ impl RecipeState {
                 push_val(val, out);
             }
         }
-        for patch in self.patches.values().chain(self.patch_builders.values()) {
+        for patch in self
+            .patches
+            .iter()
+            .chain(self.patch_builders.iter())
+            .filter(|(key, _)| root(key))
+            .map(|(_, patch)| patch)
+        {
             for val in patch.entries.values().flatten() {
                 push_val(val, out);
             }
         }
-        for holder in self.holders.values() {
+        for holder in self
+            .holders
+            .iter()
+            .filter(|(key, _)| root(key))
+            .map(|(_, holder)| holder)
+        {
             push_val(&holder.id, out);
             push_val(&holder.value, out);
         }

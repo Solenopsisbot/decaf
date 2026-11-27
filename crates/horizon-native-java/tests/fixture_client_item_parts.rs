@@ -18,7 +18,7 @@ mod javac_fixture;
 use std::sync::Arc;
 
 use horizon_native_java::{
-    ExecutionBudget, ItemHook, ItemModelHolder, StdHost, Value,
+    ExecutionBudget, ItemHook, ItemModelHolder, ItemStackRequest, StdHost, Value,
     client_surface::{ClientSnapshot, DrawOp},
 };
 
@@ -530,4 +530,250 @@ fn a_name_only_create_selector_counts() {
         "{:?}",
         created.report
     );
+}
+
+/// Many live objects on the resident heap, as a real mod's heap holds: a static list of linked
+/// cells (#609 round 4 bug 1).
+const BALLAST: &str = "package demo;\n\
+     import java.util.ArrayList; import java.util.List; import net.fabricmc.api.ModInitializer;\n\
+     /** Holds many live objects. */\n\
+     public final class Ballast implements ModInitializer {\n\
+       public record Cell(int n, Cell next) {}\n\
+       public static final List<Cell> HELD = new ArrayList<>();\n\
+       @Override public void onInitialize() {\n\
+         Cell last = null;\n\
+         for (int i = 0; i < 12000; i++) { last = new Cell(i, last); HELD.add(last); }\n\
+       }\n\
+     }\n";
+
+/// The client bridge's draw path (`mod/src/client_item_parts.rs`), over a heap of 12,000 live
+/// objects: 10,000 evaluations of `demo:fill` on one stack, then 1,000 draws of a tooltip
+/// component, each in a transient scope as the bridge runs them. Every answer is the oracle's,
+/// nothing counts, and the heap and the rows stay bounded (each draw's stack is built fresh and
+/// collected). Wall time is printed, not asserted: in game, the old collector froze the client
+/// for minutes on draws like these.
+#[test]
+fn ten_thousand_property_draws_over_a_large_heap_stay_exact_and_bounded() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let mut sources = STUBS.to_vec();
+            for (path, source) in [
+                ("demo/FillProperty.java", include_str!("fixtures/client_item_parts/demo/FillProperty.java")),
+                ("demo/Meter.java", include_str!("fixtures/client_item_parts/demo/Meter.java")),
+                ("demo/MeterTooltip.java", include_str!("fixtures/client_item_parts/demo/MeterTooltip.java")),
+                ("demo/MeterItem.java", include_str!("fixtures/client_item_parts/demo/MeterItem.java")),
+                ("demo/Probe.java", include_str!("fixtures/client_item_parts/demo/Probe.java")),
+                ("demo/mixin/PropertiesMixin.java", include_str!("fixtures/client_item_parts/demo/mixin/PropertiesMixin.java")),
+                ("demo/mixin/CreateMixin.java", include_str!("fixtures/client_item_parts/demo/mixin/CreateMixin.java")),
+                ("demo/Ballast.java", BALLAST),
+            ] {
+                sources.push((path, source));
+            }
+            let fixture = javac_fixture::Fixture::build_with_mod_json_and_extra(
+                "client_item_parts_ballast",
+                &sources,
+                MOD_JSON,
+                &[("demo.mixins.json", MIXINS_JSON.as_bytes())],
+            );
+            let jar = &fixture.jar;
+            let mut host = client_host(&fixture);
+            jar.execute("demo.Ballast", None, "main", &mut host)
+                .expect("ballast onInitialize");
+            let fields = host.resident_heap().instance_fields();
+            assert!(fields >= 24_000, "the ballast is live: {fields} fields");
+            let budget = ExecutionBudget::UNBOUNDED;
+            let codec = host.client_range_select_properties()[0].1.clone();
+            let json: serde_json::Value = serde_json::from_str(NODES[0]).unwrap();
+            let property = jar
+                .decode_range_select_property(&mut host, &codec, &json, &budget)
+                .exact()
+                .and_then(Result::ok)
+                .expect("the default node decodes");
+            // The oracle's answer for this stack, under the first node.
+            let expected = JAVA25
+                .lines()
+                .find(|line| line.starts_with("  get count=16 level=false owner=false seed=0 -> "))
+                .expect("the oracle line")
+                .rsplit_once(" -> ")
+                .unwrap()
+                .1;
+            let request = ItemStackRequest {
+                item_id: "minecraft:diamond".to_owned(),
+                count: 16,
+                ..ItemStackRequest::default()
+            };
+            let counted = host.unknown_host_call_count();
+            let start = std::time::Instant::now();
+            for draw in 0..10_000 {
+                let value = host.with_transient_rows(|host| {
+                    let stack = jar.build_item_stack(host, request.clone()).unwrap();
+                    jar.range_select_property_value(
+                        host,
+                        &property,
+                        &stack,
+                        ItemModelHolder { level: false, owner: false },
+                        0,
+                        &budget,
+                    )
+                    .exact()
+                    .unwrap_or_else(|| panic!("draw {draw} counted"))
+                });
+                assert_eq!(java_float(value), expected, "draw {draw}");
+            }
+            let properties = start.elapsed();
+            // The meter of three's component, drawn as a shown tooltip draws it every frame.
+            let meter = item(&host, "demo:meter");
+            let owner = jar.item_overrides(&meter, &host).owners[&ItemHook::TooltipImage].clone();
+            let stack = jar
+                .build_item_stack(
+                    &mut host,
+                    ItemStackRequest {
+                        item_override: Some(meter.clone()),
+                        item_id: "demo:meter".to_owned(),
+                        count: 3,
+                        ..ItemStackRequest::default()
+                    },
+                )
+                .unwrap();
+            let data = jar
+                .item_tooltip_image(&mut host, &meter, &owner, &stack, &budget)
+                .exact()
+                .flatten()
+                .expect("a meter of three");
+            let component = jar
+                .client_tooltip_component(&mut host, &data, &budget)
+                .exact()
+                .expect("create");
+            host.release(&data);
+            let lines = JAVA25.lines().collect::<Vec<_>>();
+            let at = lines
+                .iter()
+                .position(|line| *line == "tooltip_image count=3 -> present")
+                .unwrap();
+            let fills: Vec<&str> = lines[at + 3..]
+                .iter()
+                .take_while(|line| line.starts_with("  fill "))
+                .copied()
+                .collect();
+            let start = std::time::Instant::now();
+            for draw in 0..1_000 {
+                let ops = host.with_transient_rows(|host| {
+                    host.begin_client_frame(frame(), &[]);
+                    let ops = jar
+                        .draw_tooltip_component_image(host, &component, 10, 20, 80, 50, &budget)
+                        .exact()
+                        .unwrap_or_else(|| panic!("draw {draw} counted"));
+                    host.end_client_frame();
+                    ops
+                });
+                let drawn: Vec<String> = ops
+                    .into_iter()
+                    .map(|op| match op {
+                        DrawOp::Fill { rect: [x, y, w, h], argb } => format!(
+                            "  fill {} {} {} {} {}",
+                            x as i32,
+                            y as i32,
+                            (x + w) as i32,
+                            (y + h) as i32,
+                            argb as i32
+                        ),
+                        other => panic!("unexpected draw {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(drawn, fills, "draw {draw}");
+            }
+            let tooltips = start.elapsed();
+            host.release(&component);
+            eprintln!(
+                "10000 property draws over {fields} live fields: {properties:?}; 1000 tooltip draws: {tooltips:?}; rows {:?}; fields now {}",
+                        host.recipe_row_counts(),
+                host.resident_heap().instance_fields()
+            );
+            assert_eq!(host.unknown_host_call_count(), counted, "{:?}", host.unknown_host_calls());
+            assert!(host.resident_heap().instance_fields() <= 2 * fields + 2048);
+            // Every draw's stack is collectable (the meter's, made outside a scope, is a root),
+            // and what is left is garbage under the collection trigger: about twice the live
+            // set, which this large heap's draws don't reach (`FillProperty` makes no garbage
+            // of its own), so the bound is the trigger's.
+            let (rows, collectable) = host.recipe_row_counts();
+            assert_eq!(collectable + 1, rows);
+            assert!(rows <= 2 * fields + 2048, "{rows} rows");
+
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// A client call's answer lives through the store that ends its own invocation: `getTooltipImage`'s
+/// data until `create` takes it, `create`'s component until it is measured. The embedder retains
+/// each only once the call returned, so a collection landing on that store used to free it, and
+/// the next call read a "collected while still reachable" object (#609 round 4, once the draws'
+/// garbage made collections frequent). A thousand makes on a small heap, a fresh stack each in a
+/// transient scope, put collections on every kind of store.
+#[test]
+fn a_client_call_answer_survives_its_own_store() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let fixture = fixture("client_item_parts_answer_roots", MIXINS_JSON);
+            let jar = &fixture.jar;
+            let mut host = client_host(&fixture);
+            let budget = ExecutionBudget::UNBOUNDED;
+            let meter = item(&host, "demo:meter");
+            let owner = jar.item_overrides(&meter, &host).owners[&ItemHook::TooltipImage].clone();
+            let request = ItemStackRequest {
+                item_override: Some(meter.clone()),
+                item_id: "demo:meter".to_owned(),
+                count: 3,
+                ..ItemStackRequest::default()
+            };
+            // The oracle's size line for the meter of three.
+            let lines: Vec<&str> = JAVA25.lines().collect();
+            let at = lines
+                .iter()
+                .position(|line| *line == "tooltip_image count=3 -> present")
+                .unwrap();
+            let expected = lines[at + 1];
+            let counted = host.unknown_host_call_count();
+            for make in 0..1_000 {
+                let size = host.with_transient_rows(|host| {
+                    let stack = jar.build_item_stack(host, request.clone()).unwrap();
+                    let image = jar.item_tooltip_image(host, &meter, &owner, &stack, &budget);
+                    let data = image
+                        .clone()
+                        .exact()
+                        .flatten()
+                        .unwrap_or_else(|| panic!("make {make}: {:?}", image.report));
+                    let created = jar.client_tooltip_component(host, &data, &budget);
+                    host.release(&data);
+                    let component = created
+                        .clone()
+                        .exact()
+                        .unwrap_or_else(|| panic!("make {make}: {:?}", created.report));
+                    host.begin_client_frame(frame(), &[]);
+                    let size = jar.tooltip_component_size(host, &component, &budget);
+                    host.end_client_frame();
+                    host.release(&component);
+                    size.clone()
+                        .exact()
+                        .unwrap_or_else(|| panic!("make {make}: {:?}", size.report))
+                });
+                assert_eq!(
+                    format!("  component width={} height={}", size.width, size.height),
+                    expected,
+                    "make {make}"
+                );
+            }
+            assert_eq!(
+                host.unknown_host_call_count(),
+                counted,
+                "{:?}",
+                host.unknown_host_calls()
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
