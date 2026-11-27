@@ -31,6 +31,12 @@ use crate::runtime::{
 };
 use crate::{JAR_BUDGET, LOG, State, caught, runtime};
 
+/// Sunrise's `menu::PLAYER` container index (`crates/sunrise-client/src/menu.rs`): every slot
+/// over the player's own `Inventory` (`0..36` main/hotbar, `36..40` armour, `40` offhand) carries
+/// `StackedOnOther.container == 0`; non-player containers carry `1` (`MAIN`), `2` (`GRID`), or
+/// `3` (`RESULT`).
+const PLAYER_CONTAINER: usize = 0;
+
 /// Player inventory indices a plain `Slot` shows in a vanilla menu: `Inventory.items` 0..36
 /// (the armour 36..40 and off hand 40 slots of `InventoryMenu` are slot subclasses).
 const PLAIN_INVENTORY_SLOTS: usize = 36;
@@ -192,71 +198,61 @@ fn game_stack(
     crate::client::api_stack_from_components(host, parts).map(Some)
 }
 
-/// How [`plain_inventory_slot`] classified the clicked menu slot.
-enum ClickedSlot {
-    /// A plain vanilla `Slot` backed by `Inventory.items` index `0..36`, whose backing agrees
-    /// with `click.container_slot` and whose Sunrise slot rules agree with a plain slot.
-    PlainInventory(usize),
-    /// A slot this bridge does not model (non-vanilla menu, non-player backing, armor/offhand,
-    /// custom slot rules, or `container_menu` unavailable): counted as `clicked slot rules` and
-    /// left to Sunrise's vanilla click.
-    Declined,
-    /// `menu.slot_backing(click.slot)` answered `Player(backing)` that disagrees with
-    /// `click.container_slot` (for example Sunrise `3d34bbe63d` lifting `crafting.table` /
-    /// `station` during `lan_crafting_click` / `lan_stations`, causing `player.container_menu` to
-    /// fall back to `InventoryMenu` window 0 while `click.slot` is a `CraftingMenu` index off by
-    /// one): counted and refused so nothing is overwritten or duplicated.
-    Mismatch { backing: usize, event: usize },
-}
-
-/// The player-inventory index the clicked menu slot shows, when it is a plain vanilla `Slot`
-/// whose rules this hook can read: the player's open menu is their inventory menu or a vanilla
-/// menu type, the slot is backed by `Inventory.items`, the backing agrees with
-/// `click.container_slot`, and Sunrise's own slot rules (`MenuRef::slot_gives` / `slot_holds`,
-/// which a menu part may change) agree with a plain slot's for the stacks the click holds.
+/// The player-inventory index (`0..36`) the clicked menu slot shows, when it is a plain vanilla
+/// `Slot` over `Inventory.items`.
+///
+/// `StackedOnOther` already identifies the clicked slot's container and index:
+/// `click.container == PLAYER_CONTAINER` (`0`) is the player's own `Inventory`, and
+/// `click.container_slot` is its `Inventory` index (`0..36` hotbar/main, `36..40` armour, `40`
+/// offhand). In MC 26.3 every vanilla menu adds `Inventory.items` (`0..36`) through
+/// `AbstractContainerMenu.addStandardInventorySlots` as plain `new Slot(inventory, index, x, y)`
+/// (`mayPlace` true, `mayPickup` true, `getMaxStackSize` = `Container.getMaxStackSize()` = 99).
+///
+/// When `player.container_menu` is available and its `slot_backing(click.slot)` agrees
+/// (`Some(MenuSlotBacking::Player(index))` with `index == click.container_slot`), this also
+/// checks `menu.kind` (declining non-vanilla menus) and Sunrise's `slot_gives` / `slot_holds`
+/// (so any `menu_slot_rules` listener still applies). When `container_menu` is `None` (upstream
+/// Sunrise #6694 on crafting tables/workstations) or its `slot_backing` disagrees (Sunrise
+/// `3d34bbe63d` falling back to `InventoryMenu` window 0 while a crafting table or workstation is
+/// open), the event's player-inventory slot (`0..36`) is authoritative — guarded downstream by
+/// requiring `inventory[index] == click.clicked`.
+///
+/// Non-inventory slots (`click.container != PLAYER_CONTAINER`: station inputs, crafting grid,
+/// result slots, chest/furnace slots) and armour/offhand (`36..41`) return `None`, so the bridge
+/// declines them, counts `clicked slot rules`, and leaves Sunrise's vanilla click standing.
 fn plain_inventory_slot(
     host: &dyn ServerHost,
     player: PlayerRef,
     click: &StackedOnOther,
-) -> ClickedSlot {
-    let Some(menu) = player.container_menu(host) else {
-        return ClickedSlot::Declined;
-    };
-    match menu.kind(host) {
-        Some(None) => {}
-        Some(Some(kind)) if kind.starts_with("minecraft:") => {}
-        _ => return ClickedSlot::Declined,
+) -> Option<usize> {
+    if click.container != PLAYER_CONTAINER || click.container_slot >= PLAIN_INVENTORY_SLOTS {
+        return None;
     }
-    let Some(MenuSlotBacking::Player(index)) = menu.slot_backing(host, click.slot) else {
-        return ClickedSlot::Declined;
-    };
-    // Cross-check before rejecting armor/offhand (`>= 36`): in `InventoryMenu`, armor slots 5..9
-    // report `Player(39..=36)` matching `container_slot` 39..=36 and offhand slot 45 reports
-    // `Player(40)` matching `container_slot` 40, whereas a shifted `CraftingMenu` slot 45 (hotbar
-    // 8, `container_slot` 8) or grid slots 5..9 (`container_slot` 4..=7) disagree and are caught
-    // here as a mismatch.
-    if index != click.container_slot {
-        return ClickedSlot::Mismatch {
-            backing: index,
-            event: click.container_slot,
-        };
-    }
-    if index >= PLAIN_INVENTORY_SLOTS || !menu.slot_gives(host, click.slot).unwrap_or(false) {
-        return ClickedSlot::Declined;
-    }
-    for stack in [click.carried.as_ref(), click.clicked.as_ref()]
-        .into_iter()
-        .flatten()
+    let index = click.container_slot;
+    if let Some(menu) = player.container_menu(host)
+        && menu.slot_backing(host, click.slot) == Some(MenuSlotBacking::Player(index))
     {
-        let Some(item_max) = host.max_stack_size(stack.item()) else {
-            return ClickedSlot::Declined;
-        };
-        if menu.slot_holds(host, click.slot, stack) != Some(item_max.min(INVENTORY_MAX_STACK_SIZE))
+        match menu.kind(host) {
+            Some(None) => {}
+            Some(Some(kind)) if kind.starts_with("minecraft:") => {}
+            _ => return None,
+        }
+        if !menu.slot_gives(host, click.slot).unwrap_or(false) {
+            return None;
+        }
+        for stack in [click.carried.as_ref(), click.clicked.as_ref()]
+            .into_iter()
+            .flatten()
         {
-            return ClickedSlot::Declined;
+            let item_max = host.max_stack_size(stack.item())?;
+            if menu.slot_holds(host, click.slot, stack)
+                != Some(item_max.min(INVENTORY_MAX_STACK_SIZE))
+            {
+                return None;
+            }
         }
     }
-    ClickedSlot::PlainInventory(index)
+    Some(index)
 }
 
 /// One Java call of this bridge that failed: an exception Java didn't catch, a budget, a
@@ -403,22 +399,10 @@ impl JavaItemPart {
                         .note_unknown_game_hook("item_stacked_on_other:no player");
                     return Flow::Continue;
                 };
-                let inventory_slot = match plain_inventory_slot(&*host, player, click) {
-                    ClickedSlot::PlainInventory(index) => index,
-                    ClickedSlot::Declined => {
-                        jar.host
-                            .note_unknown_game_hook("item_stacked_on_other:clicked slot rules");
-                        return Flow::Continue;
-                    }
-                    ClickedSlot::Mismatch { backing, event } => {
-                        log::warn!(
-                            "{LOG}: {jar_id}: {label}: menu slot {} backing Player({backing}) disagrees with event container_slot {event}; refusing click",
-                            click.slot
-                        );
-                        jar.host
-                            .note_unknown_game_hook("item_stacked_on_other:slot backing mismatch");
-                        return refuse_click(result);
-                    }
+                let Some(inventory_slot) = plain_inventory_slot(&*host, player, click) else {
+                    jar.host
+                        .note_unknown_game_hook("item_stacked_on_other:clicked slot rules");
+                    return Flow::Continue;
                 };
                 let native = Arc::clone(&jar.jar);
                 let jar_types = persistent_jar_types(&jar.host);
