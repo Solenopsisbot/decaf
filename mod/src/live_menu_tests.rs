@@ -96,6 +96,27 @@ enum TossRefusal {
     Vanish,
 }
 
+/// A vanilla menu open on the test host when no mod menu is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VanillaMenu {
+    /// MC 26.3 `ChestMenu.threeRows` (`minecraft:generic_9x3`):
+    /// `0..=26` chest, `27..=53` main inventory (`9..=35`), `54..=62` hotbar (`0..=8`).
+    Chest3 { window: i32 },
+    /// MC 26.3 `AbstractFurnaceMenu` (`minecraft:furnace`):
+    /// `0` input, `1` fuel, `2` result, `3..=29` main inventory (`9..=35`), `30..=38` hotbar (`0..=8`).
+    Furnace { window: i32 },
+    /// MC 26.3 `CraftingMenu` (`minecraft:crafting`):
+    /// `0` result, `1..=9` 3×3 grid, `10..=36` main inventory (`9..=35`), `37..=45` hotbar (`0..=8`).
+    Crafting { window: i32 },
+    /// Sunrise's documented contract for `PlayerRef::container_menu` on a crafting table: returns
+    /// `None` so item click overrides decline instead of reading the wrong menu.
+    CraftingRefused,
+    /// Sunrise `3d34bbe63d` crafting-table bug (`lan_crafting.rs:1683`): `play.crafting.table` was
+    /// taken before dispatching `item_stacked_on_other`, so `player.container_menu()` falls back
+    /// to window 0 (`InventoryMenu`) while the click event carries `CraftingMenu` slot indices.
+    CraftingLiftedToWindow0,
+}
+
 struct MenuTestHost {
     fake: FakeHost,
     world: World,
@@ -103,6 +124,10 @@ struct MenuTestHost {
     /// Declared mod menu types, their owned slot count and their data slot count
     /// (`data/<ns>/sunrise/menu/*.json`).
     menu_types: Vec<(String, usize, usize)>,
+    /// Optional open vanilla menu (when `world.menu` is `None`).
+    vanilla_menu: Option<VanillaMenu>,
+    /// Next entity id assigned to dropped/spawned item entities when firing `entity_join_level`.
+    next_entity_id: u32,
     /// Whether the player is on the server's list (`false` once they left).
     present: bool,
     health: f32,
@@ -151,6 +176,8 @@ impl MenuTestHost {
                 .iter()
                 .map(|(id, slots, data)| ((*id).to_owned(), *slots, *data))
                 .collect(),
+            vanilla_menu: None,
+            next_entity_id: 1000,
             present: true,
             health: 20.0,
             toss_refusal: None,
@@ -495,6 +522,9 @@ impl mod_api::prelude::LivingHost for MenuTestHost {
     }
 }
 impl mod_api::prelude::EntitiesHost for MenuTestHost {
+    fn entity(&self, id: u32) -> Option<EntityRef> {
+        Some(EntityRef::new(WorldEpoch::new(1), id))
+    }
     fn level(&self, dimension: &str) -> Option<LevelRef> {
         mod_api::prelude::EntitiesHost::level(&self.fake, dimension)
     }
@@ -736,10 +766,24 @@ impl mod_api::prelude::PlayerInventoryBackend for MenuTestHost {
 }
 impl mod_api::prelude::PlayerMenusBackend for MenuTestHost {
     fn player_container_menu(&self, player: PlayerRef) -> Option<MenuRef> {
-        Some(match &self.world.menu {
-            Some(open) => mod_api::__private::game::menu_ref(player, open.window, open.generation),
-            None => mod_api::__private::game::menu_ref(player, 0, 0),
-        })
+        if let Some(open) = &self.world.menu {
+            return Some(mod_api::__private::game::menu_ref(
+                player,
+                open.window,
+                open.generation,
+            ));
+        }
+        match self.vanilla_menu {
+            Some(
+                VanillaMenu::Chest3 { window }
+                | VanillaMenu::Furnace { window }
+                | VanillaMenu::Crafting { window },
+            ) => Some(mod_api::__private::game::menu_ref(player, window, 1)),
+            Some(VanillaMenu::CraftingRefused) => None,
+            Some(VanillaMenu::CraftingLiftedToWindow0) | None => {
+                Some(mod_api::__private::game::menu_ref(player, 0, 0))
+            }
+        }
     }
     fn player_container_counter(&self, _player: PlayerRef) -> Option<i32> {
         Some(self.world.counter)
@@ -751,13 +795,53 @@ impl mod_api::prelude::MenusBackend for MenuTestHost {
         if fields.window == 0 {
             return Some(0);
         }
-        self.menu_is(menu).map(|open| open.window)
+        if let Some(open) = self.menu_is(menu) {
+            return Some(open.window);
+        }
+        match self.vanilla_menu {
+            Some(
+                VanillaMenu::Chest3 { window }
+                | VanillaMenu::Furnace { window }
+                | VanillaMenu::Crafting { window },
+            ) if fields.window == window => Some(window),
+            _ => None,
+        }
     }
     fn menu_kind(&self, menu: MenuRef) -> Option<Option<String>> {
-        Some(self.menu_is(menu).map(|open| open.menu.clone()))
+        if let Some(open) = self.menu_is(menu) {
+            return Some(Some(open.menu.clone()));
+        }
+        let fields = menu.fields();
+        if fields.window == 0 {
+            return Some(None);
+        }
+        match self.vanilla_menu {
+            Some(VanillaMenu::Chest3 { window }) if fields.window == window => {
+                Some(Some("minecraft:generic_9x3".to_owned()))
+            }
+            Some(VanillaMenu::Furnace { window }) if fields.window == window => {
+                Some(Some("minecraft:furnace".to_owned()))
+            }
+            Some(VanillaMenu::Crafting { window }) if fields.window == window => {
+                Some(Some("minecraft:crafting".to_owned()))
+            }
+            _ => None,
+        }
     }
     fn menu_slot_count(&self, menu: MenuRef) -> Option<usize> {
-        self.menu_is(menu).map(|open| open.owned.len() + 36)
+        if let Some(open) = self.menu_is(menu) {
+            return Some(open.owned.len() + 36);
+        }
+        let fields = menu.fields();
+        if fields.window == 0 {
+            return Some(46);
+        }
+        match self.vanilla_menu {
+            Some(VanillaMenu::Chest3 { window }) if fields.window == window => Some(63),
+            Some(VanillaMenu::Furnace { window }) if fields.window == window => Some(39),
+            Some(VanillaMenu::Crafting { window }) if fields.window == window => Some(46),
+            _ => None,
+        }
     }
     fn menu_slot(&self, menu: MenuRef, slot: usize) -> Option<Option<ItemStack>> {
         let open = self.menu_is(menu)?;
@@ -771,25 +855,27 @@ impl mod_api::prelude::MenusBackend for MenuTestHost {
         Some(self.menu_is(menu)?.cursor.clone())
     }
     fn menu_slot_backing(&self, menu: MenuRef, slot: usize) -> Option<MenuSlotBacking> {
-        if menu.fields().window == 0 {
+        let fields = menu.fields();
+        if fields.window == 0 {
             return inventory_menu_backing(slot);
         }
-        self.backing(self.menu_is(menu)?, slot)
+        if let Some(open) = self.menu_is(menu) {
+            return self.backing(open, slot);
+        }
+        let level = self.fake.level.level();
+        vanilla_menu_backing(self.vanilla_menu?, fields.window, level, slot)
     }
     fn menu_slot_holds(&self, menu: MenuRef, slot: usize, stack: &ItemStack) -> Option<u32> {
-        if menu.fields().window == 0 {
+        let backing = self.menu_slot_backing(menu, slot)?;
+        if matches!(backing, MenuSlotBacking::Player(_)) {
             // A plain `Slot` over `Inventory`: `min(99, the item's max)`.
-            inventory_menu_backing(slot)?;
             let max = mod_api::prelude::ItemsHost::max_stack_size(self, stack.item())?;
             return Some(max.min(99));
         }
-        self.backing(self.menu_is(menu)?, slot).map(|_| 99)
+        Some(99)
     }
     fn menu_slot_gives(&self, menu: MenuRef, slot: usize) -> Option<bool> {
-        if menu.fields().window == 0 {
-            return inventory_menu_backing(slot).map(|_| true);
-        }
-        self.backing(self.menu_is(menu)?, slot).map(|_| true)
+        self.menu_slot_backing(menu, slot).map(|_| true)
     }
 }
 impl mod_api::prelude::MenusClientBackend for MenuTestHost {}
@@ -873,19 +959,65 @@ impl mod_api::prelude::ItemsBackendMut for MenuTestHost {
         })
     }
 }
-/// `ItemPlace::PlayerSlot`'s number as an `Inventory` index: main 0..36, armour 100..=103 as
-/// 36..40, the off hand -106 as 40.
-/// The player's own `InventoryMenu` (window 0): its main slots 9..36 show `Inventory` 9..36 and
-/// its hotbar 36..45 shows 0..9. The result, crafting, armour and off-hand slots are slot
-/// subclasses the item-part bridge never reads as plain: none here.
+/// MC 26.3 `InventoryMenu` (window 0), matching Sunrise `native_menu_refs.rs`:
+/// `0` craft result, `1..=4` 2×2 grid, `5..=8` armour (`Inventory` 39..=36),
+/// `9..=35` main inventory (`9..=35`), `36..=44` hotbar (`0..=8`), `45` offhand (`40`).
 fn inventory_menu_backing(slot: usize) -> Option<MenuSlotBacking> {
     match slot {
-        9..36 => Some(MenuSlotBacking::Player(slot)),
-        36..45 => Some(MenuSlotBacking::Player(slot - 36)),
+        0 => Some(MenuSlotBacking::CraftResult),
+        1..=4 => Some(MenuSlotBacking::CraftGrid(slot - 1)),
+        5..=8 => Some(MenuSlotBacking::Player(39 - (slot - 5))),
+        9..=35 => Some(MenuSlotBacking::Player(slot)),
+        36..=44 => Some(MenuSlotBacking::Player(slot - 36)),
+        45 => Some(MenuSlotBacking::Player(40)),
         _ => None,
     }
 }
 
+/// MC 26.3 vanilla container menu slot layouts (verified with `javap` against `server-26.3.jar`):
+/// - `ChestMenu.threeRows` (`minecraft:generic_9x3`): `0..=26` chest, `27..=53` main inv (`9..=35`), `54..=62` hotbar (`0..=8`).
+/// - `AbstractFurnaceMenu` (`minecraft:furnace`): `0` input, `1` fuel, `2` result, `3..=29` main inv (`9..=35`), `30..=38` hotbar (`0..=8`).
+/// - `CraftingMenu` (`minecraft:crafting`): `0` result, `1..=9` 3×3 grid, `10..=36` main inv (`9..=35`), `37..=45` hotbar (`0..=8`).
+fn vanilla_menu_backing(
+    vanilla: VanillaMenu,
+    window: i32,
+    level: LevelRef,
+    slot: usize,
+) -> Option<MenuSlotBacking> {
+    match vanilla {
+        VanillaMenu::Chest3 { window: open } if open == window => match slot {
+            0..=26 => Some(MenuSlotBacking::BlockEntity {
+                level,
+                pos: POS,
+                slot,
+            }),
+            27..=53 => Some(MenuSlotBacking::Player(slot - 27 + 9)),
+            54..=62 => Some(MenuSlotBacking::Player(slot - 54)),
+            _ => None,
+        },
+        VanillaMenu::Furnace { window: open } if open == window => match slot {
+            0..=2 => Some(MenuSlotBacking::BlockEntity {
+                level,
+                pos: POS,
+                slot,
+            }),
+            3..=29 => Some(MenuSlotBacking::Player(slot - 3 + 9)),
+            30..=38 => Some(MenuSlotBacking::Player(slot - 30)),
+            _ => None,
+        },
+        VanillaMenu::Crafting { window: open } if open == window => match slot {
+            0 => Some(MenuSlotBacking::CraftResult),
+            1..=9 => Some(MenuSlotBacking::CraftGrid(slot - 1)),
+            10..=36 => Some(MenuSlotBacking::Player(slot - 10 + 9)),
+            37..=45 => Some(MenuSlotBacking::Player(slot - 37)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `ItemPlace::PlayerSlot`'s number as an `Inventory` index: main 0..36, armour 100..=103 as
+/// 36..40, the off hand -106 as 40.
 fn inventory_index(slot: i32) -> Option<usize> {
     match slot {
         0..36 => Some(slot as usize),
@@ -910,6 +1042,24 @@ impl mod_api::prelude::PlayerInventoryBackendMut for MenuTestHost {
             None => {}
         }
         if self.health <= 0.0 || !self.present {
+            return Ok(Some(stack));
+        }
+        // Sunrise spawns the dropped ItemEntity synchronously on the server thread and fires
+        // `Hooks::entity_join_level`, which re-enters installed mods (including `HorizonJava`).
+        let id = self.next_entity_id;
+        self.next_entity_id += 1;
+        let pos = [self.eye[0], self.eye[1] - 0.3, self.eye[2]];
+        let mut canceled = false;
+        mod_api::dispatch_entity_join_level(
+            self,
+            "minecraft:overworld",
+            id,
+            "minecraft:item",
+            pos,
+            false,
+            &mut canceled,
+        );
+        if canceled {
             return Ok(Some(stack));
         }
         self.world.drops.push(stack);
@@ -1011,8 +1161,23 @@ impl mod_api::prelude::LevelEntitiesBackendMut for MenuTestHost {
         stack: ItemStack,
         _pickup_delay: u32,
     ) -> Result<Option<EntityRef>, StackWriteError> {
+        let id = self.next_entity_id;
+        self.next_entity_id += 1;
+        let mut canceled = false;
+        mod_api::dispatch_entity_join_level(
+            self,
+            "minecraft:overworld",
+            id,
+            "minecraft:item",
+            [x, y, z],
+            false,
+            &mut canceled,
+        );
+        if canceled {
+            return Ok(None);
+        }
         self.world.spawned.push((stack, [x, y, z]));
-        Ok(Some(EntityRef::new(WorldEpoch::new(1), 1000)))
+        Ok(Some(EntityRef::new(WorldEpoch::new(1), id)))
     }
 }
 /// `LevelRef::with_random`: the level's live stream, lent for one draw closure.
@@ -1110,6 +1275,13 @@ impl Hooks for BridgeMod {
         for menu in self.menus {
             registrar.menu_part(menu, JavaMenuPart::new(Arc::clone(&self.java.state)));
         }
+    }
+    fn entity_join_level(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut mod_api::EntityJoinLevelEvent<'_>,
+    ) -> mod_api::Flow {
+        Hooks::entity_join_level(&*self.java, host, event)
     }
     fn entity_tick_listened(&self, host: HostSide<'_>, event: &mut EntityTickListenedEvent) {
         Hooks::entity_tick_listened(&*self.java, host, event);
@@ -1248,6 +1420,34 @@ fn on_a_big_stack(name: &str, run: impl FnOnce() + Send + 'static) {
         .expect("spawn test thread")
         .join()
         .unwrap();
+}
+
+/// Like [`on_a_big_stack`], but panics if `run` does not finish within `timeout` so a re-entrant
+/// lock deadlock fails fast instead of hanging the test runner.
+fn on_a_big_stack_within(
+    name: &str,
+    timeout: std::time::Duration,
+    run: impl FnOnce() + Send + 'static,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+            let _ = tx.send(result);
+        })
+        .expect("spawn test thread");
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(())) => handle.join().expect("join test thread"),
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{name}: timed out after {timeout:?} (likely re-entrant lock deadlock)");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{name}: worker thread exited without reporting a result");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2917,24 +3117,76 @@ const ITEM_PART_SOURCES: &[(&str, &str)] = &[
          public final class Registries { public static final ResourceKey<Registry<Item>> ITEM = null; }",
     ),
     (
+        "net/minecraft/world/level/ItemLike.java",
+        "package net.minecraft.world.level; public interface ItemLike {}",
+    ),
+    (
+        "net/minecraft/world/InteractionHand.java",
+        "package net.minecraft.world; public enum InteractionHand { MAIN_HAND, OFF_HAND }",
+    ),
+    (
+        "net/minecraft/world/InteractionResult.java",
+        "package net.minecraft.world;\n\
+         public interface InteractionResult {\n\
+           InteractionResult SUCCESS = null;\n\
+           InteractionResult CONSUME = null;\n\
+           InteractionResult PASS = null;\n\
+           InteractionResult FAIL = null;\n\
+         }",
+    ),
+    (
+        "net/minecraft/world/level/Level.java",
+        "package net.minecraft.world.level;\n\
+         public abstract class Level { public boolean isClientSide() { return false; } }",
+    ),
+    (
+        "net/minecraft/util/Prediction.java",
+        "package net.minecraft.util; public enum Prediction { PREDICTED, SERVER_ONLY }",
+    ),
+    (
+        "net/minecraft/world/entity/SlotAccess.java",
+        "package net.minecraft.world.entity; public interface SlotAccess {}",
+    ),
+    (
         "net/minecraft/world/item/Item.java",
         "package net.minecraft.world.item;\n\
          import net.minecraft.resources.ResourceKey;\n\
+         import net.minecraft.world.InteractionHand;\n\
+         import net.minecraft.world.InteractionResult;\n\
+         import net.minecraft.world.entity.SlotAccess;\n\
          import net.minecraft.world.entity.player.Player;\n\
          import net.minecraft.world.inventory.*;\n\
-         public class Item {\n\
+         import net.minecraft.world.level.ItemLike;\n\
+         import net.minecraft.world.level.Level;\n\
+         public class Item implements ItemLike {\n\
            public static class Properties {\n\
              public Properties setId(ResourceKey<Item> key) { return this; }\n\
            }\n\
            public Item(Properties p) {}\n\
            public boolean overrideStackedOnOther(ItemStack me, Slot s, ClickAction a, Player p) { return false; }\n\
+           public boolean overrideOtherStackedOnMe(ItemStack me, ItemStack other, Slot s, ClickAction a, Player p, SlotAccess access) { return false; }\n\
+           public InteractionResult use(Level level, Player player, InteractionHand hand) { return InteractionResult.PASS; }\n\
            public boolean canFitInsideContainerItems() { return true; }\n\
            public void onDestroyed(net.minecraft.world.entity.item.ItemEntity entity) {}\n\
          }",
     ),
     (
+        "net/minecraft/world/item/Items.java",
+        "package net.minecraft.world.item;\n\
+         public final class Items {\n\
+           public static final Item COBBLESTONE = null;\n\
+           public static final Item DIAMOND = null;\n\
+         }",
+    ),
+    (
         "net/minecraft/world/item/ItemStack.java",
-        "package net.minecraft.world.item; public final class ItemStack { public Item getItem() { return null; } }",
+        "package net.minecraft.world.item;\n\
+         import net.minecraft.world.level.ItemLike;\n\
+         public final class ItemStack {\n\
+           public ItemStack(ItemLike item, int count) {}\n\
+           public Item getItem() { return null; }\n\
+           public void shrink(int amount) {}\n\
+         }",
     ),
     (
         "net/minecraft/world/inventory/Slot.java",
@@ -2952,7 +3204,15 @@ const ITEM_PART_SOURCES: &[(&str, &str)] = &[
     ),
     (
         "net/minecraft/world/entity/player/Player.java",
-        "package net.minecraft.world.entity.player; public abstract class Player {}",
+        "package net.minecraft.world.entity.player;\n\
+         import net.minecraft.util.Prediction;\n\
+         import net.minecraft.world.InteractionHand;\n\
+         import net.minecraft.world.entity.item.ItemEntity;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         public abstract class Player {\n\
+           public ItemStack getItemInHand(InteractionHand hand) { return null; }\n\
+           public ItemEntity drop(ItemStack stack, boolean retainOwnership, Prediction prediction) { return null; }\n\
+         }",
     ),
     (
         "demo/ItemProbe.java",
@@ -2975,6 +3235,58 @@ const ITEM_PART_SOURCES: &[(&str, &str)] = &[
              Identifier breaker = Identifier.fromNamespaceAndPath(\"demo\", \"breaker\");\n\
              Registry.register(BuiltInRegistries.ITEM, breaker,\n\
                  new Breaker(new Item.Properties().setId(ResourceKey.create(Registries.ITEM, breaker))));\n\
+             Identifier dropper = Identifier.fromNamespaceAndPath(\"demo\", \"dropper\");\n\
+             Registry.register(BuiltInRegistries.ITEM, dropper,\n\
+                 new Dropper(new Item.Properties().setId(ResourceKey.create(Registries.ITEM, dropper))));\n\
+             Identifier noop = Identifier.fromNamespaceAndPath(\"demo\", \"noop_clicker\");\n\
+             Registry.register(BuiltInRegistries.ITEM, noop,\n\
+                 new NoopClicker(new Item.Properties().setId(ResourceKey.create(Registries.ITEM, noop))));\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/Dropper.java",
+        "package demo;\n\
+         import net.minecraft.util.Prediction;\n\
+         import net.minecraft.world.InteractionHand;\n\
+         import net.minecraft.world.InteractionResult;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.item.Item;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         import net.minecraft.world.item.Items;\n\
+         import net.minecraft.world.level.Level;\n\
+         /** An item whose `use` drops two stacks and shrinks the held stack. */\n\
+         public class Dropper extends Item {\n\
+           public Dropper(Properties properties) { super(properties); }\n\
+           @Override public InteractionResult use(Level level, Player player, InteractionHand hand) {\n\
+             if (!level.isClientSide()) {\n\
+               player.drop(new ItemStack(Items.COBBLESTONE, 3), true, Prediction.SERVER_ONLY);\n\
+               player.drop(new ItemStack(Items.DIAMOND, 2), true, Prediction.SERVER_ONLY);\n\
+               player.getItemInHand(hand).shrink(1);\n\
+             }\n\
+             return InteractionResult.CONSUME;\n\
+           }\n\
+         }",
+    ),
+    (
+        "demo/NoopClicker.java",
+        "package demo;\n\
+         import net.minecraft.world.entity.SlotAccess;\n\
+         import net.minecraft.world.entity.player.Player;\n\
+         import net.minecraft.world.inventory.ClickAction;\n\
+         import net.minecraft.world.inventory.Slot;\n\
+         import net.minecraft.world.item.Item;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         /** An item whose click overrides inspect the slot and return false without mutating anything. */\n\
+         public class NoopClicker extends Item {\n\
+           public NoopClicker(Properties properties) { super(properties); }\n\
+           @Override public boolean overrideStackedOnOther(ItemStack me, Slot slot, ClickAction action, Player player) {\n\
+             slot.getItem();\n\
+             return false;\n\
+           }\n\
+           @Override public boolean overrideOtherStackedOnMe(ItemStack me, ItemStack other, Slot slot, ClickAction action, Player player, SlotAccess access) {\n\
+             slot.getItem();\n\
+             return false;\n\
            }\n\
          }",
     ),
@@ -3119,81 +3431,98 @@ fn real_runes_pouch_use_drops_its_contents_through_the_sunrise_hooks() {
     const POUCH: &str = "runes:small_rune_pouch";
     const FROST: &str = "runes:frost_stone";
     const FIRE: &str = "runes:fire_stone";
-    on_a_big_stack("item-part-runes-pouch-use", move || {
-        let jar = Arc::new(NativeJar::from_path(Path::new(&jar_path)).expect("load RUNES_JAR"));
-        let java = java_booted(jar);
-        let mut host = MenuTestHost::new(&[POUCH, FROST, FIRE], &[]);
-        host.level_random = Some(mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED));
-        let rune = |id: &str, count: i32| {
-            Tag::compound([
-                ("id", Tag::String(JavaString::from(id))),
-                ("count", Tag::Int(count)),
-            ])
-        };
-        let contents = Tag::compound([
-            ("content", Tag::List(vec![rune(FROST, 10), rune(FIRE, 40)])),
-            ("size_multiplier", Tag::Int(4)),
-        ]);
-        let Tag::Compound(patch) = Tag::compound([("bundleapi:custom_bundle_contents", contents)])
-        else {
-            unreachable!()
-        };
-        let mut pouch = host.stack(POUCH, 1);
-        pouch.set_components(patch).expect("the pouch's contents");
-        host.world.inventory[0] = Some(pouch.clone());
-        let part = crate::item_parts::JavaItemPart::new(
-            Arc::clone(&java.state),
-            Arc::clone(&java.client),
-            POUCH.to_owned(),
-        );
+    on_a_big_stack_within(
+        "item-part-runes-pouch-use",
+        std::time::Duration::from_secs(30),
+        move || {
+            let jar = Arc::new(NativeJar::from_path(Path::new(&jar_path)).expect("load RUNES_JAR"));
+            let java = java_booted(jar);
+            with_bridge(&java, &[], || {
+                let mut host = MenuTestHost::new(&[POUCH, FROST, FIRE], &[]);
+                host.level_random = Some(mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED));
+                let rune = |id: &str, count: i32| {
+                    Tag::compound([
+                        ("id", Tag::String(JavaString::from(id))),
+                        ("count", Tag::Int(count)),
+                    ])
+                };
+                let contents = Tag::compound([
+                    ("content", Tag::List(vec![rune(FROST, 10), rune(FIRE, 40)])),
+                    ("size_multiplier", Tag::Int(4)),
+                ]);
+                let Tag::Compound(patch) =
+                    Tag::compound([("bundleapi:custom_bundle_contents", contents)])
+                else {
+                    unreachable!()
+                };
+                let mut pouch = host.stack(POUCH, 1);
+                pouch.set_components(patch).expect("the pouch's contents");
+                host.world.inventory[0] = Some(pouch.clone());
+                let part = crate::item_parts::JavaItemPart::new(
+                    Arc::clone(&java.state),
+                    Arc::clone(&java.client),
+                    POUCH.to_owned(),
+                );
 
-        let result = part.server_use(&mut host, UUID, Hand::Main, &pouch);
-        // Stopped before `use` answered: the click ends.
-        assert_eq!(result, Some(InteractionResult::Fail));
-        // Thrown by the player, in the contents' order.
-        let thrown: Vec<String> = host
-            .world
-            .drops
-            .iter()
-            .map(|stack| host.text(&Some(stack.clone())))
-            .collect();
-        assert_eq!(thrown, ["10 runes:frost_stone", "40 runes:fire_stone"]);
-        // `ServerPlayer.drop`'s stats after each throw; `ITEM_USED` came after the draw.
-        assert_eq!(
-            host.world.stats,
-            [
-                (StatType::Dropped, FROST.to_owned(), 10),
-                (StatType::Custom, "minecraft:drop".to_owned(), 1),
-                (StatType::Dropped, FIRE.to_owned(), 40),
-                (StatType::Custom, "minecraft:drop".to_owned(), 1),
-            ]
-        );
-        // No sound: its pitch was the counted draw. The live stream still moved by exactly that
-        // one draw, which Java made.
-        assert_eq!(host.sounds, []);
-        let mut level_random = mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED);
-        level_random.next_float();
-        assert_eq!(
-            host.level_random.as_mut().unwrap().next_long(),
-            level_random.next_long()
-        );
-        // The pouch in the hand is empty again: its cleared contents equal the prototype's, so
-        // no component patch is left.
-        let held = host.world.inventory[0]
-            .clone()
-            .expect("the pouch is still held");
-        assert_eq!(host.text(&Some(held.clone())), "1 runes:small_rune_pouch");
-        assert!(held.components().is_none(), "{:?}", held.components());
-        // Counted: the SDK's `drop_stack` takes no `Prediction` (each throw), and the draw.
-        assert_eq!(
-            counted(&java),
-            [
-                ("bridge: use_item:drop prediction".to_owned(), 2),
-                (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1),
-            ]
-        );
-        assert_eq!(take_failures(&java), []);
-    });
+                // `drop_stack` synchronously fires `Hooks::entity_join_level`, which acquires
+                // `java.state`. Holding `self.lock()` across `drop_stack` deadlocks here and hits
+                // the timeout guard.
+                let result = part.server_use(&mut host, UUID, Hand::Main, &pouch);
+                // Stopped before `use` answered: the click ends.
+                assert_eq!(result, Some(InteractionResult::Fail));
+                // Thrown by the player, in the contents' order.
+                let thrown: Vec<String> = host
+                    .world
+                    .drops
+                    .iter()
+                    .map(|stack| host.text(&Some(stack.clone())))
+                    .collect();
+                assert_eq!(thrown, ["10 runes:frost_stone", "40 runes:fire_stone"]);
+                // Re-entrant `entity_join_level` ran for both dropped item entities without
+                // deadlocking.
+                {
+                    let state = java.state.lock().unwrap();
+                    assert!(state.entity_incarnation(1000).is_some());
+                    assert!(state.entity_incarnation(1001).is_some());
+                }
+                // `ServerPlayer.drop`'s stats after each throw; `ITEM_USED` came after the draw.
+                assert_eq!(
+                    host.world.stats,
+                    [
+                        (StatType::Dropped, FROST.to_owned(), 10),
+                        (StatType::Custom, "minecraft:drop".to_owned(), 1),
+                        (StatType::Dropped, FIRE.to_owned(), 40),
+                        (StatType::Custom, "minecraft:drop".to_owned(), 1),
+                    ]
+                );
+                // No sound: its pitch was the counted draw. The live stream still moved by exactly
+                // that one draw, which Java made.
+                assert_eq!(host.sounds, []);
+                let mut level_random = mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED);
+                level_random.next_float();
+                assert_eq!(
+                    host.level_random.as_mut().unwrap().next_long(),
+                    level_random.next_long()
+                );
+                // The pouch in the hand is empty again: its cleared contents equal the prototype's,
+                // so no component patch is left.
+                let held = host.world.inventory[0]
+                    .clone()
+                    .expect("the pouch is still held");
+                assert_eq!(host.text(&Some(held.clone())), "1 runes:small_rune_pouch");
+                assert!(held.components().is_none(), "{:?}", held.components());
+                // Counted: the SDK's `drop_stack` takes no `Prediction` (each throw), and the draw.
+                assert_eq!(
+                    counted(&java),
+                    [
+                        ("bridge: use_item:drop prediction".to_owned(), 2),
+                        (crate::runtime::DRAW_AFTER_DEFERRED_EFFECT.to_owned(), 1),
+                    ]
+                );
+                assert_eq!(take_failures(&java), []);
+            });
+        },
+    );
 }
 
 /// The item-part fixture jar's `HorizonJava` and the `JavaItemPart` of its item `id`.
@@ -3293,6 +3622,518 @@ fn a_failing_on_destroyed_keeps_sunrises_baseline_and_counts() {
                 failures[0].failure.contains("IllegalStateException")
                     && failures[0].failure.contains("onDestroyed threw"),
                 "{failures:?}"
+            );
+        });
+    });
+}
+
+/// BUGS-3d34-round5 Bug A: `use_item` must drop the mod's state lock before calling
+/// `player.drop_stack` (and other mutating host operations). On Sunrise, `drop_stack` spawns the
+/// item entity synchronously on the server thread and fires `Hooks::entity_join_level`, which
+/// re-enters `HorizonJava::entity_join_level` and takes the same state lock. Before the fix this
+/// deadlocked immediately; the timeout guard turns a deadlock into a fast test failure.
+#[test]
+fn item_use_drops_reentering_entity_join_level_do_not_deadlock() {
+    on_a_big_stack_within(
+        "item-part-use-reentrant-drop",
+        std::time::Duration::from_secs(15),
+        || {
+            let (java, part) = item_part("demo:dropper");
+            with_bridge(&java, &[], || {
+                let mut host = MenuTestHost::new(
+                    &["demo:dropper", "minecraft:cobblestone", "minecraft:diamond"],
+                    &[],
+                );
+                let held = host.stack("demo:dropper", 2);
+                host.world.inventory[0] = Some(held.clone());
+
+                let result = part.server_use(&mut host, UUID, Hand::Main, &held);
+                assert_eq!(result, Some(InteractionResult::Consume));
+                assert_eq!(
+                    host.text(&host.world.inventory[0]),
+                    "1 demo:dropper",
+                    "held stack shrunk by 1"
+                );
+                let dropped: Vec<String> = host
+                    .world
+                    .drops
+                    .iter()
+                    .map(|stack| host.text(&Some(stack.clone())))
+                    .collect();
+                assert_eq!(dropped, ["3 minecraft:cobblestone", "2 minecraft:diamond"]);
+                assert_eq!(
+                    host.world.stats,
+                    [
+                        (StatType::Dropped, "minecraft:cobblestone".to_owned(), 3),
+                        (StatType::Custom, "minecraft:drop".to_owned(), 1),
+                        (StatType::Dropped, "minecraft:diamond".to_owned(), 2),
+                        (StatType::Custom, "minecraft:drop".to_owned(), 1),
+                    ]
+                );
+                // Both synchronous `entity_join_level` dispatches acquired the lock and registered
+                // their dropped item entities.
+                {
+                    let state = java.state.lock().unwrap();
+                    assert!(state.entity_incarnation(1000).is_some());
+                    assert!(state.entity_incarnation(1001).is_some());
+                }
+                assert_eq!(
+                    counted(&java),
+                    [("bridge: use_item:drop prediction".to_owned(), 2)]
+                );
+            });
+        },
+    );
+}
+
+/// BUGS-3d34-round5 Bug B: item click overrides across all four vanilla menus using MC 26.3's
+/// `javap`-verified slot layouts:
+/// - `InventoryMenu` (window 0): `9..=35` main inv (`9..=35`), `36..=44` hotbar (`0..=8`),
+///   `5..=8` armour (`39..=36`), `45` offhand (`40`).
+/// - `CraftingMenu` (`minecraft:crafting`): `0` result, `1..=9` 3×3 grid, `10..=36` main inv
+///   (`9..=35`), `37..=45` hotbar (`0..=8`).
+/// - `ChestMenu.threeRows` (`minecraft:generic_9x3`): `0..=26` chest, `27..=53` main inv
+///   (`9..=35`), `54..=62` hotbar (`0..=8`).
+/// - `AbstractFurnaceMenu` (`minecraft:furnace`): `0` input, `1` fuel, `2` result, `3..=29` main
+///   inv (`9..=35`), `30..=38` hotbar (`0..=8`).
+///
+/// Verifies:
+/// 1. Under Sunrise `3d34bbe63d`'s crafting-table bug (`CraftingLiftedToWindow0`), `slot_backing`
+///    returns `Player(index + 1)` (or `Player(0)` for inv 35, `Player(40)` for hotbar 8) which
+///    disagrees with `click.container_slot`; the bridge refuses (`Flow::Cancel`, `handled: true`,
+///    `Keep`/`Keep`) and counts `item_stacked_on_other:slot backing mismatch` instead of reading
+///    the next slot and corrupting the clicked slot.
+/// 2. When `slot_backing` matches `container_slot` but `inventory[index]` disagrees with
+///    `click.clicked`, the bridge refuses and counts `item_stacked_on_other:clicked slot mismatch`.
+/// 3. Valid clicks in Inventory, Chest, Furnace, and fixed CraftingMenu resolve the exact right
+///    inventory slot with 0 counted calls.
+/// 4. When Java returns `false` without mutating either stack (even with an opaque vanilla
+///    component on the stack), the bridge sends `Keep`/`Keep` and never writes back.
+#[test]
+fn item_clicks_in_inventory_chest_furnace_and_crafting_table_respect_menu_layouts() {
+    use mod_api::{
+        ClickedStackResult, Flow, JavaString, StackResult, StackedOnOther, StackedOnOtherResult,
+        Tag,
+    };
+    on_a_big_stack("item-part-menu-layouts", || {
+        let jar = Arc::new(
+            NativeJar::from_bytes(&javac_jar(&[ITEM_PART_SOURCES], "demo.ItemProbe"))
+                .expect("load the fixture jar"),
+        );
+        let java = java_with(jar);
+        with_bridge(&java, &[], || {
+            let mut host = MenuTestHost::new(
+                &[
+                    "demo:fitter",
+                    "demo:noop_clicker",
+                    "minecraft:cobblestone",
+                    "minecraft:shulker_box",
+                    "minecraft:diamond",
+                ],
+                &[],
+            );
+            let fitter = crate::item_parts::JavaItemPart::new(
+                Arc::clone(&java.state),
+                Arc::clone(&java.client),
+                "demo:fitter".to_owned(),
+            );
+            let noop = crate::item_parts::JavaItemPart::new(
+                Arc::clone(&java.state),
+                Arc::clone(&java.client),
+                "demo:noop_clicker".to_owned(),
+            );
+
+            // Place cobblestone at hotbar 4, shulker_box at hotbar 5, cobblestone at inv 35,
+            // shulker_box at inv 0 (hotbar 0), and cobblestone at hotbar 8. Because `demo:fitter`
+            // returns `true` for cobblestone and `false` for shulker_box, an off-by-one into the
+            // adjacent slot flips the return value!
+            host.world.inventory[4] = Some(host.stack("minecraft:cobblestone", 1));
+            host.world.inventory[5] = Some(host.stack("minecraft:shulker_box", 1));
+            host.world.inventory[35] = Some(host.stack("minecraft:cobblestone", 1));
+            host.world.inventory[0] = Some(host.stack("minecraft:shulker_box", 1));
+            host.world.inventory[8] = Some(host.stack("minecraft:cobblestone", 1));
+
+            // 1. Valid clicks in all four menus (MC 26.3 javap layouts):
+            //    (label, vanilla_menu, menu_slot_for_hotbar_4, menu_slot_for_inv_35, menu_slot_for_hotbar_8)
+            let menus = [
+                ("inventory", None, 40usize, 35usize, 44usize),
+                (
+                    "crafting",
+                    Some(VanillaMenu::Crafting { window: 2 }),
+                    41,
+                    36,
+                    45,
+                ),
+                (
+                    "chest_9x3",
+                    Some(VanillaMenu::Chest3 { window: 3 }),
+                    58,
+                    53,
+                    62,
+                ),
+                (
+                    "furnace",
+                    Some(VanillaMenu::Furnace { window: 4 }),
+                    34,
+                    29,
+                    38,
+                ),
+            ];
+            for (name, menu, hb4, inv35, hb8) in menus {
+                host.vanilla_menu = menu;
+                for (slot, container_slot) in [(hb4, 4usize), (inv35, 35), (hb8, 8)] {
+                    let click = StackedOnOther::new(
+                        Some(UUID),
+                        Some(ENTITY_ID as i32),
+                        slot,
+                        0,
+                        container_slot,
+                        false,
+                        Some(host.stack("demo:fitter", 1)),
+                        host.world.inventory[container_slot].clone(),
+                    );
+                    let mut result = StackedOnOtherResult::default();
+                    let flow = fitter.server_click(
+                        &mut host,
+                        &click,
+                        &mut result,
+                        crate::runtime::ItemClickDirection::CarriedOnOther,
+                    );
+                    assert!(
+                        matches!(flow, Flow::Cancel) && result.handled,
+                        "{name} slot {slot} -> inv {container_slot} must read cobblestone (fits=true)"
+                    );
+                    assert_eq!(result.clicked, ClickedStackResult::Keep, "{name}");
+                    assert_eq!(result.carried, StackResult::Keep, "{name}");
+                }
+            }
+            assert_eq!(counted(&java), []);
+
+            // 2. Untouched stack with an opaque vanilla component (`minecraft:custom_name`) sends
+            //    Keep/Keep when Java returns `false` without mutating it.
+            host.vanilla_menu = None;
+            let mut named_noop = host.stack("demo:noop_clicker", 1);
+            let Tag::Compound(patch) = Tag::compound([(
+                "minecraft:custom_name",
+                Tag::String(JavaString::from("Bag")),
+            )]) else {
+                unreachable!()
+            };
+            named_noop.set_components(patch).expect("custom_name patch");
+            host.world.inventory[4] = Some(named_noop.clone());
+            let mut named_diamond = host.stack("minecraft:diamond", 2);
+            let Tag::Compound(dpatch) = Tag::compound([(
+                "minecraft:custom_name",
+                Tag::String(JavaString::from("Gem")),
+            )]) else {
+                unreachable!()
+            };
+            named_diamond
+                .set_components(dpatch)
+                .expect("diamond custom_name patch");
+            let click = StackedOnOther::new(
+                Some(UUID),
+                Some(ENTITY_ID as i32),
+                40,
+                0,
+                4,
+                true,
+                Some(named_diamond),
+                Some(named_noop.clone()),
+            );
+            let mut result = StackedOnOtherResult::default();
+            let flow = noop.server_click(
+                &mut host,
+                &click,
+                &mut result,
+                crate::runtime::ItemClickDirection::OtherStackedOnMe,
+            );
+            assert!(matches!(flow, Flow::Continue) && !result.handled);
+            assert_eq!(result.clicked, ClickedStackResult::Keep);
+            assert_eq!(result.carried, StackResult::Keep);
+            assert_eq!(counted(&java), []);
+
+            // 3. Sunrise `3d34bbe63d` crafting-table bug (`CraftingLiftedToWindow0`):
+            //    hotbar 4 (CraftingMenu slot 41 -> InventoryMenu Player(5)),
+            //    inv 35 (CraftingMenu slot 36 -> InventoryMenu Player(0)),
+            //    hotbar 8 (CraftingMenu slot 45 -> InventoryMenu Player(40) offhand).
+            //    Every one must be refused with Keep/Keep and counted, never writing the next slot.
+            host.vanilla_menu = Some(VanillaMenu::CraftingLiftedToWindow0);
+            host.world.inventory[4] = Some(host.stack("demo:noop_clicker", 1));
+            host.world.inventory[5] = Some(host.stack("minecraft:diamond", 2));
+            host.world.inventory[35] = Some(host.stack("demo:noop_clicker", 1));
+            host.world.inventory[0] = Some(host.stack("minecraft:diamond", 7));
+            host.world.inventory[8] = Some(host.stack("demo:noop_clicker", 1));
+            for (slot, container_slot) in [(41usize, 4usize), (36, 35), (45, 8)] {
+                let click = StackedOnOther::new(
+                    Some(UUID),
+                    Some(ENTITY_ID as i32),
+                    slot,
+                    0,
+                    container_slot,
+                    true,
+                    None,
+                    host.world.inventory[container_slot].clone(),
+                );
+                let mut result = StackedOnOtherResult::default();
+                let flow = noop.server_click(
+                    &mut host,
+                    &click,
+                    &mut result,
+                    crate::runtime::ItemClickDirection::OtherStackedOnMe,
+                );
+                assert!(
+                    matches!(flow, Flow::Cancel) && result.handled,
+                    "crafting lifted slot {slot} (container_slot {container_slot}) must be refused"
+                );
+                assert_eq!(result.clicked, ClickedStackResult::Keep);
+                assert_eq!(result.carried, StackResult::Keep);
+            }
+            assert_eq!(
+                counted(&java),
+                [(
+                    "bridge: item_stacked_on_other:slot backing mismatch".to_owned(),
+                    3
+                )]
+            );
+
+            // 4. Documented Sunrise crafting-table refusal (`player.container_menu() == None`):
+            //    declines cleanly without corruption.
+            host.vanilla_menu = Some(VanillaMenu::CraftingRefused);
+            let click = StackedOnOther::new(
+                Some(UUID),
+                Some(ENTITY_ID as i32),
+                41,
+                0,
+                4,
+                true,
+                None,
+                host.world.inventory[4].clone(),
+            );
+            let mut result = StackedOnOtherResult::default();
+            let flow = noop.server_click(
+                &mut host,
+                &click,
+                &mut result,
+                crate::runtime::ItemClickDirection::OtherStackedOnMe,
+            );
+            assert!(matches!(flow, Flow::Continue) && !result.handled);
+            assert_eq!(result.clicked, ClickedStackResult::Keep);
+            assert_eq!(result.carried, StackResult::Keep);
+
+            // 5. Clicked stack disagrees with `inventory[container_slot]` even when `slot_backing`
+            //    agrees: bridge refuses and counts `clicked slot mismatch`.
+            host.vanilla_menu = None;
+            let stale_click = StackedOnOther::new(
+                Some(UUID),
+                Some(ENTITY_ID as i32),
+                40,
+                0,
+                4,
+                true,
+                None,
+                Some(host.stack("minecraft:diamond", 2)),
+            );
+            let mut result = StackedOnOtherResult::default();
+            let flow = noop.server_click(
+                &mut host,
+                &stale_click,
+                &mut result,
+                crate::runtime::ItemClickDirection::OtherStackedOnMe,
+            );
+            assert!(matches!(flow, Flow::Cancel) && result.handled);
+            assert_eq!(result.clicked, ClickedStackResult::Keep);
+            assert_eq!(result.carried, StackResult::Keep);
+            assert_eq!(
+                counted(&java),
+                [
+                    (
+                        "bridge: item_stacked_on_other:clicked slot mismatch".to_owned(),
+                        1
+                    ),
+                    (
+                        "bridge: item_stacked_on_other:clicked slot rules".to_owned(),
+                        1
+                    ),
+                    (
+                        "bridge: item_stacked_on_other:slot backing mismatch".to_owned(),
+                        3
+                    ),
+                ]
+            );
+        });
+    });
+}
+
+/// BUGS-3d34-round5 Bug B end-to-end with the real Runes 1.3.2 jar:
+/// - Reproduces the exact crafting-table report: `runes:small_rune_pouch` at hotbar 4 (CraftingMenu
+///   slot 41, `container_slot = 4`) beside 2 diamonds at hotbar 5, and at main inv 35 (slot 36,
+///   `container_slot = 35`) beside 61 white wool at hotbar 0, and at hotbar 8 (slot 45,
+///   `container_slot = 8`). Under Sunrise `3d34bbe63d`'s window-0 crafting bug, every click is
+///   refused (`Flow::Cancel`, `handled: true`, `Keep`/`Keep`) and counted — never overwriting the
+///   pouch with 2 diamonds or duplicating diamonds.
+/// - In Inventory (`window 0`), Chest (`minecraft:generic_9x3`), Furnace (`minecraft:furnace`), and
+///   a non-lifted `CraftingMenu`, right-clicking 10 `runes:fire_stone` onto the pouch inserts them
+///   cleanly, and left-clicking with an empty cursor returns `Flow::Continue` with `Keep`/`Keep`.
+#[test]
+fn real_runes_pouch_clicks_across_crafting_table_inventory_chest_and_furnace() {
+    use mod_api::{ClickedStackResult, Flow, StackResult, StackedOnOther, StackedOnOtherResult};
+    let Some(jar_path) = std::env::var_os("RUNES_JAR") else {
+        eprintln!("RUNES_JAR is unset; real Runes pouch menu-click test skipped");
+        return;
+    };
+    const POUCH: &str = "runes:small_rune_pouch";
+    const FIRE: &str = "runes:fire_stone";
+    on_a_big_stack("item-part-runes-menu-clicks", move || {
+        let jar = Arc::new(NativeJar::from_path(Path::new(&jar_path)).expect("load RUNES_JAR"));
+        let java = java_booted(jar);
+        with_bridge(&java, &[], || {
+            let mut host = MenuTestHost::new(
+                &[POUCH, FIRE, "minecraft:diamond", "minecraft:white_wool"],
+                &[],
+            );
+            host.level_random = Some(mod_api::LegacyRandomSource::new(LEVEL_RANDOM_SEED));
+            let part = crate::item_parts::JavaItemPart::new(
+                Arc::clone(&java.state),
+                Arc::clone(&java.client),
+                POUCH.to_owned(),
+            );
+            let empty_pouch = host.stack(POUCH, 1);
+
+            // 1. Inventory, Chest (9x3), Furnace, and fixed CraftingMenu:
+            //    - right-click 10 fire stones onto the pouch at hotbar 4 -> inserts cleanly
+            //    - left-click empty cursor on the pouch at hotbar 4 -> unhandled, Keep/Keep
+            let valid_menus = [
+                ("inventory", None, 40usize),
+                ("crafting", Some(VanillaMenu::Crafting { window: 2 }), 41),
+                ("chest_9x3", Some(VanillaMenu::Chest3 { window: 3 }), 58),
+                ("furnace", Some(VanillaMenu::Furnace { window: 4 }), 34),
+            ];
+            for (name, menu, hb4_slot) in valid_menus {
+                host.vanilla_menu = menu;
+                host.world.inventory[4] = Some(empty_pouch.clone());
+                host.world.inventory[5] = Some(host.stack("minecraft:diamond", 2));
+
+                // Left-click empty cursor on the pouch: Java returns false, nothing changes -> Keep.
+                let left_click = StackedOnOther::new(
+                    Some(UUID),
+                    Some(ENTITY_ID as i32),
+                    hb4_slot,
+                    0,
+                    4,
+                    true,
+                    None,
+                    Some(empty_pouch.clone()),
+                );
+                let mut left_result = StackedOnOtherResult::default();
+                let left_flow = part.server_click(
+                    &mut host,
+                    &left_click,
+                    &mut left_result,
+                    crate::runtime::ItemClickDirection::OtherStackedOnMe,
+                );
+                assert!(
+                    matches!(left_flow, Flow::Continue) && !left_result.handled,
+                    "{name}: left click on empty pouch should pass to vanilla pickup"
+                );
+                assert_eq!(left_result.clicked, ClickedStackResult::Keep, "{name}");
+                assert_eq!(left_result.carried, StackResult::Keep, "{name}");
+
+                // Right-click 10 fire stones onto the pouch: inserted into the pouch.
+                let right_click = StackedOnOther::new(
+                    Some(UUID),
+                    Some(ENTITY_ID as i32),
+                    hb4_slot,
+                    0,
+                    4,
+                    false,
+                    Some(host.stack(FIRE, 10)),
+                    Some(empty_pouch.clone()),
+                );
+                let mut right_result = StackedOnOtherResult::default();
+                let right_flow = part.server_click(
+                    &mut host,
+                    &right_click,
+                    &mut right_result,
+                    crate::runtime::ItemClickDirection::OtherStackedOnMe,
+                );
+                assert!(
+                    matches!(right_flow, Flow::Cancel) && right_result.handled,
+                    "{name}: right-click inserting fire stones into pouch should succeed"
+                );
+                assert_eq!(right_result.carried, StackResult::Set(None), "{name}");
+                let ClickedStackResult::Set(Some(updated_pouch)) = right_result.clicked else {
+                    panic!(
+                        "{name}: expected updated pouch stack, got {:?}",
+                        right_result.clicked
+                    );
+                };
+                assert_eq!(
+                    host.text(&Some(updated_pouch.clone())),
+                    format!("1 {POUCH}")
+                );
+                assert!(
+                    updated_pouch.components().is_some(),
+                    "{name}: pouch must carry bundleapi:custom_bundle_contents"
+                );
+            }
+            assert_eq!(counted(&java), []);
+
+            // 2. Sunrise `3d34bbe63d` crafting-table bug (`CraftingLiftedToWindow0`):
+            //    Reproduce BUGS-3d34-round5 verbatim:
+            //    - hotbar 4 (pouch) + hotbar 5 (2 diamonds): left-click empty cursor & right-click 10 fire stones
+            //    - inv 35 (pouch) + hotbar 0 (61 white wool): left-click empty cursor
+            //    - hotbar 8 (pouch): left-click empty cursor (slot 45 -> InventoryMenu Player(40))
+            host.vanilla_menu = Some(VanillaMenu::CraftingLiftedToWindow0);
+            host.world.inventory[0] = Some(host.stack("minecraft:white_wool", 61));
+            host.world.inventory[4] = Some(empty_pouch.clone());
+            host.world.inventory[5] = Some(host.stack("minecraft:diamond", 2));
+            host.world.inventory[8] = Some(empty_pouch.clone());
+            host.world.inventory[35] = Some(empty_pouch.clone());
+
+            let bug_cases = [
+                ("hb4 left-click", 41usize, 4usize, true, None),
+                (
+                    "hb4 right-click insert",
+                    41,
+                    4,
+                    false,
+                    Some(host.stack(FIRE, 10)),
+                ),
+                ("inv35 left-click (wraps to 0)", 36, 35, true, None),
+                ("hb8 left-click (maps to offhand 40)", 45, 8, true, None),
+            ];
+            for (case, slot, container_slot, primary, carried) in bug_cases {
+                let click = StackedOnOther::new(
+                    Some(UUID),
+                    Some(ENTITY_ID as i32),
+                    slot,
+                    0,
+                    container_slot,
+                    primary,
+                    carried,
+                    Some(empty_pouch.clone()),
+                );
+                let mut result = StackedOnOtherResult::default();
+                let flow = part.server_click(
+                    &mut host,
+                    &click,
+                    &mut result,
+                    crate::runtime::ItemClickDirection::OtherStackedOnMe,
+                );
+                assert!(
+                    matches!(flow, Flow::Cancel) && result.handled,
+                    "{case}: must refuse instead of corrupting slot {container_slot}"
+                );
+                assert_eq!(result.clicked, ClickedStackResult::Keep, "{case}");
+                assert_eq!(result.carried, StackResult::Keep, "{case}");
+            }
+            assert_eq!(
+                counted(&java),
+                [(
+                    "bridge: item_stacked_on_other:slot backing mismatch".to_owned(),
+                    4
+                )]
             );
         });
     });

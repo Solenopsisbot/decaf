@@ -203,6 +203,12 @@ pub struct ItemClickOutcome {
     pub slot: Value,
     /// The cursor afterwards (the same object, changed in place, unless the override set it).
     pub carried: Value,
+    /// True when Java neither took from nor mutated the clicked slot stack (and the stack carries
+    /// no jar-object component references that could have been mutated in place).
+    pub slot_unchanged: bool,
+    /// True when Java neither replaced nor mutated the carried stack (and the stack carries no
+    /// jar-object component references that could have been mutated in place).
+    pub carried_unchanged: bool,
     /// How many times `Slot.onTake` ran on the clicked slot (`Slot.safeTake`).
     pub takes: usize,
     /// The player's inventory afterwards.
@@ -254,6 +260,28 @@ pub struct CountedDrawStop {
 /// handle, so a component `ItemStack.set` replaced reads differently) and opaque markers.
 pub(crate) fn held_fingerprint(host: &StdHost, stack: &Value) -> Option<String> {
     recipe_models::read_live_stack_opt(host, stack).map(|live| format!("{live:?}"))
+}
+
+/// Whether `after_value` is provably unchanged from `before_value` (same handle, identical
+/// [`held_fingerprint`], and no decoded jar-object component references in its patch whose fields
+/// could have been mutated in place).
+fn stack_unchanged_without_jar_objects(
+    host: &StdHost,
+    before_value: &Value,
+    before_fp: &Option<String>,
+    after_value: &Value,
+) -> bool {
+    if after_value != before_value || held_fingerprint(host, after_value) != *before_fp {
+        return false;
+    }
+    let Some(live) = recipe_models::read_live_stack_opt(host, after_value) else {
+        return true;
+    };
+    live.patch
+        .entries
+        .values()
+        .flatten()
+        .all(|value| !matches!(value, Value::Ref(_) | Value::Host(_)))
 }
 
 /// A dropped item entity destroyed while holding `stack`, for [`NativeJar::item_destroyed`].
@@ -857,6 +885,8 @@ impl NativeJar {
                 "item click override: the facts give no stack for the clicked slot".into(),
             ));
         };
+        let slot_before_fp = held_fingerprint(host, &slot_stack);
+        let carried_before_fp = held_fingerprint(host, &click.carried);
         let access = fresh_handle("carried-slot-access");
         let _guard = push_frame(Frame {
             access: Some((access.clone(), Carried::Cell(click.carried.clone()))),
@@ -873,7 +903,7 @@ impl NativeJar {
         let roots = [
             item.clone(),
             click.carried.clone(),
-            slot_stack,
+            slot_stack.clone(),
             access.clone(),
         ];
         let (handled, call, effects, report) = self.run_server_item_call(
@@ -936,11 +966,17 @@ impl NativeJar {
             .iter()
             .filter(|effect| matches!(effect, LiveMenuEffect::SlotTaken { .. }))
             .count();
+        let slot_unchanged = takes == 0
+            && stack_unchanged_without_jar_objects(host, &slot_stack, &slot_before_fp, &slot);
+        let carried_unchanged =
+            stack_unchanged_without_jar_objects(host, &click.carried, &carried_before_fp, &carried);
         let inventory = crate::runtime::live_menu::inventory_out(host, &call.inventory, facts);
         Ok(ItemClickOutcome {
             handled: handled.unwrap_or(false),
             slot,
             carried,
+            slot_unchanged,
+            carried_unchanged,
             takes,
             inventory,
             effects: effects
