@@ -48,6 +48,10 @@ pub enum ContentBuilderEvent {
     },
     /// A data-component builder built the type `built`.
     Built { builder: String, built: String },
+    /// A data-component builder's `persistent(codec)` was given the non-null `codec`: the codec
+    /// object itself, which encodes the type's values (`dfu_codec::encode_value_nbt`). `Flag`
+    /// carries only its label.
+    PersistentCodec { builder: String, codec: Value },
     /// An attachment type was registered under `id`, with the flags of
     /// `builder` (if one was used) and `preset` on top.
     RegisterAttachment {
@@ -96,6 +100,12 @@ const MAX_DATA_RECIPE_BYTES: u64 = 64 * 1024;
 pub(crate) struct ContentBuilders {
     builders: BTreeMap<String, BuilderFlags>,
     components: BTreeMap<String, BuilderFlags>,
+    /// The last non-null codec each data-component builder's `persistent` was given, and the one
+    /// each type it built carries. Kept as values (not labels) so the type's component values can
+    /// be encoded; the heap roots them through this table's `Debug` text
+    /// (`StdHost::opaque_root_texts`).
+    builder_codecs: BTreeMap<String, Value>,
+    component_codecs: BTreeMap<String, Value>,
 }
 
 impl ContentBuilders {
@@ -128,7 +138,18 @@ impl ContentBuilders {
             ContentBuilderEvent::Built { builder, built } => {
                 if self.components.len() < MAX_CONTENT_BUILDERS {
                     let flags = self.builders.get(&builder).cloned().unwrap_or_default();
+                    if let Some(codec) = self.builder_codecs.get(&builder) {
+                        self.component_codecs.insert(built.clone(), codec.clone());
+                    }
                     self.components.insert(built, flags);
+                }
+                None
+            }
+            ContentBuilderEvent::PersistentCodec { builder, codec } => {
+                if self.builder_codecs.len() < MAX_CONTENT_BUILDERS
+                    || self.builder_codecs.contains_key(&builder)
+                {
+                    self.builder_codecs.insert(builder, codec);
                 }
                 None
             }
@@ -157,6 +178,12 @@ impl ContentBuilders {
                 })
             }
         }
+    }
+
+    /// The persistent codec of a data component type the interpreter built, when its builder's
+    /// `persistent` was given one.
+    pub(crate) fn component_codec(&self, built: &str) -> Option<&Value> {
+        self.component_codecs.get(built)
     }
 
     /// The declaration a registered data component type carries, when the
@@ -237,6 +264,17 @@ impl<H: Host> Runtime<'_, H> {
                     "cacheEncoding" => Some("cache_encoding"),
                     _ => None,
                 };
+                if flag == Some("persistent")
+                    && let Some(codec) = args
+                        .first()
+                        .filter(|codec| !matches!(codec, Value::Ref(None)))
+                {
+                    self.host
+                        .note_content_builder(ContentBuilderEvent::PersistentCodec {
+                            builder: builder.clone(),
+                            codec: codec.clone(),
+                        });
+                }
                 if let Some(flag) = flag {
                     let codec = (flag == "persistent")
                         .then(|| codec_label(args.first()))

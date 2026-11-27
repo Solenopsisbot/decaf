@@ -288,6 +288,24 @@ pub(crate) fn instance_call(
             let comp_id = crate::runtime::recipe_models::resolve_data_component_type_id(host, type_arg)?;
             stack_component_get(host, &data.item_id, &data.patch, &comp_id).map(Ok)
         }
+        // 26.3 `DataComponentGetter.getOrDefault` (default method) offsets 0-17:
+        // `T v = get(type); return v != null ? v : defaultValue`.
+        (
+            "getOrDefault",
+            "(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;",
+        ) => {
+            let type_arg = args.first()?;
+            if matches!(type_arg, Value::Ref(None)) {
+                return Some(Err(npe()));
+            }
+            let comp_id = crate::runtime::recipe_models::resolve_data_component_type_id(host, type_arg)?;
+            let value = stack_component_get(host, &data.item_id, &data.patch, &comp_id)?;
+            Some(Ok(if matches!(value, Value::Ref(None)) {
+                args.get(1)?.clone()
+            } else {
+                value
+            }))
+        }
         _ => None,
     }
 }

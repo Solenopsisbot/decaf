@@ -1,7 +1,11 @@
-# Java item parts: a jar `Item`'s own overrides in Sunrise (design, not built)
+# Java item parts: a jar `Item`'s own overrides in Sunrise
 
-Status: design for BUGS-3d34-round2 #2 (Runes' rune pouches act as plain items). Nothing here is
-implemented yet. Bugs #3 (pouch recipes) and #4 (pouch lore) are fixed separately, in the bake and
+Status: design for BUGS-3d34-round2 #2 (Runes' rune pouches act as plain items). Steps 3-6 are
+built (`crates/horizon-native-java/src/item_parts.rs`, `mod/src/item_parts.rs`; tests
+`fixture_item_parts` against a JDK 25 oracle and `fixture_item_parts_runes` on the real jar);
+steps 1-2 are built by #671 (`jar_components.rs`, `bootstrap_mixins.rs`), whose recorded
+`Item.Properties.component` objects are the item parts' jar-item prototypes; steps 7-8 are not
+yet. Bugs #3 (pouch recipes) and #4 (pouch lore) are fixed separately, in the bake and
 in the runtime's `Item.Properties` model.
 
 ## What the jar defines
@@ -56,10 +60,26 @@ methods, and nothing in it names a mod.
    bake writes `served_by = "horizon_java"` into the packages of the namespaces those types are in,
    so the SDK's `NamespaceAuthority` lets `horizon_java` register them. Values are stored as the
    NBT the jar's own codec encodes, run through the DFU models (#623 added encode).
+   *Built:* the runtime keeps each type's persistent codec (`declarations_content.rs`), encodes
+   with `NbtOps` semantics (`dfu_codec::encode_value_nbt`, checked against JDK 25 in
+   `fixture_jar_component_types.rs`) and lists the registered types
+   (`StdHost::jar_component_types`, the probe's `content.component_types`); the mod registers
+   them in `Hooks::component_types` (`mod/src/content.rs`), and `mod/sunrise-mod.toml` sets
+   `[native] serves_content = true` so Sunrise accepts the bake's `served_by`. A Mixin
+   `@Inject(method = "<clinit>", at = @At("TAIL"))` into a game class (Bundle API's
+   `DataComponentTypesMixin`) runs in one pass over every loaded jar (its own mods and nested
+   ones), before any jar's entrypoint, in the order the server's bootstrap finishes those classes
+   (`bootstrap_mixins.rs`, `bootstrap_clinit_order_26_3.txt` from
+   `tools/trace_bootstrap_clinit_order.py`); any other shape that would apply is counted.
 2. **Default components.** The bake writes the item's component patch for jar types too (here
    `{"bundleapi:custom_bundle_contents": {"content": [], "size_multiplier": 4}}`). That has to
    wait for step 1, because Sunrise refuses an item declaration with an unregistered component
    type, and with it the whole package.
+   *Built:* `NativeJar::declare_jar_component_defaults` adds `component:<type>` to each item's
+   declaration in the JSON Sunrise's `json_to_tag` reads back as exactly that NBT
+   (`jar_components::content_json`); a default it can't carry exactly is counted
+   (`DataComponentType#codec`) and left out, and the bake drops (with a reason) any item
+   component whose type is neither vanilla nor one the runtime registered.
 3. **One `ItemPart` per jar item whose class overrides a hook**, attached the way
    `JavaBlockUsePart` is attached to jar blocks (`mod/src/content.rs`
    `attachable_registrations`):
@@ -103,8 +123,8 @@ fullness property against a Fabric run.
 
 None of the eight steps needs a new Sunrise API at the `3d34bbe63d` SDK, as far as these reads
 show: the item-part hooks, NBT component types, served-namespace authority, item model property
-registration and tooltip factories are all there. One assumption still needs checking when step 5
-is built. The player inventory "has no registered type" for `menu_slot_rules`, so the part must be
+registration and tooltip factories are all there. One assumption needed checking when step 5
+was built; it is settled below. The player inventory "has no registered type" for `menu_slot_rules`, so the part must be
 able to read the clicked inventory slot's `mayPlace` and `getMaxStackSize(stack)` from the
 `item_stacked_on_other` host. If it can't, the smallest addition is a read-only
 `StackedOnOther::slot_rules(&ItemStack) -> { may_place, max_stack_size, may_pickup }` on the event,
@@ -112,3 +132,19 @@ answered by the slot the click resolved.
 
 The upstream gap these bugs did show is the unread `fabric:load_conditions` key
 ([mod-plan.md](mod-plan.md), "Fork seams needed").
+
+### Settled: the clicked slot's rules from `item_stacked_on_other`
+
+On the **server** the part can read them: `PlayerRef::container_menu` (SDK
+`host/player_menus.rs:18`), `MenuRef::kind` (`host/menus.rs:85`), `slot_backing` (`:104`),
+`slot_holds` (`:112`) and `slot_gives` (`:116`). The bridge answers a click only on a plain
+`Slot` over `Inventory.items` 0..36 in the inventory menu or a vanilla menu type, and only when
+`slot_gives` is true and `slot_holds` equals a plain slot's `min(99, item max)` for the stacks the
+click holds (so a menu part that changed the rules counts instead of being guessed). Anything
+else counts.
+
+On the **client** (prediction) it can't: those reads are `Side: server`. The prediction counts
+and the client predicts vanilla until the server's answer corrects it. The smallest upstream
+addition is to make `menu_slot_holds` and `menu_slot_gives` (`host/menus.rs:105-116`) `Side: both`,
+answered on the predicting client from the local menu's `Slot` objects, as `menu_slot`
+(`:91`) already is.

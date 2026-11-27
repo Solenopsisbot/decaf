@@ -61,6 +61,10 @@ pub enum RuntimeComponentValue {
     /// The stack holds a component value this boundary cannot represent accurately; callers must
     /// count and skip rather than dropping the component.
     Unsupported,
+    /// A jar data component type's value as the NBT its own persistent codec writes
+    /// (`item_parts.rs`): only [`crate::runtime::NativeJar::make_item_stack`] decodes it, which runs the
+    /// codec; a host-only conversion keeps it opaque.
+    Nbt(crate::runtime::Nbt),
 }
 
 /// Extracted `ItemStack` data for converting a Java stack across the game boundary.
@@ -267,9 +271,26 @@ pub(crate) struct RecipeState {
     pub(crate) tooltip_displays: BTreeMap<String, TooltipDisplayData>,
     pub(crate) extra_item_tags: BTreeMap<String, Vec<String>>,
     pub(crate) loaded: Option<LoadedRecipeCache>,
+    /// Prototype values of jar data component types, by item id, as the game holds them
+    /// (`Item.components()`): what the item-part bridge read from the game
+    /// (`NativeJar::make_item_stack`). They answer before the runtime's own prototype model.
+    pub(crate) game_prototypes: BTreeMap<String, BTreeMap<String, Option<Value>>>,
 }
 
 impl RecipeState {
+    /// Record the game's prototype values of jar component types for `item_id`
+    /// ([`RecipeState::game_prototypes`]).
+    pub(crate) fn set_game_prototype(
+        &mut self,
+        item_id: &str,
+        values: BTreeMap<String, Option<Value>>,
+    ) {
+        self.game_prototypes
+            .entry(item_id.to_owned())
+            .or_default()
+            .extend(values);
+    }
+
     fn next_key(&mut self, prefix: &str) -> String {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -405,6 +426,11 @@ impl RecipeState {
         }
         for tpl in self.templates.values() {
             for val in tpl.patch.entries.values().flatten() {
+                push_val(val, out);
+            }
+        }
+        for values in self.game_prototypes.values() {
+            for val in values.values().flatten() {
                 push_val(val, out);
             }
         }
@@ -818,6 +844,19 @@ pub(crate) fn prototype_component(
 ) -> Option<Option<Value>> {
     if item_id == "minecraft:air" || !is_known_item_id(host, item_id) {
         return None;
+    }
+    // A jar item's own `Item.Properties.component(jarType, value)`: the object it set.
+    if let Some(value) = crate::runtime::jar_components::recorded_item_default(host, item_id, comp_id) {
+        return value;
+    }
+    // What the game holds for the item, as the item-part bridge read it (`item_parts.rs`).
+    if let Some(value) = host
+        .recipes
+        .game_prototypes
+        .get(item_id)
+        .and_then(|values| values.get(comp_id))
+    {
+        return Some(value.clone());
     }
     match comp_id {
         "minecraft:max_stack_size" => {
@@ -3361,7 +3400,7 @@ pub(crate) fn build_host_stack(
                 });
                 built_patch.entries.insert(comp_id, Some(handle));
             }
-            Some(RuntimeComponentValue::Unsupported) => {
+            Some(RuntimeComponentValue::Unsupported | RuntimeComponentValue::Nbt(_)) => {
                 opaque_components = true;
                 opaque_set.insert(comp_id);
             }

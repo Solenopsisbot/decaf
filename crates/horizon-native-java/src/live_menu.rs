@@ -124,7 +124,7 @@ pub enum Prediction {
 }
 
 impl Prediction {
-    fn from_value(value: &Value) -> Option<Self> {
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         match expect_ref(value)?.strip_prefix(PREDICTION_PREFIX)? {
             "PREDICTED" => Some(Self::Predicted),
             "SERVER_ONLY" => Some(Self::ServerOnly),
@@ -3287,7 +3287,7 @@ fn pickup_or_quick_move(
     // second `getItem()` still runs; `ServerPlayer` keeps `Player`'s empty body.
     slot_get_item(rt, &slot)?;
     server_player(rt, player)?;
-    if !try_item_click_behaviour_override(rt, &slot_item, &carried)? {
+    if !try_item_click_behaviour_override(rt, menu, player, primary, &slot, &slot_item, &carried)? {
         if stack_is_empty(rt, &slot_item)? {
             // 801-849.
             if !stack_is_empty(rt, &carried)? {
@@ -3429,19 +3429,86 @@ fn click_override_is_false(rt: &mut Runtime<'_, impl Host>, stack: &Value) -> R<
 }
 
 /// 26.3 `AbstractContainerMenu.tryItemClickBehaviourOverride` offsets 0-64: the carried
-/// stack's `overrideStackedOnOther`, then the slot stack's `overrideOtherStackedOnMe`, each
-/// behind `isItemEnabled(level.enabledFeatures())`. Answered only when both are `Item`'s own
-/// `false`; anything else (a bundle, a jar item's override) counts.
+/// stack's `overrideStackedOnOther(slot, action, player)`, then the slot stack's
+/// `overrideOtherStackedOnMe(carried, slot, action, player, createCarriedSlotAccess())`, each
+/// behind `isItemEnabled(level.enabledFeatures())`. `Item`'s own `false` is answered without
+/// running anything; a jar item's override runs here, exactly where vanilla runs it, with the
+/// cursor's `SlotAccess` over this menu (`item_parts.rs`). A vanilla bundle's override, a jar
+/// item whose required features may be off, or an override that counted, counts.
+#[allow(clippy::too_many_arguments)]
 fn try_item_click_behaviour_override(
     rt: &mut Runtime<'_, impl Host>,
+    menu: &Value,
+    player: &Value,
+    primary: bool,
+    slot: &Value,
     slot_item: &Value,
     carried: &Value,
 ) -> R<bool> {
-    if click_override_is_false(rt, carried)? && click_override_is_false(rt, slot_item)? {
-        Ok(false)
-    } else {
-        Err(counted())
+    use crate::item_parts::{ItemHook, item_enabled_in_any_level, jar_override_owner};
+    let action = Value::Ref(Some(format!(
+        "enum/net/minecraft/world/inventory/ClickAction/{}",
+        if primary { "PRIMARY" } else { "SECONDARY" }
+    )));
+    for (stack, hook) in [
+        (carried, ItemHook::StackedOnOther),
+        (slot_item, ItemHook::OtherStackedOnMe),
+    ] {
+        if click_override_is_false(rt, stack)? {
+            continue;
+        }
+        // `isItemEnabled(level.enabledFeatures())`: an item outside the vanilla flag needs the
+        // level's features, which the embedder doesn't give.
+        if item_enabled_in_any_level(std_host(rt)?, stack) != Some(true) {
+            return Err(counted());
+        }
+        let item = stack_call(
+            rt,
+            "getItem",
+            "()Lnet/minecraft/world/item/Item;",
+            stack,
+            &[],
+        )?;
+        // A vanilla bundle's own override isn't run here.
+        let Some(owner) = jar_override_owner(rt, &item, hook)? else {
+            return Err(counted());
+        };
+        let (name, descriptor) = hook.method();
+        let handled = match hook {
+            ItemHook::StackedOnOther => exact(rt, |rt| {
+                Ok(rt.invoke(
+                    &owner,
+                    name,
+                    descriptor,
+                    Some(item.clone()),
+                    &[stack.clone(), slot.clone(), action.clone(), player.clone()],
+                )?)
+            })?,
+            _ => {
+                let access = crate::item_parts::menu_carried_access(menu);
+                exact(rt, |rt| {
+                    Ok(rt.invoke(
+                        &owner,
+                        name,
+                        descriptor,
+                        Some(item.clone()),
+                        &[
+                            stack.clone(),
+                            carried.clone(),
+                            slot.clone(),
+                            action.clone(),
+                            player.clone(),
+                            access.handle.clone(),
+                        ],
+                    )?)
+                })?
+            }
+        };
+        if as_bool(&handled)? {
+            return Ok(true);
+        }
     }
+    Ok(false)
 }
 
 /// `doClick` offsets 1081-1380: `SWAP` with a hotbar slot or the offhand.
@@ -5443,6 +5510,34 @@ pub(crate) fn fill_inventory(host: &mut StdHost, inventory: &Value, facts: &Menu
 }
 
 /// The `Inventory` object's stacks, in the facts' layout (36 or 43 entries).
+/// The stack `inventory` (an `Inventory` model) holds at `index` (`items` 0-35, then the
+/// equipment 36-42), from Decaf's state.
+pub(crate) fn inventory_item(host: &StdHost, inventory: &Value, index: i32) -> Option<Value> {
+    let key = expect_ref(inventory)?;
+    let Some(menu_models::Object::Inventory {
+        contents: Some(contents),
+        ..
+    }) = host.menu_states.get(key)
+    else {
+        return None;
+    };
+    let index = usize::try_from(index).ok()?;
+    match index.checked_sub(menu_models::INVENTORY_ITEMS) {
+        None => contents.items.get(index).cloned(),
+        Some(equipment) => contents.equipment.as_ref()?.get(equipment).cloned(),
+    }
+}
+
+/// Record `effect` on the running call (`record` without the interpreter), for the item-part
+/// player façade (`item_parts.rs`).
+pub(crate) fn record_effect(host: &mut StdHost, effect: LiveMenuEffect) {
+    let quiet = draws_no_level_random(&effect);
+    if let Some(active) = host.block_use.active_use.as_mut() {
+        active.live_effects.push(effect);
+    }
+    host.note_deferred_effect(quiet);
+}
+
 pub(crate) fn inventory_out(
     host: &StdHost,
     inventory: &Value,

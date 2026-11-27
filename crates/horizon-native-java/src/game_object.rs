@@ -426,6 +426,15 @@ pub(crate) fn declared_types(key: &str) -> &'static [&'static str] {
             "net/minecraft/core/component/DataComponentGetter",
         ],
         (false, "damage") => &["net/minecraft/world/damagesource/DamageSource"],
+        // The item-part façades (`item_parts.rs`).
+        (false, "bees") => &["net/minecraft/world/item/component/Bees"],
+        (false, "stat-type") => &["net/minecraft/stats/StatType"],
+        (false, "stat") => &["net/minecraft/stats/Stat"],
+        (false, "carried-slot-access") => &["net/minecraft/world/entity/SlotAccess"],
+        (false, "destroyed-item-entity" | "dropped-item-entity") => &[
+            "net/minecraft/world/entity/item/ItemEntity",
+            "net/minecraft/world/entity/Entity",
+        ],
         (false, "block-hit") => &[
             "net/minecraft/world/phys/BlockHitResult",
             "net/minecraft/world/phys/HitResult",
