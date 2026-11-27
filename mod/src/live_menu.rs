@@ -325,6 +325,10 @@ pub(crate) struct Prepared {
     /// Hook tags counted while building this (an effect Sunrise has no call for).
     pub(crate) counted: Vec<&'static str>,
     pub(crate) unknown_host_calls: BTreeMap<String, usize>,
+    /// The key in `unknown_host_calls` that only says where the call stopped: the whole click
+    /// (or tick), counted because a step of it counted on its own
+    /// (`LiveMenuOutcome::stopped_at_counted_step`).
+    pub(crate) stopped_at_counted_step: Option<String>,
     pub(crate) failure: Option<String>,
     /// Where the player was, for a drop Sunrise has no player to make.
     pub(crate) seen: Option<Seen>,
@@ -880,6 +884,7 @@ fn mirror(
         menu_effects: outcome.menu_effects,
         counted,
         unknown_host_calls: outcome.unknown_host_calls,
+        stopped_at_counted_step: outcome.stopped_at_counted_step,
         failure: outcome.failure,
         seen: None,
         throws_from_player: true,
@@ -1329,10 +1334,11 @@ pub(crate) fn record(state: &mut State, prepared: Prepared, applied: Applied) {
         return;
     };
     jar.row.block_use.menu_calls += 1;
-    crate::level_random::note_call_counts(
+    crate::level_random::note_call_counts_stopped(
         &mut jar.row,
         &format!("menu {}", prepared.window),
         &prepared.unknown_host_calls,
+        prepared.stopped_at_counted_step.as_deref(),
     );
     if let Some(failure) = &prepared.failure {
         // Vanilla's handler would throw too (`ReportedException("Container click")`); what the
@@ -1712,6 +1718,7 @@ pub(crate) fn opening_contents(
         handled: true,
         unknown_host_calls: BTreeMap::new(),
         unknown_host_call_count: 0,
+        stopped_at_counted_step: None,
         failure: None,
     };
     let facts = MenuPlayerFacts::default();

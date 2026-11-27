@@ -298,6 +298,11 @@ pub struct LiveMenuOutcome {
     /// Unmodelled host calls this call made.
     pub unknown_host_calls: BTreeMap<String, usize>,
     pub unknown_host_call_count: usize,
+    /// The key in `unknown_host_calls` of the call as a whole (the packet handler,
+    /// `ServerPlayer.tick` or `doTick`) when it stopped at a step that counted on its own: that
+    /// one count says where the call stopped, not that a fact was missing (the step's own
+    /// counted call is in `unknown_host_calls` under its name). `None` otherwise.
+    pub stopped_at_counted_step: Option<String>,
     /// Why the call didn't finish (an exception Java didn't catch, a budget). A click whose
     /// `doClick` threw fails with `clicked`'s `ReportedException`, and the line names the
     /// exception it wrapped (`...; caused by ...`).
@@ -369,8 +374,11 @@ pub(crate) enum Flow {
     /// A Java exception (or a runtime error) propagating out of the body, as the JVM does.
     Java(NativeError),
     /// A step needed something Decaf can't answer exactly: the outermost modelled method is
-    /// counted and nothing more of it runs.
-    Counted,
+    /// counted and nothing more of it runs. `nested` when the step that stopped it was a call
+    /// that counted on its own (a jar override, the generic chain, a modelled call it reached),
+    /// already in the counted calls under its own name: the outer count then records only where
+    /// the body stopped, no fact missing of its own ([`counted_step`]).
+    Counted { nested: bool },
 }
 
 impl From<NativeError> for Flow {
@@ -381,8 +389,15 @@ impl From<NativeError> for Flow {
 
 type R<T> = Result<T, Flow>;
 
+/// A step this module can't answer itself: a fact Decaf doesn't have.
 fn counted() -> Flow {
-    Flow::Counted
+    Flow::Counted { nested: false }
+}
+
+/// A step that counted on its own (a call whose counted-call count grew across it): the body
+/// stops there, and the call is already counted under its own name.
+fn counted_step() -> Flow {
+    Flow::Counted { nested: true }
 }
 
 fn npe() -> Flow {
@@ -441,7 +456,7 @@ fn exact<H: Host, T>(rt: &mut Runtime<'_, H>, f: impl FnOnce(&mut Runtime<'_, H>
     let before = rt.host.counted_unknown_calls();
     let value = f(rt)?;
     if rt.host.counted_unknown_calls() != before {
-        return Err(counted());
+        return Err(counted_step());
     }
     Ok(value)
 }
@@ -999,7 +1014,7 @@ pub(crate) fn invoke<H: Host>(
     match run(rt, body, receiver, args) {
         Ok(value) => Ok(Some(value)),
         Err(Flow::Java(error)) => Err(error),
-        Err(Flow::Counted) => rt
+        Err(Flow::Counted { .. }) => rt
             .host
             .unknown_operand_call(&mref(owner, &r.name, &r.descriptor))
             .map(Some),
@@ -1042,7 +1057,7 @@ fn vcall<H: Host>(
         }
         let value = value?;
         if rt.host.counted_unknown_calls() != before {
-            return Err(counted());
+            return Err(counted_step());
         }
         return Ok(value);
     }
@@ -1057,7 +1072,7 @@ fn vcall<H: Host>(
     }
     let value = rt.call_virtual(site, owner, name, descriptor, receiver, args)?;
     if rt.host.counted_unknown_calls() != before {
-        return Err(counted());
+        return Err(counted_step());
     }
     Ok(value)
 }
@@ -2443,15 +2458,26 @@ fn record(rt: &mut Runtime<'_, impl Host>, effect: LiveMenuEffect) -> R<()> {
 }
 
 /// The allow-list of recorded effects whose carrying out draws no level's
-/// `Level.random`: packets, stats and notices (`level_random.rs`). Not on it:
-/// - `InventoryChangedCriterion`, `RecipeCrafted` and `AwardRecipes`: a
-///   criterion (a recipe unlock fires `RECIPE_UNLOCKED`) can complete an
-///   advancement at once, and `AdvancementRewards.grant` rolls its loot with
-///   `LootContext$Builder.create(Optional.empty())`, which falls back to
-///   `ServerLevel.getRandom()`;
-/// - `Drop`: in 26.3 a drop draws only entity randoms (`ItemEntity`'s own and
-///   the player's, javap), but the embedder's drop path isn't verified to
-///   leave the level stream alone.
+/// `Level.random`: packets, stats, notices and drops (`level_random.rs`).
+///
+/// A drop is on it because vanilla's draws nothing of the level stream, so
+/// Java's later draw sits at the same position whether the drop runs before it
+/// (vanilla) or after the call (Decaf): 26.3's `ServerPlayer.drop` is
+/// `LivingEntity.drop` (`swing`, which sends a packet; `createItemStackToDrop`,
+/// whose spread draws the player's own `Entity.random`; `addFreshEntity`, whose
+/// entity-manager callbacks draw nothing) and the dropped stats, and
+/// `new ItemEntity(level, x, y, z, stack)` draws its motion, bob and yaw from
+/// its own `Entity.random` (`RandomSource.create()`, not the level's), all
+/// read with `javap -c -p` of `server-26.3.jar`. The embedder's drop runs after
+/// the call: whatever it draws comes after Java's draw in either order. (Sunrise
+/// at the pinned `3d34bbe63d` draws the player's and the item's own randoms
+/// there too: `throw_from_eyes` / `player_drop_motion`, `push_item_entity`.)
+///
+/// Not on it: `InventoryChangedCriterion`, `RecipeCrafted` and `AwardRecipes`:
+/// a criterion (a recipe unlock fires `RECIPE_UNLOCKED`) can complete an
+/// advancement at once, and `AdvancementRewards.grant` rolls its loot with
+/// `LootContext$Builder.create(Optional.empty())`, which falls back to
+/// `ServerLevel.getRandom()`.
 ///
 /// A new effect must take a side here.
 fn draws_no_level_random(effect: &LiveMenuEffect) -> bool {
@@ -2463,11 +2489,11 @@ fn draws_no_level_random(effect: &LiveMenuEffect) -> bool {
         | LiveMenuEffect::AwardStat { .. }
         | LiveMenuEffect::InventorySlotSent { .. }
         | LiveMenuEffect::Closed { .. }
-        | LiveMenuEffect::SlotTaken { .. } => true,
+        | LiveMenuEffect::SlotTaken { .. }
+        | LiveMenuEffect::Drop { .. } => true,
         LiveMenuEffect::InventoryChangedCriterion { .. }
         | LiveMenuEffect::RecipeCrafted { .. }
-        | LiveMenuEffect::AwardRecipes { .. }
-        | LiveMenuEffect::Drop { .. } => false,
+        | LiveMenuEffect::AwardRecipes { .. } => false,
     }
 }
 
@@ -4984,7 +5010,7 @@ fn list_values(rt: &mut Runtime<'_, impl Host>, list: &Value) -> R<Vec<Value>> {
     if *list == Value::Ref(None) {
         return Err(npe());
     }
-    rt.collection_elements(list).map_err(|_| Flow::Counted)
+    rt.collection_elements(list).map_err(|_| counted())
 }
 
 // ---------------------------------------------------------------------------
@@ -5426,7 +5452,7 @@ pub(crate) fn run_init_menu<H: Host>(
     match init_menu(rt, menu) {
         Ok(()) => Ok(true),
         Err(Flow::Java(error)) => Err(error),
-        Err(Flow::Counted) => {
+        Err(Flow::Counted { .. }) => {
             rt.host.unknown_operand_call(&mref(
                 SERVER_PLAYER,
                 "initMenu",
@@ -5623,7 +5649,7 @@ pub(crate) fn invoke_helper<H: Host>(
     match result {
         Ok(value) => Ok(value),
         Err(Flow::Java(error)) => Err(error),
-        Err(Flow::Counted) => rt.host.unknown_operand_call(r).map(Some),
+        Err(Flow::Counted { .. }) => rt.host.unknown_operand_call(r).map(Some),
     }
 }
 
@@ -6054,6 +6080,7 @@ impl NativeJar {
             roots.push(state.clone());
         }
         let mut handled = false;
+        let mut stopped_at_counted_step = None;
         let call_result = self.with_persistent_runtime_with_budget(host, &roots, budget, |rt| {
             // A close whose cursor the embedder already put back: vanilla's `removed` would put
             // it back itself (`AbstractContainerMenu.removed` offsets 0-38), which the embedder
@@ -6068,7 +6095,7 @@ impl NativeJar {
                 rt.host
                     .unknown_operand_call(&mref(SERVER_PLAYER, "doCloseContainer", "()V"))?;
             }
-            handled = run_call(rt, &menu, &player_value, call)?;
+            handled = run_call(rt, &menu, &player_value, call, &mut stopped_at_counted_step)?;
             Ok(Value::Void)
         });
         let finished_active = host.block_use.active_use.take();
@@ -6105,6 +6132,7 @@ impl NativeJar {
             handled,
             unknown_host_calls,
             unknown_host_call_count,
+            stopped_at_counted_step,
             failure: call_result
                 .err()
                 .map(|error| failure_line(&error, wrapped_click_cause.as_deref())),
@@ -6475,11 +6503,17 @@ fn held_menu_contents(host: &StdHost, menu: &Value) -> (Option<Value>, Option<Ve
 }
 
 /// One live-menu call on the held `menu`; `Ok(true)` when vanilla's handler acted on it.
+///
+/// A call that stops at a counted step is counted as a whole under its outer method (the
+/// packet handler, `ServerPlayer.tick` or `doTick`). When that step was a call that counted on
+/// its own ([`Flow::Counted`]'s `nested`), the outer count records only where the call stopped,
+/// and `stopped` is set to its key, so an embedder never reports it as one more unmodelled call.
 fn run_call<H: Host>(
     rt: &mut Runtime<'_, H>,
     menu: &Value,
     player: &Value,
     call: LiveCall<'_>,
+    stopped: &mut Option<String>,
 ) -> Result<bool, NativeError> {
     let outer = match call {
         LiveCall::Click(_) => mref(
@@ -6505,8 +6539,14 @@ fn run_call<H: Host>(
     match result {
         Ok(handled) => Ok(handled),
         Err(Flow::Java(error)) => Err(error),
-        Err(Flow::Counted) => {
+        Err(Flow::Counted { nested }) => {
             rt.host.unknown_operand_call(&outer)?;
+            if nested {
+                *stopped = Some(format!(
+                    "{}#{}{}",
+                    outer.owner, outer.name, outer.descriptor
+                ));
+            }
             Ok(true)
         }
     }

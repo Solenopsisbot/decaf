@@ -1094,6 +1094,19 @@ pub(crate) fn invoke_helper<H: Host>(
         if plain_item {
             return Ok(Some(Value::Int(1)));
         }
+        // A vanilla item's handle (`ItemStack.getItem()` of a vanilla stack): 26.3's own answer,
+        // `Item`'s `true` or `BlockItem`'s `!(getBlock() instanceof ShulkerBoxBlock)`, as Java 25
+        // gives it for every registered item (`vanilla_item_data`). An id the game doesn't
+        // register falls through, counted.
+        let vanilla = game_object::handle_key(receiver)
+            .and_then(|key| {
+                key.strip_prefix("game/item/")
+                    .or_else(|| key.strip_prefix("client/item/"))
+            })
+            .and_then(crate::runtime::vanilla_item_data::vanilla_can_fit_inside_container_items);
+        if let Some(fits) = vanilla {
+            return Ok(Some(Value::Int(i32::from(fits))));
+        }
     }
     let Some(key) = game_object::handle_key(receiver) else {
         return Ok(None);

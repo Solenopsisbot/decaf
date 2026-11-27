@@ -60802,6 +60802,8 @@ mod vendored_nested_jars_predicate_java25_txt;
 mod vendored_review579_nested_real_java25_txt;
 #[path = "vanilla_block_items_java25.tsv.rs"]
 mod vendored_vanilla_block_items_java25_tsv;
+#[path = "vanilla_can_fit_inside_container_items_java25.txt.rs"]
+mod vendored_vanilla_can_fit_inside_container_items_java25_txt;
 #[path = "vanilla_entity_data_subclass.txt.rs"]
 mod vendored_vanilla_entity_data_subclass_txt;
 #[path = "vanilla_host_methods.tsv.rs"]

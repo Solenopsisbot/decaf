@@ -1,0 +1,18 @@
+FALSE	minecraft:shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:white_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:orange_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:magenta_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:light_blue_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:yellow_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:lime_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:pink_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:gray_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:light_gray_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:cyan_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:purple_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:blue_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:brown_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:green_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:red_shulker_box	net.minecraft.world.item.BlockItem
+FALSE	minecraft:black_shulker_box	net.minecraft.world.item.BlockItem
+TOTAL	1658

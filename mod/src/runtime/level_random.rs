@@ -82,15 +82,17 @@
 //! (`live_menu::draws_no_level_random`) marks the lend, and every lent draw
 //! after the mark is counted ([`DRAW_AFTER_DEFERRED_EFFECT`]). Off the list:
 //!
-//! - the criteria and the recipe unlock (`InventoryChangedCriterion`,
-//!   `RecipeCrafted`, `AwardRecipes`): in vanilla each can complete an
-//!   advancement at once, and `AdvancementRewards.grant` draws the level's
-//!   stream through its loot (`LootContext$Builder.create`, which falls back to
-//!   `ServerLevel.getRandom()`) or a reward function;
-//! - a drop: in 26.3 it draws only entity randoms (`ItemEntity.<init>(Level,
-//!   DDD,ItemStack)` its own `Entity.random`, `createItemStackToDrop` the
-//!   player's), but the embedder's drop path isn't verified to leave the level
-//!   stream alone.
+//! the criteria and the recipe unlock (`InventoryChangedCriterion`,
+//! `RecipeCrafted`, `AwardRecipes`): in vanilla each can complete an
+//! advancement at once, and `AdvancementRewards.grant` draws the level's
+//! stream through its loot (`LootContext$Builder.create`, which falls back to
+//! `ServerLevel.getRandom()`) or a reward function.
+//!
+//! A drop is on the list: in 26.3 it draws only entity randoms
+//! (`ItemEntity.<init>(Level,DDD,ItemStack)` its own `Entity.random`,
+//! `createItemStackToDrop` the player's), so vanilla's stream doesn't move for
+//! it, and what the embedder's drop draws comes after Java's draw in either
+//! order. (A bundle's `use` drops its contents, then draws its sound's pitch.)
 //!
 //! The player's inventory, which Decaf writes back after the call, needs no
 //! mark: vanilla's `INVENTORY_CHANGED` fires only from `ServerPlayer$2

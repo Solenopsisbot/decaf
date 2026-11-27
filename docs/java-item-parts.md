@@ -153,6 +153,25 @@ methods, and nothing in it names a mod.
    name (`NativeJar::record_item_prototype`; the mod seeds each registered item id in the NBT),
    since the type's codec reads them while it decodes.
 
+**Counted, failed and exact (BUGS-3d34-round4 #2, #3).** A call that *counted* leaves Sunrise's
+vanilla answer standing (counted on the jar). A call that *failed* (Java threw, ran out of
+budget, or hit a host call the runtime refused; `ItemCallReport::failure`, or the runtime's own
+error) has no answer at all: the bridge logs it, keeps it in the row's `block_use.failures` and
+counts `item_stacked_on_other:failed` / `use_item:failed` / `item_destroyed:failed`, then
+refuses a click (handled, nothing moves) and answers a use `FAIL`. It never hands the click to
+Sunrise's vanilla swap as if the override had returned `false` (round 4's pouch onto cobblestone
+swapped that way, silently: a failed call's runtime rolls back with the host calls it counted).
+What failed there was `Item.canFitInsideContainerItems()` on a vanilla item, which the runtime
+now answers as 26.3 does (`Item`'s `true`, `false` for the 17 shulker boxes only: a Java 25
+capture over every registered item, `vanilla_item_data.rs`).
+
+A bundle's `use` drops its contents, then draws `level.getRandom().nextFloat()` for its sound's
+pitch. The drops are carried out after the call, but a drop is on the level-random allow-list
+(`live_menu::draws_no_level_random`): 26.3's `ServerPlayer.drop` draws only the player's own and
+the item entity's own randoms, so Java's draw sits at vanilla's position in either order and is
+served exactly from the lent stream. The use then applies in vanilla's order: the cleared held
+stack, each drop with its stats (`player_drop_plan`), `ITEM_USED`, the sound.
+
 Tests, in the repo's usual pattern: javac fixtures for each façade with JDK 25 / game 26.3
 expected rows, then a real-jar test (`RUNES_JAR`) that inserts runes into a pouch through
 `overrideOtherStackedOnMe` and checks the encoded component, the bar width and colour, and the

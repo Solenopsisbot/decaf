@@ -1334,7 +1334,12 @@ fn a_screen_that_fails_to_construct_or_to_close_leaves_no_stale_state() {
                     ]
                 );
                 let row = java.lock_client().report_rows().next().unwrap();
-                assert_eq!(row["summary"], "ran-clean, 5 menu-screen failures");
+                // The calls counted above qualify it too (BUGS-3d34-round4 #7: the client row
+                // read `ran-clean` alone while it held counted calls).
+                assert_eq!(
+                    row["summary"],
+                    "ran-clean, 5 menu-screen failures, 3 counted calls since start"
+                );
                 assert_eq!(row["client"]["menu_screen"]["failed"], 5);
                 let failures: Vec<(String, u64)> = row["client"]["menu_screen"]["failures"]
                     .as_array()
@@ -1385,7 +1390,8 @@ fn a_screen_that_fails_to_construct_or_to_close_leaves_no_stale_state() {
                 );
                 let line = java.lock_client().row_lines().remove(0);
                 assert!(
-                    line.contains("ran-clean, 5 menu-screen failures") && line.contains("glitch"),
+                    line.contains("ran-clean, 5 menu-screen failures, 3 counted calls since start")
+                        && line.contains("glitch"),
                     "{line}"
                 );
             },
