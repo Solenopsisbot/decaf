@@ -177,6 +177,14 @@ const STUBS: &[(&str, &str)] = &[
 ];
 
 fn fixture(test: &str, mixins_json: &str) -> javac_fixture::Fixture {
+    fixture_with(
+        test,
+        mixins_json,
+        include_str!("fixtures/client_item_parts/demo/mixin/CreateMixin.java"),
+    )
+}
+
+fn fixture_with(test: &str, mixins_json: &str, create_mixin: &str) -> javac_fixture::Fixture {
     let mut sources = STUBS.to_vec();
     sources.extend_from_slice(&[
         (
@@ -203,10 +211,7 @@ fn fixture(test: &str, mixins_json: &str) -> javac_fixture::Fixture {
             "demo/mixin/PropertiesMixin.java",
             include_str!("fixtures/client_item_parts/demo/mixin/PropertiesMixin.java"),
         ),
-        (
-            "demo/mixin/CreateMixin.java",
-            include_str!("fixtures/client_item_parts/demo/mixin/CreateMixin.java"),
-        ),
+        ("demo/mixin/CreateMixin.java", create_mixin),
     ]);
     javac_fixture::Fixture::build_with_mod_json_and_extra(
         test,
@@ -476,4 +481,53 @@ fn a_server_host_registers_no_item_model_property() {
             .is_empty()
     );
     assert!(host.client_range_select_properties().is_empty());
+}
+
+/// `ClientTooltipComponent.create` has two overloads in 26.3 (`create(FormattedCharSequence)`
+/// first): a callback that selects `create` by name alone is selected for both, which the one
+/// call this runtime makes is not. It counts, and no component is made.
+#[test]
+fn a_name_only_create_selector_counts() {
+    let source = include_str!("fixtures/client_item_parts/demo/mixin/CreateMixin.java").replace(
+        "\"create(Lnet/minecraft/world/inventory/tooltip/TooltipComponent;)Lnet/minecraft/client/gui/screens/inventory/tooltip/ClientTooltipComponent;\"",
+        "\"create\"",
+    );
+    assert!(
+        !source.contains("create(L"),
+        "the selector names create alone"
+    );
+    let fixture = fixture_with("client_item_parts_name_only_create", MIXINS_JSON, &source);
+    let jar = &fixture.jar;
+    let mut host = client_host(&fixture);
+    let budget = ExecutionBudget::UNBOUNDED;
+    let meter = item(&host, "demo:meter");
+    let owner = jar.item_overrides(&meter, &host).owners[&ItemHook::TooltipImage].clone();
+    let stack = jar
+        .make_item_stack(
+            &mut host,
+            Some(meter.clone()),
+            "demo:meter",
+            3,
+            Vec::new(),
+            Vec::new(),
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+    let data = jar
+        .item_tooltip_image(&mut host, &meter, &owner, &stack, &budget)
+        .exact()
+        .flatten()
+        .expect("a meter of three");
+    let created = jar.client_tooltip_component(&mut host, &data, &budget);
+    assert!(created.value.is_none());
+    assert!(
+        created
+            .report
+            .unknown_host_calls
+            .keys()
+            .any(|key| key.contains("ClientTooltipComponent#create <create callback demo/mixin/CreateMixin#demo$create has a shape not run here>")),
+        "{:?}",
+        created.report
+    );
 }
