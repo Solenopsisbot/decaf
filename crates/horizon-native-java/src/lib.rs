@@ -3417,13 +3417,33 @@ pub trait Host {
     /// no declaration table ignores it.
     fn note_content_builder(&mut self, _event: ContentBuilderEvent) {}
 
-    /// The runtime constructed `instance`, the object of the entrypoint
-    /// `kind` (`main`, `client`...) whose class is `class` (internal name),
-    /// and runs its method on it: the object a loader's own `getEntrypoints`
-    /// answers for that entry (`host_fabric_runtime.rs`). Fabric makes one
-    /// object per entrypoint key, so a class that is both `main` and `client`
-    /// has two.
-    fn note_entrypoint_constructed(&mut self, _kind: &str, _class: &str, _instance: &Value) {}
+    /// The runtime constructed `instance`, the object of declaration `declaration` (0 for the
+    /// first, counting only `class`'s own declarations of `kind`) of the entrypoint `kind`
+    /// (`main`, `client`...) whose class is `class` (internal name): the object a loader's own
+    /// `getEntrypoints` answers for that entry (`host_fabric_runtime.rs`), and the one the
+    /// runner calls `onInitialize*` on. Fabric makes one object per declaration (a `NewEntry`
+    /// each), so a class that is both `main` and `client`, or declared twice, has two.
+    fn note_entrypoint_constructed(
+        &mut self,
+        _kind: &str,
+        _class: &str,
+        _declaration: usize,
+        _instance: &Value,
+    ) {
+    }
+
+    /// The instance already built for declaration `declaration` of `class` (internal name) in
+    /// `kind`, if one was: by the runner, or by a `getEntrypoints` that reached it first.
+    fn entrypoint_instance(&self, _kind: &str, _class: &str, _declaration: usize) -> Option<Value> {
+        None
+    }
+
+    /// The runner reached the next declaration of `class` in `kind`: its index (0 for the
+    /// first), counted from the runner's own visits, so the runner runs each declaration's own
+    /// instance in declaration order.
+    fn claim_entrypoint_declaration(&mut self, _kind: &str, _class: &str) -> usize {
+        0
+    }
 
     /// The Fabric entrypoint rows the loader host declared for `kind`, in the
     /// loader's invocation order.  A host that does not own loader state
@@ -4152,7 +4172,10 @@ pub struct StdHost {
     /// order it built them: one per declaration it ran, so a class declared twice has two
     /// (Fabric's `EntrypointStorage.add` makes a `NewEntry`, with its own cached instance, per
     /// declaration).
-    constructed_entrypoints: BTreeMap<(String, String), Vec<Value>>,
+    constructed_entrypoints: BTreeMap<(String, String), BTreeMap<usize, Value>>,
+    /// How many declarations of each (kind, class) the entrypoint runner has reached
+    /// (`Host::claim_entrypoint_declaration`).
+    entrypoint_declarations_run: BTreeMap<(String, String), usize>,
     /// Identifiers retained by `CustomPacketPayload.Type` values created by
     /// the bounded networking façade.
     packet_types: BTreeMap<String, String>,
@@ -4619,6 +4642,7 @@ impl StdHost {
             payload_bytes: BTreeMap::new(),
             fabric_entrypoint_containers: Vec::new(),
             constructed_entrypoints: BTreeMap::new(),
+            entrypoint_declarations_run: BTreeMap::new(),
             packet_types: BTreeMap::new(),
             identifier_objects: BTreeMap::new(),
             deferred_registers: BTreeMap::new(),
@@ -5099,16 +5123,13 @@ impl StdHost {
         // a number the heap also hands out (so the next jar object could take its key), whose
         // constructor never ran, and `ordinal` was the kind-wide index, so a second *distinct*
         // entry class got a stand-in instead of its own instance. A declaration the runtime did
-        // not build has no instance: `None`, counted by the caller.
-        let declaration = self
-            .fabric_entrypoints(kind)
-            .iter()
-            .take(ordinal)
-            .filter(|(entry, _)| entry == class)
-            .count();
+        // not build has no instance: `None`, counted by the caller. A `getEntrypoints` builds a
+        // missing one first, as `getOrCreate` does (`Runtime::prepare_fabric_entrypoints`).
+        let declaration =
+            host_fabric_runtime::declaration_index(&self.fabric_entrypoints(kind), class, ordinal);
         self.constructed_entrypoints
             .get(&(kind.to_owned(), internal))?
-            .get(declaration)
+            .get(&declaration)
             .cloned()
     }
 
@@ -9070,11 +9091,34 @@ impl Host for StdHost {
         self.get_static(r)
     }
 
-    fn note_entrypoint_constructed(&mut self, kind: &str, class: &str, instance: &Value) {
+    fn note_entrypoint_constructed(
+        &mut self,
+        kind: &str,
+        class: &str,
+        declaration: usize,
+        instance: &Value,
+    ) {
         self.constructed_entrypoints
             .entry((kind.to_owned(), class.to_owned()))
             .or_default()
-            .push(instance.clone());
+            .insert(declaration, instance.clone());
+    }
+
+    fn entrypoint_instance(&self, kind: &str, class: &str, declaration: usize) -> Option<Value> {
+        self.constructed_entrypoints
+            .get(&(kind.to_owned(), class.to_owned()))?
+            .get(&declaration)
+            .cloned()
+    }
+
+    fn claim_entrypoint_declaration(&mut self, kind: &str, class: &str) -> usize {
+        let reached = self
+            .entrypoint_declarations_run
+            .entry((kind.to_owned(), class.to_owned()))
+            .or_default();
+        let declaration = *reached;
+        *reached += 1;
+        declaration
     }
 
     fn fabric_entrypoints(&self, kind: &str) -> Vec<(String, String)> {
@@ -19981,6 +20025,151 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
+    /// Build declaration `declaration` of the entrypoint `class` (internal name) of `kind`, as
+    /// the loader's language adapter does: a new object of the class, its constructor run with
+    /// `args` (none for Fabric's default adapter), noted for that declaration
+    /// (`Host::note_entrypoint_constructed`). A throw from the constructor is what the default
+    /// Fabric adapter wraps (it reflects through `Constructor.newInstance`): a
+    /// `LanguageAdapterException` retaining an `InvocationTargetException` that retains the
+    /// throw, recorded as the entry's failure; the error is returned. The runner and a
+    /// `getEntrypoints` that reaches an unbuilt declaration first both build through here.
+    pub(crate) fn construct_entrypoint_instance(
+        &mut self,
+        kind: &str,
+        class: &str,
+        descriptor: &str,
+        args: &[Value],
+        declaration: usize,
+    ) -> Result<Value, NativeError> {
+        let instance = self.new_object(class);
+        if let Err(error) = self.invoke(class, "<init>", descriptor, Some(instance.clone()), args) {
+            if let NativeError::UncaughtException {
+                class: thrown_class,
+                message,
+                frame,
+            } = &error
+            {
+                let original =
+                    self.caught_throwable(thrown_class, message.clone(), frame.as_deref());
+                let invocation = self.caught_throwable(
+                    "java/lang/reflect/InvocationTargetException",
+                    None,
+                    None,
+                );
+                if let Some(marker) = jar_object::instance_key(&invocation) {
+                    self.host.record_throwable_cause(marker, original);
+                }
+                let adapter = self.caught_throwable(
+                    "net/fabricmc/loader/api/LanguageAdapterException",
+                    Some(format!(
+                        "Could not instantiate class {}!",
+                        class.replace('/', ".")
+                    )),
+                    None,
+                );
+                if let Some(marker) = jar_object::instance_key(&adapter) {
+                    self.host.record_throwable_cause(marker, invocation);
+                }
+                self.host
+                    .record_fabric_entrypoint_failure(kind, class, adapter);
+            }
+            return Err(error);
+        }
+        self.host
+            .note_entrypoint_constructed(kind, class, declaration, &instance);
+        Ok(instance)
+    }
+
+    /// Fabric Loader's `getOrCreate` for the entries a call is about to answer (all of
+    /// `kind`'s, or the one at `only`), as `requested`: an entry no one built yet is built
+    /// now, its constructor run at this point (javap of Loader 0.20.1's `EntrypointStorage`:
+    /// `getEntrypoints` calls `getOrCreate` on every entry, and `NewEntry.getOrCreate` asks the
+    /// language adapter when its own `instanceMap` lacks the type), and kept as that
+    /// declaration's instance, so the runner later runs this same object instead of building
+    /// another. Only for the kind's initializer type, the one instance per declaration the
+    /// runtime models; any other type stays the host's (counted). A constructor's throw is
+    /// recorded as the entry's failure (`construct_entrypoint_instance`), as the adapter wraps
+    /// it, and the entry answers through the host's failure path.
+    #[inline(never)]
+    fn prepare_fabric_entrypoints(
+        &mut self,
+        kind: &str,
+        requested: &str,
+        only: Option<usize>,
+    ) -> Result<(), NativeError> {
+        if host_fabric_runtime::invocation_type(kind) != Some(requested) {
+            return Ok(());
+        }
+        let rows = self.host.fabric_entrypoints(kind);
+        for (ordinal, (class, _)) in rows.iter().enumerate() {
+            if only.is_some_and(|only| only != ordinal) || class.contains("::") {
+                continue;
+            }
+            let internal = class.replace('.', "/");
+            let declaration = host_fabric_runtime::declaration_index(&rows, class, ordinal);
+            if self
+                .host
+                .entrypoint_instance(kind, &internal, declaration)
+                .is_some()
+                || self.class_known_instance_of(&internal, requested) != Some(true)
+                || self
+                    .class(&internal)
+                    .and_then(|file| file.method("<init>", "()V"))
+                    .is_none()
+            {
+                continue;
+            }
+            let built = self.ensure_initialized(&internal).and_then(|()| {
+                self.construct_entrypoint_instance(kind, &internal, "()V", &[], declaration)
+            });
+            match built {
+                Ok(_) | Err(NativeError::UncaughtException { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// Build what a `getEntrypoints(kind, type)` or a container's `getEntrypoint()` is about
+    /// to answer (`prepare_fabric_entrypoints`); the host then answers the call.
+    #[inline(never)]
+    fn prepare_fabric_entrypoint_query(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+    ) -> Result<(), NativeError> {
+        match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+            (
+                "net/fabricmc/loader/api/FabricLoader",
+                "getEntrypoints",
+                "(Ljava/lang/String;Ljava/lang/Class;)Ljava/util/List;",
+            ) if matches!(receiver, Some(Value::Host(loader)) if loader.kind() == HostKind::FabricLoaderInstance) =>
+            {
+                let kind = expect_string(args.first().unwrap_or(&Value::Ref(None))).to_owned();
+                if let Some(requested) = args.get(1).and_then(host_class::class_name) {
+                    let requested = requested.to_owned();
+                    self.prepare_fabric_entrypoints(&kind, &requested, None)?;
+                }
+            }
+            (
+                "net/fabricmc/loader/api/EntrypointContainer"
+                | "net/fabricmc/loader/api/entrypoint/EntrypointContainer",
+                "getEntrypoint",
+                "()Ljava/lang/Object;",
+            ) => {
+                if let Some(parts) =
+                    receiver.and_then(host_fabric_runtime::entrypoint_container_parts)
+                    && let Some(requested) = parts.requested.as_deref()
+                {
+                    self.prepare_fabric_entrypoints(&parts.kind, requested, Some(parts.ordinal))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// `FabricLoaderImpl.invokeEntrypoints` walks the entrypoint rows in the
     /// same order as `getEntrypointContainers`, obtains each cached instance,
     /// and passes it to the supplied `Consumer`. Fabric catches `Throwable`
@@ -19994,6 +20183,7 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        self.prepare_fabric_entrypoint_query(r, receiver, args)?;
         if r.owner != "net/fabricmc/loader/api/FabricLoader"
             || r.name != "invokeEntrypoints"
             || r.descriptor != "(Ljava/lang/String;Ljava/lang/Class;Ljava/util/function/Consumer;)V"
@@ -20026,6 +20216,8 @@ impl<H: Host> Runtime<'_, H> {
         let mut first_failure: Option<(String, Value)> = None;
         let mut suppressed_failures = Vec::new();
         for (ordinal, (entry_class, provider)) in entries.into_iter().enumerate() {
+            // Each container's `getEntrypoint()` builds its instance as the loop reaches it.
+            self.prepare_fabric_entrypoints(&kind, requested, Some(ordinal))?;
             let object =
                 self.host
                     .fabric_entrypoint_object(&kind, &entry_class, requested, ordinal);
@@ -25293,69 +25485,42 @@ impl NativeJar {
             // The entrypoint object the loader builds: a jar object of the
             // entry class (#156 P13c: its name alone is a `String`). The
             // constructor and the `onInitialize*` call see the same `this`.
-            let instance = runtime.new_object(&class_name);
-            if !is_static {
-                let constructor = file
-                    .methods
-                    .iter()
-                    .find(|candidate| {
-                        candidate.name == "<init>" && (candidate.descriptor == "()V" || is_neoforge)
-                    })
-                    .cloned()
-                    .ok_or_else(|| NativeError::MissingMethod(format!("{class_name}#<init>")))?;
-                let constructor_args = self.entry_constructor_args(&class_name, &constructor);
-                let constructed = runtime.invoke(
-                    &class_name,
-                    "<init>",
-                    &constructor.descriptor,
-                    Some(instance.clone()),
-                    &constructor_args,
-                );
-                if let Err(error) = constructed {
-                    if let NativeError::UncaughtException {
-                        class: thrown_class,
-                        message,
-                        frame,
-                    } = &error
-                    {
-                        // The default Fabric adapter reflects through
-                        // Constructor.newInstance: its LanguageAdapterException
-                        // retains an InvocationTargetException, which in turn
-                        // retains the constructor's original Throwable.
-                        let original = runtime.caught_throwable(
-                            thrown_class,
-                            message.clone(),
-                            frame.as_deref(),
-                        );
-                        let invocation = runtime.caught_throwable(
-                            "java/lang/reflect/InvocationTargetException",
-                            None,
-                            None,
-                        );
-                        if let Some(marker) = jar_object::instance_key(&invocation) {
-                            runtime.host.record_throwable_cause(marker, original);
-                        }
-                        let adapter = runtime.caught_throwable(
-                            "net/fabricmc/loader/api/LanguageAdapterException",
-                            Some(format!(
-                                "Could not instantiate class {}!",
-                                class_name.replace('/', ".")
-                            )),
-                            None,
-                        );
-                        if let Some(marker) = jar_object::instance_key(&adapter) {
-                            runtime.host.record_throwable_cause(marker, invocation);
-                        }
-                        runtime
-                            .host
-                            .record_fabric_entrypoint_failure(kind, &class_name, adapter);
-                    }
-                    return Err(error);
-                }
-                runtime
+            let instance = if is_static {
+                runtime.new_object(&class_name)
+            } else {
+                // This run is the next declaration of the class: its own instance, which a
+                // `getEntrypoints` that reached it first already built (Fabric's
+                // `NewEntry.getOrCreate` runs the constructor then, once).
+                let declaration = runtime.host.claim_entrypoint_declaration(kind, &class_name);
+                match runtime
                     .host
-                    .note_entrypoint_constructed(kind, &class_name, &instance);
-            }
+                    .entrypoint_instance(kind, &class_name, declaration)
+                {
+                    Some(built) => built,
+                    None => {
+                        let constructor = file
+                            .methods
+                            .iter()
+                            .find(|candidate| {
+                                candidate.name == "<init>"
+                                    && (candidate.descriptor == "()V" || is_neoforge)
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                NativeError::MissingMethod(format!("{class_name}#<init>"))
+                            })?;
+                        let constructor_args =
+                            self.entry_constructor_args(&class_name, &constructor);
+                        runtime.construct_entrypoint_instance(
+                            kind,
+                            &class_name,
+                            &constructor.descriptor,
+                            &constructor_args,
+                            declaration,
+                        )?
+                    }
+                }
+            };
             if method != "<init>" {
                 // The loader constructs the entrypoint instance and then calls
                 // its `onInitialize*` on it: the same object, so the
@@ -58318,7 +58483,7 @@ mandatory = true
         // Once it did, the loader's own `ModInitializer` instance is that
         // object; another type is a fresh instance (or a mismatch): counted.
         let instance = jar_object::handle("demo/Main#0".into());
-        host.note_entrypoint_constructed("main", "demo/Main", &instance);
+        host.note_entrypoint_constructed("main", "demo/Main", 0, &instance);
         let main = host
             .invoke_instance(
                 &entries,

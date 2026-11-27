@@ -1698,9 +1698,23 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.send_feedback(r, component, broadcast)
     }
 
-    fn note_entrypoint_constructed(&mut self, kind: &str, class: &str, instance: &Value) {
+    fn note_entrypoint_constructed(
+        &mut self,
+        kind: &str,
+        class: &str,
+        declaration: usize,
+        instance: &Value,
+    ) {
         self.inner
-            .note_entrypoint_constructed(kind, class, instance);
+            .note_entrypoint_constructed(kind, class, declaration, instance);
+    }
+
+    fn entrypoint_instance(&self, kind: &str, class: &str, declaration: usize) -> Option<Value> {
+        self.inner.entrypoint_instance(kind, class, declaration)
+    }
+
+    fn claim_entrypoint_declaration(&mut self, kind: &str, class: &str) -> usize {
+        self.inner.claim_entrypoint_declaration(kind, class)
     }
 
     fn fabric_entrypoints(&self, kind: &str) -> Vec<(String, String)> {

@@ -481,10 +481,7 @@ fn later_entrypoint_failures_are_suppressed_in_order() {
     let fixture = javac_fixture::Fixture::build_with_mod_json(
         "suppressed-entrypoint-failures",
         &sources,
-        // `demo.Good`, not `demo.Probe`: Probe's `onInitialize` asks `getEntrypoints("main")`
-        // before the second declaration is built, which is counted (see
-        // `every_entrypoint_declaration_answers_its_own_instance`).
-        r#"{"id":"probe-fixture","version":"1.0","entrypoints":{"main":["demo.Good","demo.Good"]}}"#,
+        r#"{"id":"probe-fixture","version":"1.0","entrypoints":{"main":["demo.Probe","demo.Probe"]}}"#,
     );
     let mut host = fixture
         .jar
@@ -498,7 +495,7 @@ fn later_entrypoint_failures_are_suppressed_in_order() {
     }
     assert_eq!(
         fixture.text_on(&mut host, "invokeFailureSuppressed"),
-        "RuntimeException:Could not execute entrypoint stage 'main' due to errors, provided by 'probe-fixture' at 'demo.Good'!:IllegalStateException:2:1:RuntimeException:Could not execute entrypoint stage 'main' due to errors, provided by 'probe-fixture' at 'demo.Good'!:IllegalStateException"
+        "RuntimeException:Could not execute entrypoint stage 'main' due to errors, provided by 'probe-fixture' at 'demo.Probe'!:IllegalStateException:2:1:RuntimeException:Could not execute entrypoint stage 'main' due to errors, provided by 'probe-fixture' at 'demo.Probe'!:IllegalStateException"
     );
 }
 
@@ -515,8 +512,7 @@ fn duplicate_entrypoint_rows_are_invoked_and_failures_continue() {
     let fixture = javac_fixture::Fixture::build_with_mod_json(
         "duplicate-entrypoints",
         &sources,
-        // `demo.Good`: see `later_entrypoint_failures_are_suppressed_in_order`.
-        r#"{"id":"probe-fixture","version":"1.0","entrypoints":{"main":["demo.Good","demo.Good"]}}"#,
+        r#"{"id":"probe-fixture","version":"1.0","entrypoints":{"main":["demo.Probe","demo.Probe"]}}"#,
     );
     let mut host = fixture
         .jar
@@ -532,7 +528,7 @@ fn duplicate_entrypoint_rows_are_invoked_and_failures_continue() {
     let text = fixture.text_on(&mut host, "invokeFailure");
     assert_eq!(
         text,
-        "RuntimeException:Could not execute entrypoint stage 'main' due to errors, provided by 'probe-fixture' at 'demo.Good'!:IllegalStateException:2"
+        "RuntimeException:Could not execute entrypoint stage 'main' due to errors, provided by 'probe-fixture' at 'demo.Probe'!:IllegalStateException:2"
     );
     assert!(
         host.unknown_host_calls().is_empty(),
@@ -689,6 +685,58 @@ fn every_entrypoint_declaration_answers_its_own_instance() {
     assert_eq!(
         text,
         horizon_native_java::Value::Ref(Some("3|truetrue|truetrue|truetrue|false".into()))
+    );
+    assert!(
+        host.unknown_host_calls().is_empty(),
+        "{:?}",
+        host.unknown_host_calls()
+    );
+}
+
+/// An entry's constructor runs once, when its instance is first asked for: Fabric Loader's
+/// `getEntrypoints` calls `NewEntry.getOrCreate` on every entry (javap of Loader 0.20.1's
+/// `EntrypointStorage`), which runs the language adapter for an entry with no instance yet.
+/// `[EntryOrder, EntryOrder]`: the first declaration's `onInitialize` asks `getEntrypoints`
+/// before the second declaration has run, so the second is built right then, inside that call,
+/// and the runner later calls `onInitialize` on that same instance without building another.
+/// Fabric's order: `new0,init0,new1,saw2self,init1,saw2other`, two constructions. Before the
+/// #669 re-review the second declaration was not built at the query (counted), and the runner
+/// built it later.
+#[test]
+fn an_unbuilt_entrypoint_is_built_when_first_asked_for() {
+    let sources = sources();
+    let sources = sources
+        .iter()
+        .map(|(name, text)| (name.as_str(), text.as_str()))
+        .collect::<Vec<_>>();
+    let fixture = javac_fixture::Fixture::build_with_mod_json(
+        "entrypoint-order",
+        &sources,
+        r#"{"id":"probe-fixture","version":"1.0","entrypoints":{"main":["demo.EntryOrder","demo.EntryOrder"]}}"#,
+    );
+    let mut host = fixture
+        .jar
+        .seed_host(StdHost::new().with_environment_type("SERVER"));
+    for entry in fixture.jar.discover_entrypoints("main") {
+        fixture
+            .jar
+            .execute(&entry.class, entry.method.as_deref(), "main", &mut host)
+            .unwrap();
+    }
+    let log = fixture
+        .jar
+        .invoke_method_with_args(
+            "demo/EntryOrder",
+            "log",
+            "()Ljava/lang/String;",
+            None,
+            &[],
+            &mut host,
+        )
+        .unwrap();
+    assert_eq!(
+        log,
+        horizon_native_java::Value::Ref(Some("new0,init0,new1,saw2self,init1,saw2other|2".into()))
     );
     assert!(
         host.unknown_host_calls().is_empty(),

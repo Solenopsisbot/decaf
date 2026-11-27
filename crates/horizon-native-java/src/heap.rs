@@ -388,7 +388,7 @@ impl StdHost {
         // a `DeferredRegister`'s values) and the JDK's shared empties.
         self.constructed_entrypoints
             .values()
-            .flatten()
+            .flat_map(BTreeMap::values)
             .for_each(|held| value(held, out));
         for (key, held) in &self.deferred_registers {
             out.push(key);
@@ -2268,6 +2268,8 @@ mod tests {
             "random_derived_unknown",
             // A key counter (`random_source.rs`).
             "next_random_source",
+            // Counts of entrypoint declarations the runner reached (`lib.rs`).
+            "entrypoint_declarations_run",
             "next_unmodifiable_collection",
             "next_reversed_view",
             "next_ranged_attribute",
