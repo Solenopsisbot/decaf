@@ -11,11 +11,13 @@ is read from the launcher's install and is not part of this repository; the laun
 prefix (`[hh:mm:ss] [main/INFO]: [STDOUT]: `) is stripped.
 
 ```sh
-MC="$HOME/.minecraft"
-CP="$MC/versions/26.3/26.3.jar:$(python3 - <<'PY'
-import json, os
-mc = os.path.expanduser("~/.minecraft")
-d = json.load(open(f"{mc}/versions/26.3/26.3.json"))
+# Copy the launcher's files into a scratch folder first; never read them in place.
+SCRATCH="<scratch>"
+cp -r ~/.minecraft/versions/26.3 ~/.minecraft/libraries "$SCRATCH"/
+CP="$SCRATCH/26.3/26.3.jar:$(python3 - "$SCRATCH" <<'PY'
+import json, sys
+root = sys.argv[1]
+d = json.load(open(f"{root}/26.3/26.3.json"))
 out = []
 for lib in d["libraries"]:
     rules = lib.get("rules") or []
@@ -24,10 +26,15 @@ for lib in d["libraries"]:
         if r.get("os", {}).get("name", "linux") == "linux":
             ok = r["action"] == "allow"
     if ok:
-        out.append(f"{mc}/libraries/" + lib["downloads"]["artifact"]["path"])
+        out.append(f"{root}/libraries/" + lib["downloads"]["artifact"]["path"])
 print(":".join(out))
 PY
 )"
 javac -nowarn -cp "$CP" -d out demo/*.java oracle/net/fabricmc/api/ModInitializer.java oracle/*.java
-java -cp "out:$CP" ClientItemPartsOracle | sed 's/^\[[^]]*\] \[[^]]*\]: \[STDOUT\]: //' > java25.txt
+# No network (the client classes must never reach one), no display, a scratch home.
+unshare -rn true || { echo "needs a network namespace"; exit 1; }
+env -u DISPLAY -u WAYLAND_DISPLAY HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/home/.config" \
+  XDG_CACHE_HOME="$SCRATCH/home/.cache" XDG_DATA_HOME="$SCRATCH/home/.local/share" \
+  unshare -rn java -Djava.io.tmpdir="$SCRATCH/tmp" -cp "out:$CP" ClientItemPartsOracle \
+  | sed 's/^\[[^]]*\] \[[^]]*\]: \[STDOUT\]: //' > java25.txt
 ```

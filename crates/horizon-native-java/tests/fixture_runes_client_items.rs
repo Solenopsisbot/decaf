@@ -220,6 +220,7 @@ fn run(jar_path: &Path) {
     let property = decoded
         .clone()
         .exact()
+        .and_then(Result::ok)
         .unwrap_or_else(|| panic!("the fullness node decodes: {:?}", decoded.report));
     for (stack, expected) in [(&empty, 0.0_f32), (&partly, 0.0390625), (&full, 1.0)] {
         for holder in [

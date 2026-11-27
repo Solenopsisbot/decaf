@@ -75,10 +75,14 @@ methods, and nothing in it names a mod.
    ones), before any jar's entrypoint, in the order that side's bootstrap finishes those classes
    (`bootstrap_mixins.rs`; `bootstrap_clinit_order_26_3.txt` for the server and
    `bootstrap_clinit_order_26_3_client.txt` for the client, the real client's `Main` up to
-   `Minecraft.<init>`, both from `tools/trace_bootstrap_clinit_order.py`). A `TAIL` into a
-   static `()V` method the bootstrap ends once (`RangeSelectItemModelProperties.bootstrap()`)
-   runs at that method's turn; any other shape that would apply is counted, and a registration
-   at a point after `BuiltInRegistries.freeze()` is the game failing to start.
+   where Fabric Loader 0.20.1 starts the entrypoints in `Minecraft.<init>`, both from
+   `tools/trace_bootstrap_clinit_order.py`, run with no network under `unshare -rn`). A `TAIL`
+   into a static `()V` method the bootstrap ends once (`RangeSelectItemModelProperties
+   .bootstrap()`) runs at that method's turn; any other shape that would apply is counted (a
+   name-only selector on an overloaded name, a `TAIL` into a static method with arguments or one
+   the bootstrap never reaches), and so is a registration into a built-in registry at a point
+   after `BuiltInRegistries.freeze()` (vanilla refuses it; Fabric API's registry sync delays the
+   freeze).
 2. **Default components.** The bake writes the item's component patch for jar types too (here
    `{"bundleapi:custom_bundle_contents": {"content": [], "size_multiplier": 4}}`). That has to
    wait for step 1, because Sunrise refuses an item declaration with an unregistered component
@@ -125,7 +129,8 @@ methods, and nothing in it names a mod.
    reads it) and the bound callback runs `get` on the item-part `ItemStack` façade
    (`NativeJar::range_select_property_value`; a level or holder present is an object whose
    every member counts, an absent one `null`). A property that counts reads `0.0`, as an
-   unregistered one does.
+   unregistered one does; a node the codec refuses rejects the item definition, as the game's
+   decoding does.
 8. **The tooltip component.** The jar's `TooltipComponentMixin` maps its `TooltipComponent`
    record to its `ClientTooltipComponent`, and the factory runs `getHeight`, `getWidth` and
    `extractImage` (26.3's name for `renderImage`) through the client screen façade that already
@@ -133,7 +138,8 @@ methods, and nothing in it names a mod.
    *Built:* `ItemPart::tooltip_image` runs the item's own `getTooltipImage`
    (`NativeJar::item_tooltip_image`), then the jar's cancellable `HEAD` callbacks into
    `ClientTooltipComponent.create` in Mixin's apply order (`NativeJar::client_tooltip_component`;
-   none cancelling is vanilla refusing the data: counted), then measures the component
+   none cancelling is vanilla refusing the data: counted; a name-only selector on the overloaded
+   `create` counts too), then measures the component
    (`NativeJar::tooltip_component_size`) and draws it once in its own box, and answers a custom
    `TooltipComponent` only when all of that was exact (otherwise vanilla's answer, no image,
    stands: never an empty box). The factory's `draw_image` runs `extractImage`

@@ -19,7 +19,8 @@
 //!   ([`NativeJar::item_tooltip_image`]); its `Optional<TooltipComponent>`'s value is the jar's
 //!   data object.
 //! * **`ClientTooltipComponent.create(TooltipComponent)`.** Vanilla's static interface method
-//!   knows only `BundleTooltip` and `ClientActivatorTooltip`; a mod maps its own data with a
+//!   knows only the bundle and active-players tooltips (`ClientBundleTooltip`,
+//!   `ClientActivePlayersTooltip`); a mod maps its own data with a
 //!   cancellable Mixin `@Inject(at = @At("HEAD"))` into it. [`NativeJar::client_tooltip_component`]
 //!   runs those callbacks in Mixin's apply order and takes the first `setReturnValue`; the
 //!   component's `getWidth(Font)`, `getHeight(Font)` and `extractImage(Font, int, int, int, int,
@@ -147,16 +148,18 @@ impl NativeJar {
     /// Decode one `range_dispatch` node (`node`, its JSON object) through the property codec a
     /// jar registered ([`StdHost::client_range_select_properties`]), as
     /// `RangeSelectItemModelProperties.MAP_CODEC`'s `dispatchMap` does: the codec reads the whole
-    /// node map. The property is retained on the host ([`StdHost::retain`]) for later
+    /// node map. `Ok(property)` is retained on the host ([`StdHost::retain`]) for later
     /// [`Self::range_select_property_value`] calls; the embedder releases it
-    /// ([`StdHost::release`]) when its model is dropped.
+    /// ([`StdHost::release`]) when its model is dropped. `Err(message)` is the codec refusing the
+    /// node (a DFU error): the game then rejects the item definition (`ItemModels` decoding
+    /// fails), and so should the embedder's loader.
     pub fn decode_range_select_property(
         &self,
         host: &mut StdHost,
         codec: &Value,
         node: &serde_json::Value,
         budget: &ExecutionBudget,
-    ) -> ClientItemOutcome<Value> {
+    ) -> ClientItemOutcome<Result<Value, String>> {
         let outcome = self.run_client_item_call(host, std::slice::from_ref(codec), budget, |rt| {
             let unknown = |what: &str| MethodRef {
                 owner: "com/mojang/serialization/MapCodec".into(),
@@ -170,14 +173,17 @@ impl NativeJar {
             let before = rt.host.counted_unknown_calls();
             match crate::dfu_codec::decode_map_json(rt, codec, map)? {
                 // A counted call inside the decode leaves the value unknown.
-                Ok(property) if rt.host.counted_unknown_calls() == before => Ok(Some(property)),
-                Ok(_) => Ok(None),
-                // A DFU error is an item definition the game rejects with its own message,
-                // which the embedder's loader does not have: counted.
-                Err(crate::recipe_models::DecodeError::Invalid(_)) => {
-                    rt.host.unknown_operand_call(&unknown("error"))?;
-                    Ok(None)
+                Ok(property) if rt.host.counted_unknown_calls() == before => {
+                    Ok(Some(Ok(property)))
                 }
+                Ok(_) => Ok(None),
+                // The codec refused the node: the game rejects the item definition.
+                Err(crate::recipe_models::DecodeError::Invalid(message))
+                    if rt.host.counted_unknown_calls() == before =>
+                {
+                    Ok(Some(Err(message)))
+                }
+                Err(crate::recipe_models::DecodeError::Invalid(_)) => Ok(None),
                 Err(crate::recipe_models::DecodeError::Unmodelled(_)) => {
                     rt.host.unknown_operand_call(&unknown("unmodelled"))?;
                     Ok(None)
@@ -185,7 +191,7 @@ impl NativeJar {
             }
         });
         if outcome.report.exact()
-            && let Some(property) = &outcome.value
+            && let Some(Ok(property)) = &outcome.value
         {
             host.retain(property);
         }
@@ -324,7 +330,9 @@ impl NativeJar {
                     .is_some_and(|method| method.is_static());
                 let shape = plan.at == "HEAD"
                     && plan.cancellable
-                    && matches!(plan.target.descriptor.as_str(), "" | CREATE_DESC)
+                    // `create` has two overloads (`create(FormattedCharSequence)` first): a
+                    // name-only selector selects both, which the one call here is not.
+                    && plan.target.descriptor == CREATE_DESC
                     && plan.ordinal.is_none()
                     && plan.slice.is_none()
                     && plan.shift.is_none()
@@ -351,8 +359,9 @@ impl NativeJar {
     /// `ClientTooltipComponent.create(data)` for a jar's `TooltipComponent` object: the jar's
     /// cancellable `HEAD` callbacks into it run in Mixin's apply order with one
     /// `CallbackInfoReturnable`, and the first that cancels answers its return value. When none
-    /// does, vanilla's body runs: it knows only `BundleTooltip` and `ClientActivatorTooltip`
-    /// (neither of which a jar's own record is) and otherwise throws, which Fabric API's own
+    /// does, vanilla's body runs: it knows only the bundle and active-players tooltips
+    /// (`ClientBundleTooltip`, `ClientActivePlayersTooltip`; neither is a jar's own record) and
+    /// otherwise throws, which Fabric API's own
     /// `TooltipComponentCallback` would intercept: counted. The component is retained on the host
     /// ([`StdHost::retain`]) until the embedder releases it.
     pub fn client_tooltip_component(

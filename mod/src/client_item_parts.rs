@@ -87,7 +87,9 @@ pub(crate) fn register_range_select_properties(
             };
             let client = Arc::clone(client);
             event.register(identifier, move |config: &Tag| {
-                let property = decode_property(&client, index, &codec, &id, config);
+                // The jar's codec refusing the node rejects the item definition, as the game's
+                // decoding does; a decode that counted reads `0.0`.
+                let property = decode_property(&client, index, &codec, &id, config)?;
                 Ok(
                     move |host: &dyn ClientHost, input: &ItemModelPropertyInput<'_>| {
                         property
@@ -110,23 +112,28 @@ struct BoundProperty {
     held: Retained,
 }
 
-/// The jar's codec on the node (its JSON object, which Sunrise hands as a `Tag`). `None` when it
-/// counted: the property then reads `0.0`, as an unregistered one does.
+/// The jar's codec on the node (its JSON object, which Sunrise hands as a `Tag`). `Ok(None)` when
+/// it counted: the property then reads `0.0`, as an unregistered one does. `Err` when the codec
+/// refused the node: the item definition is rejected.
 fn decode_property(
     client: &Arc<Mutex<State>>,
     jar: usize,
     codec: &Value,
     id: &str,
     config: &Tag,
-) -> Option<BoundProperty> {
-    let mut state = try_lock(client)?;
-    let loaded = state.jars.get_mut(jar)?;
+) -> Result<Option<BoundProperty>, String> {
+    let Some(mut state) = try_lock(client) else {
+        return Ok(None);
+    };
+    let Some(loaded) = state.jars.get_mut(jar) else {
+        return Ok(None);
+    };
     // A `Tag` holds no JSON booleans (`Byte`) apart from numbers: a node with a byte decodes
     // only when its codec reads no boolean, which can't be told here, so it counts.
     let node = super::nbt_to_json_value(config, false).filter(|_| !has_byte(config));
     let Some(node) = node else {
         note(loaded, &format!("range_select_property:{id}:node"));
-        return None;
+        return Ok(None);
     };
     let outcome = loaded.jar.decode_range_select_property(
         &mut loaded.host,
@@ -135,15 +142,17 @@ fn decode_property(
         &ExecutionBudget::within(JAR_BUDGET),
     );
     loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
-    let property = outcome.exact()?;
-    Some(BoundProperty {
+    let Some(property) = outcome.exact() else {
+        return Ok(None);
+    };
+    Ok(Some(BoundProperty {
         id: id.to_owned(),
         held: Retained {
             client: Arc::clone(client),
             jar,
-            value: property,
+            value: property?,
         },
-    })
+    }))
 }
 
 fn has_byte(tag: &Tag) -> bool {

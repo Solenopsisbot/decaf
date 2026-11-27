@@ -118,6 +118,14 @@ public final class ClientItemPartsOracle {
       }
     }
 
+    String refused =
+        "{\"type\":\"minecraft:range_dispatch\",\"property\":\"demo:fill\",\"divisor\":\"many\",\"entries\":[]}";
+    if (RangeSelectItemModelProperties.MAP_CODEC
+        .codec()
+        .parse(JsonOps.INSTANCE, JsonParser.parseString(refused))
+        .isError()) {
+      System.out.println("decode " + refused + " rejected");
+    }
     for (int count : new int[] {1, 3, 6}) {
       Optional<TooltipComponent> image = Probe.METER.getTooltipImage(new ItemStack(Probe.METER, count));
       if (image.isEmpty()) {

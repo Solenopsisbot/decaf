@@ -32,6 +32,9 @@ const NODES: &[&str] = &[
     r#"{"type":"minecraft:range_dispatch","property":"demo:fill","entries":[]}"#,
     r#"{"type":"minecraft:range_dispatch","property":"demo:fill","divisor":16,"entries":[]}"#,
 ];
+/// A node the property's codec refuses.
+const REFUSED: &str =
+    r#"{"type":"minecraft:range_dispatch","property":"demo:fill","divisor":"many","entries":[]}"#;
 const CASES: &[(i32, bool, bool, i32)] = &[
     (1, false, false, 0),
     (16, false, false, 0),
@@ -279,6 +282,7 @@ fn run_script() -> Vec<String> {
         let property = decoded
             .clone()
             .exact()
+            .and_then(Result::ok)
             .unwrap_or_else(|| panic!("{node} decodes: {:?}", decoded.report));
         out.push(format!("decode {node} ok"));
         for &(count, level, owner, seed) in CASES {
@@ -312,6 +316,12 @@ fn run_script() -> Vec<String> {
             ));
         }
     }
+    // A node the codec refuses (`divisor` is not an int): the game rejects the item definition.
+    let json: serde_json::Value = serde_json::from_str(REFUSED).unwrap();
+    let refused = jar.decode_range_select_property(&mut host, &codec, &json, &budget);
+    assert!(refused.report.exact(), "{:?}", refused.report);
+    assert!(matches!(refused.value, Some(Err(_))), "{:?}", refused.value);
+    out.push(format!("decode {REFUSED} rejected"));
     let meter = item(&host, "demo:meter");
     let overrides = jar.item_overrides(&meter, &host);
     let owner = overrides.owners[&ItemHook::TooltipImage].clone();

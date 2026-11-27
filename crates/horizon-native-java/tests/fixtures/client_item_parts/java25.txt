@@ -13,6 +13,7 @@ decode {"type":"minecraft:range_dispatch","property":"demo:fill","divisor":16,"e
   get count=48 level=true owner=false seed=0 -> 103.0
   get count=48 level=false owner=true seed=0 -> 1003.0
   get count=8 level=true owner=true seed=7 -> 1104.0
+decode {"type":"minecraft:range_dispatch","property":"demo:fill","divisor":"many","entries":[]} rejected
 tooltip_image count=1 -> empty
 tooltip_image count=3 -> present
   component width=54 height=22
