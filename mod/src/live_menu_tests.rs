@@ -108,13 +108,20 @@ enum VanillaMenu {
     /// MC 26.3 `CraftingMenu` (`minecraft:crafting`):
     /// `0` result, `1..=9` 3×3 grid, `10..=36` main inventory (`9..=35`), `37..=45` hotbar (`0..=8`).
     Crafting { window: i32 },
-    /// Sunrise's documented contract for `PlayerRef::container_menu` on a crafting table: returns
-    /// `None` so item click overrides decline instead of reading the wrong menu.
-    CraftingRefused,
-    /// Sunrise `3d34bbe63d` crafting-table bug (`lan_crafting.rs:1683`): `play.crafting.table` was
-    /// taken before dispatching `item_stacked_on_other`, so `player.container_menu()` falls back
-    /// to window 0 (`InventoryMenu`) while the click event carries `CraftingMenu` slot indices.
-    CraftingLiftedToWindow0,
+    /// Upstream Sunrise #6694 (`player.container_menu()` returns `None` while a crafting table or
+    /// workstation menu is lifted/open).
+    MenuUnavailable,
+    /// Sunrise `3d34bbe63d` crafting-table / workstation bug (`lan_crafting.rs`, `lan_stations.rs`):
+    /// `guest.menu` is `None` while the table/station is open, so `player.container_menu()` falls
+    /// back to window 0 (`InventoryMenu`) and `slot_backing(slot)` answers with `InventoryMenu`'s
+    /// layout (`CraftingMenu` hotbar 4 = slot 41 -> `Player(5)`; `Stonecutter`/`Enchanting`
+    /// hotbar 4 = slot 33 -> `Player(33)`; `Anvil`/`Grindstone`/`Cartography` slot 34 ->
+    /// `Player(34)`; `Smithing`/`Loom` slot 35 -> `Player(35)`; main inv 9 = slots 2..=4 ->
+    /// `CraftGrid`).
+    LiftedToWindow0,
+    /// A station menu whose `slot_backing(slot)` wrongly returns `Player(slot)` (identity: the
+    /// menu slot itself), matching the pattern reported in `BUGS-3d34-round6.md` Bug F.
+    StationIdentity { window: i32, kind: &'static str },
 }
 
 struct MenuTestHost {
@@ -777,10 +784,11 @@ impl mod_api::prelude::PlayerMenusBackend for MenuTestHost {
             Some(
                 VanillaMenu::Chest3 { window }
                 | VanillaMenu::Furnace { window }
-                | VanillaMenu::Crafting { window },
+                | VanillaMenu::Crafting { window }
+                | VanillaMenu::StationIdentity { window, .. },
             ) => Some(mod_api::__private::game::menu_ref(player, window, 1)),
-            Some(VanillaMenu::CraftingRefused) => None,
-            Some(VanillaMenu::CraftingLiftedToWindow0) | None => {
+            Some(VanillaMenu::MenuUnavailable) => None,
+            Some(VanillaMenu::LiftedToWindow0) | None => {
                 Some(mod_api::__private::game::menu_ref(player, 0, 0))
             }
         }
@@ -802,7 +810,8 @@ impl mod_api::prelude::MenusBackend for MenuTestHost {
             Some(
                 VanillaMenu::Chest3 { window }
                 | VanillaMenu::Furnace { window }
-                | VanillaMenu::Crafting { window },
+                | VanillaMenu::Crafting { window }
+                | VanillaMenu::StationIdentity { window, .. },
             ) if fields.window == window => Some(window),
             _ => None,
         }
@@ -825,6 +834,9 @@ impl mod_api::prelude::MenusBackend for MenuTestHost {
             Some(VanillaMenu::Crafting { window }) if fields.window == window => {
                 Some(Some("minecraft:crafting".to_owned()))
             }
+            Some(VanillaMenu::StationIdentity { window, kind }) if fields.window == window => {
+                Some(Some(kind.to_owned()))
+            }
             _ => None,
         }
     }
@@ -840,6 +852,16 @@ impl mod_api::prelude::MenusBackend for MenuTestHost {
             Some(VanillaMenu::Chest3 { window }) if fields.window == window => Some(63),
             Some(VanillaMenu::Furnace { window }) if fields.window == window => Some(39),
             Some(VanillaMenu::Crafting { window }) if fields.window == window => Some(46),
+            Some(VanillaMenu::StationIdentity { window, kind }) if fields.window == window => {
+                Some(match kind {
+                    "minecraft:stonecutter" | "minecraft:enchantment" => 38,
+                    "minecraft:anvil" | "minecraft:grindstone" | "minecraft:cartography_table" => {
+                        39
+                    }
+                    "minecraft:smithing" | "minecraft:loom" => 40,
+                    _ => 38,
+                })
+            }
             _ => None,
         }
     }
@@ -1012,6 +1034,9 @@ fn vanilla_menu_backing(
             37..=45 => Some(MenuSlotBacking::Player(slot - 37)),
             _ => None,
         },
+        VanillaMenu::StationIdentity { window: open, .. } if open == window => {
+            Some(MenuSlotBacking::Player(slot))
+        }
         _ => None,
     }
 }
@@ -3686,8 +3711,10 @@ fn item_use_drops_reentering_entity_join_level_do_not_deadlock() {
     );
 }
 
-/// BUGS-3d34-round5 Bug B: item click overrides across all four vanilla menus using MC 26.3's
-/// `javap`-verified slot layouts:
+/// BUGS-3d34-round5 Bug B & round6 Bug F: item click overrides across Inventory, Chest, Furnace,
+/// Crafting Table, and all 7 workstations using MC 26.3's `javap`-verified slot layouts
+/// (`AbstractContainerMenu.addStandardInventorySlots` adds plain `Slot`s over `Inventory.items`
+/// `0..36`):
 /// - `InventoryMenu` (window 0): `9..=35` main inv (`9..=35`), `36..=44` hotbar (`0..=8`),
 ///   `5..=8` armour (`39..=36`), `45` offhand (`40`).
 /// - `CraftingMenu` (`minecraft:crafting`): `0` result, `1..=9` 3×3 grid, `10..=36` main inv
@@ -3696,19 +3723,26 @@ fn item_use_drops_reentering_entity_join_level_do_not_deadlock() {
 ///   (`9..=35`), `54..=62` hotbar (`0..=8`).
 /// - `AbstractFurnaceMenu` (`minecraft:furnace`): `0` input, `1` fuel, `2` result, `3..=29` main
 ///   inv (`9..=35`), `30..=38` hotbar (`0..=8`).
+/// - `StonecutterMenu`, `EnchantmentMenu`: 2 own slots, `2..=28` main inv, `29..=37` hotbar.
+/// - `AnvilMenu`, `GrindstoneMenu`, `CartographyTableMenu`: 3 own slots, `3..=29` main inv,
+///   `30..=38` hotbar.
+/// - `SmithingMenu`, `LoomMenu`: 4 own slots, `4..=30` main inv, `31..=39` hotbar.
 ///
 /// Verifies:
-/// 1. Under Sunrise `3d34bbe63d`'s crafting-table bug (`CraftingLiftedToWindow0`), `slot_backing`
-///    returns `Player(index + 1)` (or `Player(0)` for inv 35, `Player(40)` for hotbar 8) which
-///    disagrees with `click.container_slot`; the bridge refuses (`Flow::Cancel`, `handled: true`,
-///    `Keep`/`Keep`) and counts `item_stacked_on_other:slot backing mismatch` instead of reading
-///    the next slot and corrupting the clicked slot.
-/// 2. When `slot_backing` matches `container_slot` but `inventory[index]` disagrees with
-///    `click.clicked`, the bridge refuses and counts `item_stacked_on_other:clicked slot mismatch`.
-/// 3. Valid clicks in Inventory, Chest, Furnace, and fixed CraftingMenu resolve the exact right
+/// 1. Valid clicks in Inventory, Chest, Furnace, and fixed CraftingMenu resolve the exact right
 ///    inventory slot with 0 counted calls.
-/// 4. When Java returns `false` without mutating either stack (even with an opaque vanilla
+/// 2. When Java returns `false` without mutating either stack (even with an opaque vanilla
 ///    component on the stack), the bridge sends `Keep`/`Keep` and never writes back.
+/// 3. Under Sunrise `3d34bbe63d` (`LiftedToWindow0`), upstream Sunrise #6694 (`MenuUnavailable`),
+///    and `StationIdentity` (`slot_backing(slot) == Player(slot)`), player-inventory clicks
+///    (`container == 0`, `container_slot < 36`) in the crafting table and all 7 stations resolve
+///    directly from `click.container_slot` with 0 counted calls.
+/// 4. Non-inventory slots (`container != 0`: station inputs/results, crafting grid) and
+///    armor/offhand (`container == 0`, `36..=40`) are declined and counted as `clicked slot rules`,
+///    never reading `inventory[0]` even when its stack matches `click.clicked`.
+/// 5. When `inventory[container_slot]` disagrees with `click.clicked` (whether `slot_backing`
+///    agrees, is lifted, or is unavailable), the bridge refuses (`Flow::Cancel`, `handled: true`,
+///    `Keep`/`Keep`) and counts `item_stacked_on_other:clicked slot mismatch`.
 #[test]
 fn item_clicks_in_inventory_chest_furnace_and_crafting_table_respect_menu_layouts() {
     use mod_api::{
@@ -3853,111 +3887,263 @@ fn item_clicks_in_inventory_chest_furnace_and_crafting_table_respect_menu_layout
             assert_eq!(result.carried, StackResult::Keep);
             assert_eq!(counted(&java), []);
 
-            // 3. Sunrise `3d34bbe63d` crafting-table bug (`CraftingLiftedToWindow0`):
-            //    hotbar 4 (CraftingMenu slot 41 -> InventoryMenu Player(5)),
-            //    inv 35 (CraftingMenu slot 36 -> InventoryMenu Player(0)),
-            //    hotbar 8 (CraftingMenu slot 45 -> InventoryMenu Player(40) offhand).
-            //    Every one must be refused with Keep/Keep and counted, never writing the next slot.
-            host.vanilla_menu = Some(VanillaMenu::CraftingLiftedToWindow0);
-            host.world.inventory[4] = Some(host.stack("demo:noop_clicker", 1));
-            host.world.inventory[5] = Some(host.stack("minecraft:diamond", 2));
-            host.world.inventory[35] = Some(host.stack("demo:noop_clicker", 1));
-            host.world.inventory[0] = Some(host.stack("minecraft:diamond", 7));
-            host.world.inventory[8] = Some(host.stack("demo:noop_clicker", 1));
-            for (slot, container_slot) in [(41usize, 4usize), (36, 35), (45, 8)] {
+            // 3. BUGS-3d34-round6 Bug F: player-inventory clicks (`container == 0`,
+            //    `container_slot < 36`) resolve directly from the event across the crafting table
+            //    and all 7 workstations even when `player.container_menu()` returns window 0
+            //    (`LiftedToWindow0`, Sunrise `3d34bbe63d`), returns `None` (`MenuUnavailable`,
+            //    upstream Sunrise #6694), or answers identity `Player(slot)` (`StationIdentity`).
+            //    MC 26.3 javap menu layouts (`addStandardInventorySlots` after `own_slots`):
+            //    - CraftingMenu: 10 own (0 result, 1..=9 grid), 10..=36 inv 9..=35, 37..=45 hb 0..=8
+            //    - StonecutterMenu / EnchantmentMenu: 2 own, 2..=28 inv 9..=35, 29..=37 hb 0..=8
+            //    - AnvilMenu / GrindstoneMenu / CartographyTableMenu: 3 own, 3..=29 inv 9..=35, 30..=38 hb 0..=8
+            //    - SmithingMenu / LoomMenu: 4 own, 4..=30 inv 9..=35, 31..=39 hb 0..=8
+            host.world.inventory[4] = Some(host.stack("minecraft:cobblestone", 1));
+            host.world.inventory[5] = Some(host.stack("minecraft:shulker_box", 1));
+            host.world.inventory[9] = Some(host.stack("minecraft:cobblestone", 1));
+            host.world.inventory[12] = Some(host.stack("minecraft:cobblestone", 1));
+            host.world.inventory[35] = Some(host.stack("minecraft:cobblestone", 1));
+            host.world.inventory[0] = Some(host.stack("minecraft:shulker_box", 1));
+            host.world.inventory[8] = Some(host.stack("minecraft:cobblestone", 1));
+
+            let broken_backing_menus = [
+                ("crafting_lifted", VanillaMenu::LiftedToWindow0, 10usize),
+                ("crafting_unavailable", VanillaMenu::MenuUnavailable, 10),
+                ("stonecutter_lifted", VanillaMenu::LiftedToWindow0, 2),
+                (
+                    "stonecutter_identity",
+                    VanillaMenu::StationIdentity {
+                        window: 10,
+                        kind: "minecraft:stonecutter",
+                    },
+                    2,
+                ),
+                ("enchanting_lifted", VanillaMenu::LiftedToWindow0, 2),
+                (
+                    "enchanting_identity",
+                    VanillaMenu::StationIdentity {
+                        window: 11,
+                        kind: "minecraft:enchantment",
+                    },
+                    2,
+                ),
+                ("anvil_lifted", VanillaMenu::LiftedToWindow0, 3),
+                (
+                    "anvil_identity",
+                    VanillaMenu::StationIdentity {
+                        window: 12,
+                        kind: "minecraft:anvil",
+                    },
+                    3,
+                ),
+                ("grindstone_lifted", VanillaMenu::LiftedToWindow0, 3),
+                (
+                    "grindstone_identity",
+                    VanillaMenu::StationIdentity {
+                        window: 13,
+                        kind: "minecraft:grindstone",
+                    },
+                    3,
+                ),
+                ("cartography_lifted", VanillaMenu::LiftedToWindow0, 3),
+                (
+                    "cartography_identity",
+                    VanillaMenu::StationIdentity {
+                        window: 14,
+                        kind: "minecraft:cartography_table",
+                    },
+                    3,
+                ),
+                ("smithing_lifted", VanillaMenu::LiftedToWindow0, 4),
+                (
+                    "smithing_identity",
+                    VanillaMenu::StationIdentity {
+                        window: 15,
+                        kind: "minecraft:smithing",
+                    },
+                    4,
+                ),
+                ("loom_lifted", VanillaMenu::LiftedToWindow0, 4),
+                (
+                    "loom_identity",
+                    VanillaMenu::StationIdentity {
+                        window: 16,
+                        kind: "minecraft:loom",
+                    },
+                    4,
+                ),
+            ];
+            for (name, menu, own_slots) in broken_backing_menus {
+                host.vanilla_menu = Some(menu);
+                // Check main inv 9 (`own_slots`, maps to CraftGrid in window 0 for stations),
+                // main inv 12 (`own_slots + 3`, maps to armor 39 in window 0 for 2-slot stations),
+                // main inv 35 (`own_slots + 26`, wraps to inv 0 in window 0 for CraftingMenu),
+                // hotbar 4 (`own_slots + 31`, cobblestone -> fits=true),
+                // hotbar 5 (`own_slots + 32`, shulker_box -> fits=false, distinguishes Java's
+                // false from `refuse_click`'s Flow::Cancel),
+                // hotbar 8 (`own_slots + 35`, maps to offhand 40 in window 0 for CraftingMenu).
+                for (slot, container_slot, expected_fits) in [
+                    (own_slots, 9usize, true),
+                    (own_slots + 3, 12, true),
+                    (own_slots + 26, 35, true),
+                    (own_slots + 31, 4, true),
+                    (own_slots + 32, 5, false),
+                    (own_slots + 35, 8, true),
+                ] {
+                    let click = StackedOnOther::new(
+                        Some(UUID),
+                        Some(ENTITY_ID as i32),
+                        slot,
+                        0,
+                        container_slot,
+                        false,
+                        Some(host.stack("demo:fitter", 1)),
+                        host.world.inventory[container_slot].clone(),
+                    );
+                    let mut result = StackedOnOtherResult::default();
+                    let flow = fitter.server_click(
+                        &mut host,
+                        &click,
+                        &mut result,
+                        crate::runtime::ItemClickDirection::CarriedOnOther,
+                    );
+                    assert_eq!(
+                        matches!(flow, Flow::Cancel),
+                        expected_fits,
+                        "{name} slot {slot} -> inv {container_slot} must read fits={expected_fits}"
+                    );
+                    assert_eq!(result.handled, expected_fits, "{name}");
+                    assert_eq!(result.clicked, ClickedStackResult::Keep, "{name}");
+                    assert_eq!(result.carried, StackResult::Keep, "{name}");
+                }
+            }
+            assert_eq!(counted(&java), []);
+
+            // 4. Non-inventory slots (a station's own input slot `container=1`, result slot
+            //    `container=3`, crafting grid `container=2`) and armor/offhand (`container=0`,
+            //    `container_slot` 36..=40) are declined and counted as `clicked slot rules`, even
+            //    when `inventory[0]` holds the exact same stack as `click.clicked`.
+            host.world.inventory[0] = Some(host.stack("minecraft:cobblestone", 1));
+            let declined_cases = [
+                (
+                    "station input slot 0 (window 0)",
+                    VanillaMenu::LiftedToWindow0,
+                    0usize,
+                    1usize,
+                    0usize,
+                ),
+                (
+                    "station result slot 1 (window 0)",
+                    VanillaMenu::LiftedToWindow0,
+                    1,
+                    3,
+                    0,
+                ),
+                (
+                    "station input slot 0 (identity)",
+                    VanillaMenu::StationIdentity {
+                        window: 10,
+                        kind: "minecraft:stonecutter",
+                    },
+                    0,
+                    1,
+                    0,
+                ),
+                (
+                    "crafting grid slot 5 (window 0)",
+                    VanillaMenu::LiftedToWindow0,
+                    5,
+                    2,
+                    4,
+                ),
+                (
+                    "armor helmet (inv 39)",
+                    VanillaMenu::LiftedToWindow0,
+                    5,
+                    0,
+                    39,
+                ),
+                ("offhand (inv 40)", VanillaMenu::LiftedToWindow0, 45, 0, 40),
+            ];
+            for (case, menu, slot, container, container_slot) in declined_cases {
+                host.vanilla_menu = Some(menu);
                 let click = StackedOnOther::new(
                     Some(UUID),
                     Some(ENTITY_ID as i32),
                     slot,
-                    0,
+                    container,
                     container_slot,
+                    false,
+                    Some(host.stack("demo:fitter", 1)),
+                    Some(host.stack("minecraft:cobblestone", 1)),
+                );
+                let mut result = StackedOnOtherResult::default();
+                let flow = fitter.server_click(
+                    &mut host,
+                    &click,
+                    &mut result,
+                    crate::runtime::ItemClickDirection::CarriedOnOther,
+                );
+                assert!(
+                    matches!(flow, Flow::Continue) && !result.handled,
+                    "{case}: must be declined"
+                );
+                assert_eq!(result.clicked, ClickedStackResult::Keep, "{case}");
+                assert_eq!(result.carried, StackResult::Keep, "{case}");
+            }
+
+            // 5. Clicked stack disagrees with `inventory[container_slot]` (both when `slot_backing`
+            //    agrees in InventoryMenu and when `slot_backing` is lifted/unavailable in a
+            //    station): bridge refuses (`Flow::Cancel`, `handled: true`, `Keep`/`Keep`) and
+            //    counts `clicked slot mismatch`.
+            host.world.inventory[4] = Some(host.stack("demo:noop_clicker", 1));
+            for (case, menu, slot) in [
+                ("inventory mismatch", None, 40usize),
+                (
+                    "station lifted mismatch",
+                    Some(VanillaMenu::LiftedToWindow0),
+                    33,
+                ),
+                (
+                    "station unavailable mismatch",
+                    Some(VanillaMenu::MenuUnavailable),
+                    33,
+                ),
+            ] {
+                host.vanilla_menu = menu;
+                let stale_click = StackedOnOther::new(
+                    Some(UUID),
+                    Some(ENTITY_ID as i32),
+                    slot,
+                    0,
+                    4,
                     true,
                     None,
-                    host.world.inventory[container_slot].clone(),
+                    Some(host.stack("minecraft:diamond", 2)),
                 );
                 let mut result = StackedOnOtherResult::default();
                 let flow = noop.server_click(
                     &mut host,
-                    &click,
+                    &stale_click,
                     &mut result,
                     crate::runtime::ItemClickDirection::OtherStackedOnMe,
                 );
                 assert!(
                     matches!(flow, Flow::Cancel) && result.handled,
-                    "crafting lifted slot {slot} (container_slot {container_slot}) must be refused"
+                    "{case}: must refuse on stack mismatch"
                 );
-                assert_eq!(result.clicked, ClickedStackResult::Keep);
-                assert_eq!(result.carried, StackResult::Keep);
+                assert_eq!(result.clicked, ClickedStackResult::Keep, "{case}");
+                assert_eq!(result.carried, StackResult::Keep, "{case}");
             }
-            assert_eq!(
-                counted(&java),
-                [(
-                    "bridge: item_stacked_on_other:slot backing mismatch".to_owned(),
-                    3
-                )]
-            );
-
-            // 4. Documented Sunrise crafting-table refusal (`player.container_menu() == None`):
-            //    declines cleanly without corruption.
-            host.vanilla_menu = Some(VanillaMenu::CraftingRefused);
-            let click = StackedOnOther::new(
-                Some(UUID),
-                Some(ENTITY_ID as i32),
-                41,
-                0,
-                4,
-                true,
-                None,
-                host.world.inventory[4].clone(),
-            );
-            let mut result = StackedOnOtherResult::default();
-            let flow = noop.server_click(
-                &mut host,
-                &click,
-                &mut result,
-                crate::runtime::ItemClickDirection::OtherStackedOnMe,
-            );
-            assert!(matches!(flow, Flow::Continue) && !result.handled);
-            assert_eq!(result.clicked, ClickedStackResult::Keep);
-            assert_eq!(result.carried, StackResult::Keep);
-
-            // 5. Clicked stack disagrees with `inventory[container_slot]` even when `slot_backing`
-            //    agrees: bridge refuses and counts `clicked slot mismatch`.
-            host.vanilla_menu = None;
-            let stale_click = StackedOnOther::new(
-                Some(UUID),
-                Some(ENTITY_ID as i32),
-                40,
-                0,
-                4,
-                true,
-                None,
-                Some(host.stack("minecraft:diamond", 2)),
-            );
-            let mut result = StackedOnOtherResult::default();
-            let flow = noop.server_click(
-                &mut host,
-                &stale_click,
-                &mut result,
-                crate::runtime::ItemClickDirection::OtherStackedOnMe,
-            );
-            assert!(matches!(flow, Flow::Cancel) && result.handled);
-            assert_eq!(result.clicked, ClickedStackResult::Keep);
-            assert_eq!(result.carried, StackResult::Keep);
             assert_eq!(
                 counted(&java),
                 [
                     (
                         "bridge: item_stacked_on_other:clicked slot mismatch".to_owned(),
-                        1
+                        3
                     ),
                     (
                         "bridge: item_stacked_on_other:clicked slot rules".to_owned(),
-                        1
-                    ),
-                    (
-                        "bridge: item_stacked_on_other:slot backing mismatch".to_owned(),
-                        3
+                        6
                     ),
                 ]
             );
@@ -3965,16 +4151,23 @@ fn item_clicks_in_inventory_chest_furnace_and_crafting_table_respect_menu_layout
     });
 }
 
-/// BUGS-3d34-round5 Bug B end-to-end with the real Runes 1.3.2 jar:
-/// - Reproduces the exact crafting-table report: `runes:small_rune_pouch` at hotbar 4 (CraftingMenu
-///   slot 41, `container_slot = 4`) beside 2 diamonds at hotbar 5, and at main inv 35 (slot 36,
-///   `container_slot = 35`) beside 61 white wool at hotbar 0, and at hotbar 8 (slot 45,
-///   `container_slot = 8`). Under Sunrise `3d34bbe63d`'s window-0 crafting bug, every click is
-///   refused (`Flow::Cancel`, `handled: true`, `Keep`/`Keep`) and counted — never overwriting the
-///   pouch with 2 diamonds or duplicating diamonds.
-/// - In Inventory (`window 0`), Chest (`minecraft:generic_9x3`), Furnace (`minecraft:furnace`), and
-///   a non-lifted `CraftingMenu`, right-clicking 10 `runes:fire_stone` onto the pouch inserts them
-///   cleanly, and left-clicking with an empty cursor returns `Flow::Continue` with `Keep`/`Keep`.
+/// BUGS-3d34-round6 Bug F end-to-end with the real Runes 1.3.2 jar:
+/// - In Inventory (`window 0`), Chest (`minecraft:generic_9x3`), Furnace (`minecraft:furnace`),
+///   Crafting Table (both fixed, Sunrise `3d34bbe63d` `LiftedToWindow0`, and upstream Sunrise
+///   #6694 `MenuUnavailable`), and all 7 workstations (`Stonecutter`, `Enchanting`, `Anvil`,
+///   `Grindstone`, `Cartography`, `Smithing`, `Loom`) with Sunrise's wrong `slot_backing`
+///   (`LiftedToWindow0` and `StationIdentity`):
+///   - left-clicking empty cursor on the pouch passes cleanly (`Flow::Continue`, `Keep`/`Keep`),
+///     never touching the adjacent diamonds/wool;
+///   - right-clicking `10 runes:fire_stone` onto the pouch inserts them identically to Inventory;
+///   - right-clicking empty cursor onto the filled pouch takes `10 runes:fire_stone` back out and
+///     clears the pouch's component patch identically to Inventory;
+///   - right-clicking the carried filled pouch onto an empty inventory slot empties the stack into
+///     the slot identically to Inventory (`CarriedOnOther`), all with 0 counted calls.
+/// - Clicking a station's own input slot (`container = 1`) or result slot (`container = 3`) is
+///   declined and counted as `clicked slot rules` (never touching `inventory[0]`).
+/// - A clicked-stack mismatch (`inventory[container_slot] != click.clicked`) is refused
+///   (`Flow::Cancel`, `handled: true`, `Keep`/`Keep`) and counted as `clicked slot mismatch`.
 #[test]
 fn real_runes_pouch_clicks_across_crafting_table_inventory_chest_and_furnace() {
     use mod_api::{ClickedStackResult, Flow, StackResult, StackedOnOther, StackedOnOtherResult};
@@ -4000,21 +4193,139 @@ fn real_runes_pouch_clicks_across_crafting_table_inventory_chest_and_furnace() {
             );
             let empty_pouch = host.stack(POUCH, 1);
 
-            // 1. Inventory, Chest (9x3), Furnace, and fixed CraftingMenu:
-            //    - right-click 10 fire stones onto the pouch at hotbar 4 -> inserts cleanly
-            //    - left-click empty cursor on the pouch at hotbar 4 -> unhandled, Keep/Keep
-            let valid_menus = [
-                ("inventory", None, 40usize),
-                ("crafting", Some(VanillaMenu::Crafting { window: 2 }), 41),
-                ("chest_9x3", Some(VanillaMenu::Chest3 { window: 3 }), 58),
-                ("furnace", Some(VanillaMenu::Furnace { window: 4 }), 34),
+            // Capture the InventoryMenu oracle answers first, then verify every menu matches them
+            // byte-for-byte (components, counts, and Keep/Set shapes) with 0 counted calls.
+            // Each entry is (label, vanilla_menu, menu_slot_of_hotbar_4, menu_slot_of_inv_35).
+            let menus = [
+                ("inventory", None, 40usize, 35usize),
+                ("chest_9x3", Some(VanillaMenu::Chest3 { window: 3 }), 58, 53),
+                ("furnace", Some(VanillaMenu::Furnace { window: 4 }), 34, 29),
+                (
+                    "crafting_fixed",
+                    Some(VanillaMenu::Crafting { window: 2 }),
+                    41,
+                    36,
+                ),
+                // Crafting table + 7 workstations reproducing Sunrise `3d34bbe63d` (`LiftedToWindow0`)
+                // and `StationIdentity` (`slot_backing(slot) == Player(slot)`) plus #6694 (`None`).
+                (
+                    "crafting_lifted",
+                    Some(VanillaMenu::LiftedToWindow0),
+                    41,
+                    36,
+                ),
+                (
+                    "crafting_unavailable",
+                    Some(VanillaMenu::MenuUnavailable),
+                    41,
+                    36,
+                ),
+                (
+                    "stonecutter_lifted",
+                    Some(VanillaMenu::LiftedToWindow0),
+                    33,
+                    28,
+                ),
+                (
+                    "stonecutter_identity",
+                    Some(VanillaMenu::StationIdentity {
+                        window: 10,
+                        kind: "minecraft:stonecutter",
+                    }),
+                    33,
+                    28,
+                ),
+                (
+                    "enchanting_lifted",
+                    Some(VanillaMenu::LiftedToWindow0),
+                    33,
+                    28,
+                ),
+                (
+                    "enchanting_identity",
+                    Some(VanillaMenu::StationIdentity {
+                        window: 11,
+                        kind: "minecraft:enchantment",
+                    }),
+                    33,
+                    28,
+                ),
+                ("anvil_lifted", Some(VanillaMenu::LiftedToWindow0), 34, 29),
+                (
+                    "anvil_identity",
+                    Some(VanillaMenu::StationIdentity {
+                        window: 12,
+                        kind: "minecraft:anvil",
+                    }),
+                    34,
+                    29,
+                ),
+                (
+                    "grindstone_lifted",
+                    Some(VanillaMenu::LiftedToWindow0),
+                    34,
+                    29,
+                ),
+                (
+                    "grindstone_identity",
+                    Some(VanillaMenu::StationIdentity {
+                        window: 13,
+                        kind: "minecraft:grindstone",
+                    }),
+                    34,
+                    29,
+                ),
+                (
+                    "cartography_lifted",
+                    Some(VanillaMenu::LiftedToWindow0),
+                    34,
+                    29,
+                ),
+                (
+                    "cartography_identity",
+                    Some(VanillaMenu::StationIdentity {
+                        window: 14,
+                        kind: "minecraft:cartography_table",
+                    }),
+                    34,
+                    29,
+                ),
+                (
+                    "smithing_lifted",
+                    Some(VanillaMenu::LiftedToWindow0),
+                    35,
+                    30,
+                ),
+                (
+                    "smithing_identity",
+                    Some(VanillaMenu::StationIdentity {
+                        window: 15,
+                        kind: "minecraft:smithing",
+                    }),
+                    35,
+                    30,
+                ),
+                ("loom_lifted", Some(VanillaMenu::LiftedToWindow0), 35, 30),
+                (
+                    "loom_identity",
+                    Some(VanillaMenu::StationIdentity {
+                        window: 16,
+                        kind: "minecraft:loom",
+                    }),
+                    35,
+                    30,
+                ),
             ];
-            for (name, menu, hb4_slot) in valid_menus {
+            let mut oracle_filled_pouch: Option<ItemStack> = None;
+            for (name, menu, hb4_slot, inv35_slot) in menus {
                 host.vanilla_menu = menu;
+                host.world.inventory[0] = Some(host.stack("minecraft:white_wool", 61));
                 host.world.inventory[4] = Some(empty_pouch.clone());
                 host.world.inventory[5] = Some(host.stack("minecraft:diamond", 2));
+                host.world.inventory[35] = None;
 
-                // Left-click empty cursor on the pouch: Java returns false, nothing changes -> Keep.
+                // 1. Left-click empty cursor on the pouch at hotbar 4: Java returns false, nothing
+                //    changes -> Keep/Keep.
                 let left_click = StackedOnOther::new(
                     Some(UUID),
                     Some(ENTITY_ID as i32),
@@ -4039,7 +4350,7 @@ fn real_runes_pouch_clicks_across_crafting_table_inventory_chest_and_furnace() {
                 assert_eq!(left_result.clicked, ClickedStackResult::Keep, "{name}");
                 assert_eq!(left_result.carried, StackResult::Keep, "{name}");
 
-                // Right-click 10 fire stones onto the pouch: inserted into the pouch.
+                // 2. Right-click 10 fire stones onto the pouch at hotbar 4: inserted into pouch.
                 let right_click = StackedOnOther::new(
                     Some(UUID),
                     Some(ENTITY_ID as i32),
@@ -4062,56 +4373,130 @@ fn real_runes_pouch_clicks_across_crafting_table_inventory_chest_and_furnace() {
                     "{name}: right-click inserting fire stones into pouch should succeed"
                 );
                 assert_eq!(right_result.carried, StackResult::Set(None), "{name}");
-                let ClickedStackResult::Set(Some(updated_pouch)) = right_result.clicked else {
+                let ClickedStackResult::Set(Some(filled_pouch)) = right_result.clicked else {
                     panic!(
                         "{name}: expected updated pouch stack, got {:?}",
                         right_result.clicked
                     );
                 };
-                assert_eq!(
-                    host.text(&Some(updated_pouch.clone())),
-                    format!("1 {POUCH}")
+                assert_eq!(host.text(&Some(filled_pouch.clone())), format!("1 {POUCH}"));
+                assert!(
+                    filled_pouch.components().is_some(),
+                    "{name}: pouch must carry bundleapi:custom_bundle_contents"
+                );
+                match &oracle_filled_pouch {
+                    None => oracle_filled_pouch = Some(filled_pouch.clone()),
+                    Some(expected) => assert_eq!(
+                        &filled_pouch, expected,
+                        "{name}: inserted pouch must match InventoryMenu exactly"
+                    ),
+                }
+
+                // 3. Right-click empty cursor onto the filled pouch at hotbar 4: takes 10 fire
+                //    stones onto the cursor and empties the pouch (`OtherStackedOnMe`).
+                host.world.inventory[4] = Some(filled_pouch.clone());
+                let take_click = StackedOnOther::new(
+                    Some(UUID),
+                    Some(ENTITY_ID as i32),
+                    hb4_slot,
+                    0,
+                    4,
+                    false,
+                    None,
+                    Some(filled_pouch.clone()),
+                );
+                let mut take_result = StackedOnOtherResult::default();
+                let take_flow = part.server_click(
+                    &mut host,
+                    &take_click,
+                    &mut take_result,
+                    crate::runtime::ItemClickDirection::OtherStackedOnMe,
                 );
                 assert!(
-                    updated_pouch.components().is_some(),
-                    "{name}: pouch must carry bundleapi:custom_bundle_contents"
+                    matches!(take_flow, Flow::Cancel) && take_result.handled,
+                    "{name}: right-click taking from filled pouch should succeed"
+                );
+                assert_eq!(
+                    take_result.carried,
+                    StackResult::Set(Some(host.stack(FIRE, 10))),
+                    "{name}"
+                );
+                assert_eq!(
+                    take_result.clicked,
+                    ClickedStackResult::Set(Some(empty_pouch.clone())),
+                    "{name}"
+                );
+
+                // 4. Right-click carried filled pouch onto empty main inventory slot 35: takes
+                //    10 fire stones into slot 35 (`CarriedOnOther`, where CraftingMenu slot 36
+                //    would wrap to inv 0's 61 wool under window-0 backing!).
+                let unload_click = StackedOnOther::new(
+                    Some(UUID),
+                    Some(ENTITY_ID as i32),
+                    inv35_slot,
+                    0,
+                    35,
+                    false,
+                    Some(filled_pouch.clone()),
+                    None,
+                );
+                let mut unload_result = StackedOnOtherResult::default();
+                let unload_flow = part.server_click(
+                    &mut host,
+                    &unload_click,
+                    &mut unload_result,
+                    crate::runtime::ItemClickDirection::CarriedOnOther,
+                );
+                assert!(
+                    matches!(unload_flow, Flow::Cancel) && unload_result.handled,
+                    "{name}: right-click unloading carried pouch into inv 35 should succeed"
+                );
+                assert_eq!(
+                    unload_result.carried,
+                    StackResult::Set(Some(empty_pouch.clone())),
+                    "{name}"
+                );
+                assert_eq!(
+                    unload_result.clicked,
+                    ClickedStackResult::Set(Some(host.stack(FIRE, 10))),
+                    "{name}"
                 );
             }
             assert_eq!(counted(&java), []);
 
-            // 2. Sunrise `3d34bbe63d` crafting-table bug (`CraftingLiftedToWindow0`):
-            //    Reproduce BUGS-3d34-round5 verbatim:
-            //    - hotbar 4 (pouch) + hotbar 5 (2 diamonds): left-click empty cursor & right-click 10 fire stones
-            //    - inv 35 (pouch) + hotbar 0 (61 white wool): left-click empty cursor
-            //    - hotbar 8 (pouch): left-click empty cursor (slot 45 -> InventoryMenu Player(40))
-            host.vanilla_menu = Some(VanillaMenu::CraftingLiftedToWindow0);
-            host.world.inventory[0] = Some(host.stack("minecraft:white_wool", 61));
-            host.world.inventory[4] = Some(empty_pouch.clone());
-            host.world.inventory[5] = Some(host.stack("minecraft:diamond", 2));
-            host.world.inventory[8] = Some(empty_pouch.clone());
-            host.world.inventory[35] = Some(empty_pouch.clone());
-
-            let bug_cases = [
-                ("hb4 left-click", 41usize, 4usize, true, None),
+            // 5. Clicking a station's own input slot (`container = 1`) or result slot
+            //    (`container = 3`) is declined and counted (`clicked slot rules`), never touching
+            //    `inventory[0]` even when `inventory[0]` holds the same stack.
+            let filled_pouch = oracle_filled_pouch.expect("inventory oracle ran");
+            host.world.inventory[0] = Some(empty_pouch.clone());
+            for (case, menu, slot, container) in [
                 (
-                    "hb4 right-click insert",
-                    41,
-                    4,
-                    false,
-                    Some(host.stack(FIRE, 10)),
+                    "stonecutter input 0",
+                    VanillaMenu::LiftedToWindow0,
+                    0usize,
+                    1usize,
                 ),
-                ("inv35 left-click (wraps to 0)", 36, 35, true, None),
-                ("hb8 left-click (maps to offhand 40)", 45, 8, true, None),
-            ];
-            for (case, slot, container_slot, primary, carried) in bug_cases {
+                ("stonecutter result 1", VanillaMenu::LiftedToWindow0, 1, 3),
+                (
+                    "anvil input 0 (identity)",
+                    VanillaMenu::StationIdentity {
+                        window: 12,
+                        kind: "minecraft:anvil",
+                    },
+                    0,
+                    1,
+                ),
+                ("crafting result 0", VanillaMenu::LiftedToWindow0, 0, 3),
+            ] {
+                host.vanilla_menu = Some(menu);
                 let click = StackedOnOther::new(
                     Some(UUID),
                     Some(ENTITY_ID as i32),
                     slot,
+                    container,
                     0,
-                    container_slot,
-                    primary,
-                    carried,
+                    false,
+                    Some(host.stack(FIRE, 10)),
                     Some(empty_pouch.clone()),
                 );
                 let mut result = StackedOnOtherResult::default();
@@ -4122,18 +4507,51 @@ fn real_runes_pouch_clicks_across_crafting_table_inventory_chest_and_furnace() {
                     crate::runtime::ItemClickDirection::OtherStackedOnMe,
                 );
                 assert!(
-                    matches!(flow, Flow::Cancel) && result.handled,
-                    "{case}: must refuse instead of corrupting slot {container_slot}"
+                    matches!(flow, Flow::Continue) && !result.handled,
+                    "{case}: station's own slot must be declined"
                 );
                 assert_eq!(result.clicked, ClickedStackResult::Keep, "{case}");
                 assert_eq!(result.carried, StackResult::Keep, "{case}");
             }
+
+            // 6. Clicked-stack mismatch in a station is refused and counted.
+            host.vanilla_menu = Some(VanillaMenu::LiftedToWindow0);
+            host.world.inventory[4] = Some(empty_pouch.clone());
+            let mismatch = StackedOnOther::new(
+                Some(UUID),
+                Some(ENTITY_ID as i32),
+                33,
+                0,
+                4,
+                false,
+                None,
+                Some(filled_pouch),
+            );
+            let mut result = StackedOnOtherResult::default();
+            let flow = part.server_click(
+                &mut host,
+                &mismatch,
+                &mut result,
+                crate::runtime::ItemClickDirection::OtherStackedOnMe,
+            );
+            assert!(
+                matches!(flow, Flow::Cancel) && result.handled,
+                "clicked-stack mismatch must be refused"
+            );
+            assert_eq!(result.clicked, ClickedStackResult::Keep);
+            assert_eq!(result.carried, StackResult::Keep);
             assert_eq!(
                 counted(&java),
-                [(
-                    "bridge: item_stacked_on_other:slot backing mismatch".to_owned(),
-                    4
-                )]
+                [
+                    (
+                        "bridge: item_stacked_on_other:clicked slot mismatch".to_owned(),
+                        1
+                    ),
+                    (
+                        "bridge: item_stacked_on_other:clicked slot rules".to_owned(),
+                        4
+                    ),
+                ]
             );
         });
     });
