@@ -388,6 +388,7 @@ impl StdHost {
         // a `DeferredRegister`'s values) and the JDK's shared empties.
         self.constructed_entrypoints
             .values()
+            .flat_map(BTreeMap::values)
             .for_each(|held| value(held, out));
         for (key, held) in &self.deferred_registers {
             out.push(key);
@@ -403,6 +404,11 @@ impl StdHost {
         self.recipes.root_texts(out);
         // Active block-use state and open-menu effects.
         self.block_use.root_texts(out);
+        // Game constants the models made as jar objects (`Vec2.ZERO`, `MobCategory.CREATURE`):
+        // static finals, never unreachable, so their heap numbers are never freed (#669).
+        self.vec2.root_texts(out);
+        self.tool_material.root_texts(out);
+        self.entity_registration.root_texts(out);
         // Seeded `Level.random` handles kept per dimension (`level_sound.rs`).
         for held in self.level_sound.level_random_handles.values() {
             value(held, out);
@@ -1984,7 +1990,16 @@ mod tests {
     fn entity_registration_handles_follow_callback_collection_roots() {
         let mut host = StdHost::new();
         let mut heap = JavaHeap::default();
-        let category = crate::entity_registration::category_constant("CREATURE").unwrap();
+        // The models number their objects with the heap's allocator (#669).
+        let mut next = heap.next_object;
+        let mut numbers = crate::jar_object::Numbers::new(&mut next);
+        let category = crate::entity_registration::category_constant(
+            &mut host.entity_registration,
+            Some(&mut numbers),
+            "CREATURE",
+        )
+        .unwrap()
+        .unwrap();
         let builder = crate::entity_registration::static_call(
             &mut host.entity_registration,
             &crate::MethodRef {
@@ -1993,6 +2008,7 @@ mod tests {
                 descriptor: "()".into(),
             },
             &[Value::Ref(Some("factory".into())), category],
+            Some(&mut numbers),
         )
         .unwrap()
         .unwrap();
@@ -2005,15 +2021,22 @@ mod tests {
             },
             &builder,
             &[Value::Ref(Some("minecraft:probe".into()))],
+            Some(&mut numbers),
         )
         .unwrap()
         .unwrap();
         let accessor = crate::entity_registration::define_id(
             &mut host.entity_registration,
             "net/minecraft/world/entity/Entity",
+            Some(&mut numbers),
         )
         .unwrap()
         .unwrap();
+        heap.next_object = next;
+        assert_eq!(
+            crate::entity_registration::accessor_id(&host.entity_registration, &accessor),
+            Some(8)
+        );
         let entity_key = crate::jar_object::instance_key(&entity).unwrap().to_owned();
         let accessor_key = crate::jar_object::instance_key(&accessor)
             .unwrap()
@@ -2031,12 +2054,27 @@ mod tests {
             text("java/util/ArrayList#neutral0"),
         );
         collect(&mut heap, &mut host, &[]);
-        assert_eq!(host.entity_registration.entry_count(), 1);
+        // The built entity type and the accessor's id row, both reached from the root list.
+        assert_eq!(host.entity_registration.entry_count(), 2);
         host.persistent_static_fields.clear();
         collect(&mut heap, &mut host, &[]);
         assert_eq!(host.entity_registration.entry_count(), 0);
         assert!(heap.fields.is_empty());
-        assert_eq!(crate::entity_registration::accessor_id(&accessor), Some(8));
+        // The category constant is a root: its number is never freed.
+        assert!(
+            !host.freed_objects.holds_key(
+                crate::jar_object::object_key(
+                    &crate::entity_registration::category_constant(
+                        &mut host.entity_registration,
+                        None,
+                        "CREATURE"
+                    )
+                    .unwrap()
+                    .unwrap()
+                )
+                .unwrap()
+            )
+        );
     }
 
     /// A placement snapshot whose hand item is the jar object `item`.
@@ -2230,6 +2268,8 @@ mod tests {
             "random_derived_unknown",
             // A key counter (`random_source.rs`).
             "next_random_source",
+            // Counts of entrypoint declarations the runner reached (`lib.rs`).
+            "entrypoint_declarations_run",
             "next_unmodifiable_collection",
             "next_reversed_view",
             "next_ranged_attribute",

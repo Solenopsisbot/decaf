@@ -1,0 +1,1 @@
+[RED, green!, BLUE]|[RED, green!]|{g=green!}|[green!]|[green!, s:LIGHT]|green!|green!|GREEN|[s:DARK, s:LIGHT]|green!|[green!, RED]|[green!, RED]|[plain, strings]

@@ -46,11 +46,12 @@ pub(crate) fn handle(kind: HostKind, values: &[Value]) -> Value {
 
 /// A handle of `kind` for a config class (its internal name): `serial` tells
 /// apart the objects of a kind that makes a new one per call (`0` for an
-/// `AutoConfig` holder, one per class).
-pub(crate) fn of_class(kind: HostKind, class: &str, serial: i32) -> Value {
+/// `AutoConfig` holder, one per class). A `long`: it is a heap allocation number
+/// (`client_config.rs`), which outgrows an `int` once a game hook has run (#669).
+pub(crate) fn of_class(kind: HostKind, class: &str, serial: i64) -> Value {
     handle(
         kind,
-        &[Value::Ref(Some(class.to_owned())), Value::Int(serial)],
+        &[Value::Ref(Some(class.to_owned())), Value::Long(serial)],
     )
 }
 
@@ -59,7 +60,7 @@ pub(crate) fn class_of(value: &Value, kinds: &[HostKind]) -> Option<String> {
     match value {
         Value::Host(handle) if kinds.contains(&handle.kind()) => {
             match handle.values()?.as_slice() {
-                [Value::Ref(Some(class)), Value::Int(_)] => Some(class.clone()),
+                [Value::Ref(Some(class)), Value::Long(_)] => Some(class.clone()),
                 _ => None,
             }
         }
@@ -149,7 +150,7 @@ mod tests {
         ];
         let mut keys = std::collections::BTreeSet::new();
         for class in classes {
-            for serial in [0, 1, 12] {
+            for serial in [0, 1, 12, 1 << 40, (1 << 40) + 1] {
                 let holder = of_class(HostKind::YaclBuilder, class, serial);
                 let Value::Host(handle) = &holder else {
                     unreachable!()

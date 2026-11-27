@@ -38,7 +38,7 @@ pub const GAME_OBJECT_PREFIX: &str = "game/";
 
 /// Jar objects a hook callback builds are numbered from here, so they cannot
 /// collide with the `class#n` markers an entrypoint run handed out before.
-const GAME_HOOK_OBJECT_BASE: usize = 1 << 40;
+pub(crate) const GAME_HOOK_OBJECT_BASE: usize = 1 << 40;
 
 /// Instance fields and arrays one jar's hook callbacks may keep alive between
 /// firings. A callback that would exceed either fails instead of growing
@@ -1698,9 +1698,23 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.send_feedback(r, component, broadcast)
     }
 
-    fn note_entrypoint_constructed(&mut self, kind: &str, class: &str, instance: &Value) {
+    fn note_entrypoint_constructed(
+        &mut self,
+        kind: &str,
+        class: &str,
+        declaration: usize,
+        instance: &Value,
+    ) {
         self.inner
-            .note_entrypoint_constructed(kind, class, instance);
+            .note_entrypoint_constructed(kind, class, declaration, instance);
+    }
+
+    fn entrypoint_instance(&self, kind: &str, class: &str, declaration: usize) -> Option<Value> {
+        self.inner.entrypoint_instance(kind, class, declaration)
+    }
+
+    fn claim_entrypoint_declaration(&mut self, kind: &str, class: &str) -> usize {
+        self.inner.claim_entrypoint_declaration(kind, class)
     }
 
     fn fabric_entrypoints(&self, kind: &str) -> Vec<(String, String)> {
@@ -2025,6 +2039,54 @@ impl<H: Host> Host for GameHookHost<'_, H> {
 
     fn note_allocation_numbers_exhausted(&mut self, class: &str) {
         self.inner.note_allocation_numbers_exhausted(class);
+    }
+
+    /// A callback's `new` of a class the bootstrap host models (`java.util.Random`, a
+    /// `RandomSource`, an `ItemStack`, …) is that host's object, as an entrypoint's is. Not
+    /// forwarding it made each one a plain object whose calls answered neutral values (#669: a
+    /// seeded `Random` drew `0`s). A model keyed as a jar object numbers it with `next_object`,
+    /// this firing's allocator, which starts past every number the resident heap handed out
+    /// (`adopt_resident_heap` takes the larger), so no key is taken twice.
+    fn random_new(&mut self, class: &str, next_object: &mut usize) -> Option<Value> {
+        self.inner.random_new(class, next_object)
+    }
+
+    /// The bootstrap host's models that hand out new jar objects (an `EntityType` builder, an
+    /// `EntityDataAccessor`), numbered by this firing's allocator (#669). They answer only their
+    /// own classes and objects, never a game object's call, which [`Self::invoke_instance`]'s
+    /// rules keep.
+    fn allocating_call(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        self.inner.allocating_call(r, receiver, args, next_object)
+    }
+
+    fn allocating_static_field(
+        &mut self,
+        r: &MethodRef,
+        next_object: &mut usize,
+    ) -> Option<Result<Value, NativeError>> {
+        // A `@Shadow` field is the game object's own: `get_static` refuses it.
+        if self
+            .model
+            .shadow_fields
+            .contains(&format!("{}#{}{}", r.owner, r.name, r.descriptor))
+        {
+            return None;
+        }
+        self.inner.allocating_static_field(r, next_object)
+    }
+
+    fn allocating_enum_values(
+        &mut self,
+        owner: &str,
+        next_object: &mut usize,
+    ) -> Option<Result<Vec<Value>, NativeError>> {
+        self.inner.allocating_enum_values(owner, next_object)
     }
 
     fn pause_collections(&mut self, paused: bool) {

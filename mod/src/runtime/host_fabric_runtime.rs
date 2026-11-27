@@ -206,6 +206,16 @@ pub(crate) fn invocation_type(kind: &str) -> Option<&'static str> {
     }
 }
 
+/// The declaration index of the entry at `ordinal` among the kind's `rows` (`(class, provider)`,
+/// in storage order) whose class is `class`: 0 for its class's first declaration. Fabric makes
+/// a `NewEntry`, with its own instance, per declaration, so a class declared twice has two.
+pub(crate) fn declaration_index(rows: &[(String, String)], class: &str, ordinal: usize) -> usize {
+    rows.iter()
+        .take(ordinal)
+        .filter(|(entry, _)| entry == class)
+        .count()
+}
+
 /// The `PayloadTypeRegistry` of `direction` (`playToClient`, ...).
 pub(crate) fn payload_types(direction: &str) -> Value {
     Value::Host(HostRef::of_values(

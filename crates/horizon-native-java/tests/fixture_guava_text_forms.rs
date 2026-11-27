@@ -107,11 +107,11 @@ fn guava_collections_print_compare_and_hash_as_guava() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A jar object's own `toString` inside a host collection is the jar's code, which the host's
-/// collection text cannot run: counted, for Guava's collections as for the JDK's, never printed
-/// silently.
+/// A jar object's own `toString` inside a host collection is the jar's code, which the runtime
+/// runs (#670), for Guava's collections as for the JDK's: Java 25's text, nothing counted.
+/// Before, the host printed the collection and counted each jar element.
 #[test]
-fn a_jar_element_inside_is_counted() {
+fn a_jar_element_inside_prints_its_own_to_string() {
     let fixture = javac_fixture::Fixture::build(
         "guava-text-forms-jar-elements",
         &[
@@ -139,10 +139,15 @@ fn a_jar_element_inside_is_counted() {
         &[],
         &mut host,
     );
-    assert!(answer.is_ok(), "{answer:?}");
-    assert_eq!(expected("jarElements"), "[P[x=1]]|[P[x=2]]");
+    assert_eq!(
+        answer.ok(),
+        Some(horizon_native_java::Value::Ref(Some(
+            expected("jarElements").to_owned()
+        )))
+    );
     assert!(
-        !host.unknown_host_calls().is_empty(),
-        "the jar elements' text is counted"
+        host.unknown_host_calls().is_empty(),
+        "{:?}",
+        host.unknown_host_calls()
     );
 }

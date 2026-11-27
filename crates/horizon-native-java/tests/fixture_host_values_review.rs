@@ -154,11 +154,12 @@ const CASES: &[(&str, &str, Outcome)] = &[
     ("Rv2", "t6", Counted),
     ("Rv2", "t7", Counted),
     ("Rv2", "t8", Exact("Optional[Optional[Node(a)]]")),
-    ("Rv2", "t9", Counted),
+    // #670: a host collection holding a jar object prints its own `toString`.
+    ("Rv2", "t9", Exact("Optional[[Node(a)]]")),
     ("Rv2", "t10", Counted),
     // The lazy stream push runs the lambda's `toString` on the handle.
     ("Rv2", "t11", Exact("Optional[Node(a)]")),
-    ("Rv2", "t12", Counted),
+    ("Rv2", "t12", Exact("[Node(a)]")),
     ("Rv2", "t13", Exact("[Node(a)]")),
     ("Rv2", "h1", Exact("73")),
     ("Rv2", "h2", Exact("1025")),
