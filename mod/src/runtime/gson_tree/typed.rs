@@ -567,7 +567,7 @@ impl<H: Host> Runtime<'_, H> {
             if access & 0x0008 != 0 {
                 // Gson sets a static field through reflection; the
                 // invocation's static table is the same field here.
-                self.static_fields
+                std::sync::Arc::make_mut(&mut self.static_fields)
                     .insert(Self::static_field_key(&field), value);
             } else if let Some(key) = instance_field_key(&object, &field) {
                 self.fields.insert(key, value);

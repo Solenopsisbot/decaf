@@ -50,6 +50,7 @@ fn null_argument() -> NativeError {
 }
 
 fn put_field<H: Host>(this: &mut Runtime<'_, H>, key: &str, name: &str, value: Value) {
+    this.heap_flags |= crate::heap::HEAP_FLAG_GUAVA_MULTIMAP;
     this.fields.insert(state_key(key, name), value);
 }
 
@@ -196,6 +197,9 @@ fn count_tainted_read<H: Host>(
 /// their `target` field, and asMap iterators carry it in their iterator
 /// source marker.
 fn source_for_receiver<H: Host>(this: &Runtime<'_, H>, receiver: &Value) -> Option<String> {
+    if this.heap_flags & crate::heap::HEAP_FLAG_GUAVA_MULTIMAP == 0 {
+        return None;
+    }
     if let Some((source, _, _, _)) = map_iterator_source(this, receiver) {
         return Some(source);
     }
@@ -223,6 +227,9 @@ fn wrapped_iterator_source<H: Host>(
     this: &Runtime<'_, H>,
     receiver: &Value,
 ) -> Option<(String, Value, Value, mod_count::ModStamp, bool)> {
+    if this.heap_flags & crate::heap::HEAP_FLAG_GUAVA_MULTIMAP == 0 {
+        return None;
+    }
     let marker = crate::host_iterator::marker(receiver)?;
     if field(this, marker, "wrapped-iterator")
         != Some(Value::Ref(Some(WRAPPED_ITERATOR_SOURCE.into())))
@@ -632,8 +639,11 @@ fn map_iterator_source<H: Host>(
     this: &Runtime<'_, H>,
     receiver: &Value,
 ) -> Option<(String, String, u64, bool)> {
+    if this.heap_flags & crate::heap::HEAP_FLAG_GUAVA_MULTIMAP == 0 {
+        return None;
+    }
     let marker = crate::host_iterator::marker(receiver)?;
-    let source = this.host.host_iterator(marker)?.2?;
+    let source = this.host.host_iterator_source(marker)?;
     let rest = source.strip_prefix(MAP_ITERATOR)?;
     let (source, rest) = rest.split_once("|view=")?;
     let (view, generation) = rest.rsplit_once("|generation=")?;
@@ -997,6 +1007,11 @@ pub(crate) fn invoke<H: Host>(
     receiver: Option<&Value>,
     args: &[Value],
 ) -> Result<Option<Value>, NativeError> {
+    if this.heap_flags & crate::heap::HEAP_FLAG_GUAVA_MULTIMAP == 0
+        && !r.owner.starts_with("com/google/common/collect/")
+    {
+        return Ok(None);
+    }
     if let Some(counted) = guard_tainted_call(this, r, receiver) {
         return counted;
     }

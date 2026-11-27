@@ -362,26 +362,38 @@ impl RecipeState {
     /// Custom data, tooltip displays, ingredients and common infos hold no object (NBT, ids,
     /// flags). The collector follows these from a collectable row ([`Self::collectable_rows`])
     /// it reached; a root row's are roots ([`Self::root_texts`]).
-    pub(crate) fn row_values<'a>(&'a self, key: &str) -> Vec<&'a Value> {
-        let mut out = Vec::new();
+    pub(crate) fn visit_row_values<'a>(&'a self, key: &str, mut visit: impl FnMut(&'a Value)) {
         if let Some(stack) = self.stacks.get(key) {
-            out.extend(stack.item_value.iter());
-            out.extend(stack.patch.entries.values().flatten());
+            if let Some(item) = &stack.item_value {
+                visit(item);
+            }
+            for value in stack.patch.entries.values().flatten() {
+                visit(value);
+            }
         }
         if let Some(template) = self.templates.get(key) {
-            out.extend(template.patch.entries.values().flatten());
+            for value in template.patch.entries.values().flatten() {
+                visit(value);
+            }
         }
         if let Some(patch) = self
             .patches
             .get(key)
             .or_else(|| self.patch_builders.get(key))
         {
-            out.extend(patch.entries.values().flatten());
+            for value in patch.entries.values().flatten() {
+                visit(value);
+            }
         }
         if let Some(holder) = self.holders.get(key) {
-            out.push(&holder.id);
-            out.push(&holder.value);
+            visit(&holder.id);
+            visit(&holder.value);
         }
+    }
+
+    pub(crate) fn row_values<'a>(&'a self, key: &str) -> Vec<&'a Value> {
+        let mut out = Vec::new();
+        self.visit_row_values(key, |v| out.push(v));
         out
     }
 
@@ -398,15 +410,35 @@ impl RecipeState {
             .cloned()
             .collect();
         for key in &dropped {
-            self.stacks.remove(key);
-            self.templates.remove(key);
-            self.patches.remove(key);
-            self.patch_builders.remove(key);
-            self.ingredients.remove(key);
-            self.holders.remove(key);
-            self.common_infos.remove(key);
-            self.custom_data.remove(key);
-            self.tooltip_displays.remove(key);
+            if key.starts_with("recipe-stack/") {
+                self.stacks.remove(key);
+            } else if key.starts_with("recipe-template/") {
+                self.templates.remove(key);
+            } else if key.starts_with("recipe-patch/") {
+                self.patches.remove(key);
+            } else if key.starts_with("recipe-patch-builder/") {
+                self.patch_builders.remove(key);
+            } else if key.starts_with("recipe-ingredient/") {
+                self.ingredients.remove(key);
+            } else if key.starts_with("recipe-holder/") {
+                self.holders.remove(key);
+            } else if key.starts_with("recipe-common-info/") {
+                self.common_infos.remove(key);
+            } else if key.starts_with("recipe-custom-data/") {
+                self.custom_data.remove(key);
+            } else if key.starts_with("recipe-tooltip-display/") {
+                self.tooltip_displays.remove(key);
+            } else {
+                self.stacks.remove(key);
+                self.templates.remove(key);
+                self.patches.remove(key);
+                self.patch_builders.remove(key);
+                self.ingredients.remove(key);
+                self.holders.remove(key);
+                self.common_infos.remove(key);
+                self.custom_data.remove(key);
+                self.tooltip_displays.remove(key);
+            }
             self.collectable_rows.remove(key);
         }
     }

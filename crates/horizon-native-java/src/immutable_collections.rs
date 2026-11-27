@@ -56,6 +56,14 @@ pub struct ProbeTable {
     unknown: bool,
 }
 
+impl ProbeTable {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for value in self.slots.iter().flatten() {
+            crate::heap::visit_value_texts(value, |t| out.push(t));
+        }
+    }
+}
+
 /// Where `probe` ends.
 enum Probe {
     Found(usize),
@@ -317,10 +325,16 @@ impl<H: Host> Runtime<'_, H> {
     /// Whether a counted call may have changed `collection` (#464), either
     /// directly or via a runtime-wide identity epoch bump.
     pub(crate) fn collection_uncertain(&self, collection: &Value) -> bool {
-        if Self::uncertain_key(collection).is_some_and(|key| self.fields.contains_key(&key)) {
+        let has_marked = self.heap_flags & crate::heap::HEAP_FLAG_UNCERTAIN_COLLECTION != 0;
+        let current_epoch = self.identity_collections.epoch;
+        if !has_marked && current_epoch == 0 {
+            return false;
+        }
+        if has_marked
+            && Self::uncertain_key(collection).is_some_and(|key| self.fields.contains_key(&key))
+        {
             return true;
         }
-        let current_epoch = self.identity_collections.epoch;
         if current_epoch == 0 || !self.is_identity_collection(collection) {
             return false;
         }
@@ -435,6 +449,11 @@ impl<H: Host> Runtime<'_, H> {
     /// Resolve `value` (an identity collection or ANY handle derived from one)
     /// to its root identity collection whenever that root is uncertain.
     pub(crate) fn uncertain_identity_root(&self, value: &Value, r: &MethodRef) -> Option<Value> {
+        if self.heap_flags & crate::heap::HEAP_FLAG_UNCERTAIN_COLLECTION == 0
+            && self.identity_collections.epoch == 0
+        {
+            return None;
+        }
         if r.name == "getClass" {
             return None;
         }
@@ -490,6 +509,11 @@ impl<H: Host> Runtime<'_, H> {
         receiver: Option<&Value>,
         args: &[Value],
     ) -> Result<Option<Value>, NativeError> {
+        if self.heap_flags & crate::heap::HEAP_FLAG_UNCERTAIN_COLLECTION == 0
+            && self.identity_collections.epoch == 0
+        {
+            return Ok(None);
+        }
         if matches!(op, 0xb6 | 0xb9)
             && let Some(receiver) = receiver
             && let Some(root) = self.uncertain_identity_root(receiver, r)
@@ -981,6 +1005,7 @@ impl<H: Host> Runtime<'_, H> {
     /// tokens so every later read or write on it is counted.
     pub(crate) fn mark_collection_uncertain(&mut self, collection: &Value) {
         if let Some(key) = Self::uncertain_key(collection) {
+            self.heap_flags |= crate::heap::HEAP_FLAG_UNCERTAIN_COLLECTION;
             self.fields.insert(key, Value::Int(1));
         }
         if let Some(marker) = crate::jar_object::object_key(collection) {

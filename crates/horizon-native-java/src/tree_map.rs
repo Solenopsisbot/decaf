@@ -56,6 +56,12 @@ pub struct RedBlackTree {
 }
 
 impl RedBlackTree {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for node in self.nodes.iter().flatten() {
+            crate::heap::visit_value_texts(&node.key, |t| out.push(t));
+        }
+    }
+
     /// How many node slots the tree has used (freed ones included).
     pub(crate) fn slots(&self) -> usize {
         self.nodes.len()

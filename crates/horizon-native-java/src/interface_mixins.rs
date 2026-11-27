@@ -20,7 +20,6 @@
 //! unmodelled game members — stays skipped in the weave plan or is counted /
 //! refused loudly at runtime, never silently guessed.
 
-use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::OnceLock;
 
@@ -716,49 +715,252 @@ pub(crate) struct FailedTarget {
     pub(crate) certain: bool,
 }
 
-/// Per-`Runtime` mixin configuration gate and lazy index.
+/// Key for sharing immutable per-`(jar, side, linked_classes, host_precedence)` runtime
+/// caches across invocations on the same [`NativeJar`].
+pub(crate) type RuntimeCacheKey = (MixinSide, u64, crate::class_precedence::HostClassPrecedence);
+
+/// Maximum distinct `(side, linked_table, host_precedence)` caches kept per [`NativeJar`].
+const MAX_RUNTIME_CACHES_PER_JAR: usize = 32;
+/// Maximum memoised class-keyed entries inside one [`SharedRuntimeCache`].
+const MAX_CACHED_CLASSES: usize = 65_536;
+/// Maximum memoised target classes per source class in `instance_of` / `interface_extends`.
+const MAX_CACHED_TARGETS_PER_CLASS: usize = 4_096;
+/// Maximum memoised member/field lookup entries per class.
+const MAX_CACHED_MEMBERS_PER_CLASS: usize = 1_024;
+
+/// Thread-safe cache shared across every [`Runtime`] that executes the same [`NativeJar`]
+/// on the same physical side with the same linked class table and host class-precedence rule.
+///
+/// Every entry here depends only on the immutable jar classes, mixin configs/plugins, linked
+/// classes, side, and host `models_class` rule — never on mutable heap, static fields,
+/// initialized/erroneous class state, or per-firing host state.
+#[derive(Debug, Default)]
+pub(crate) struct SharedRuntimeCache {
+    pub(crate) index: std::sync::OnceLock<RuntimeMixinIndex>,
+    pub(crate) package_prefixes: std::sync::OnceLock<Vec<String>>,
+    pub(crate) unloadable_pools:
+        std::sync::RwLock<crate::fx_hash::FxHashMap<String, Option<std::sync::Arc<BTreeSet<u16>>>>>,
+    pub(crate) load_failures: std::sync::RwLock<
+        crate::fx_hash::FxHashMap<String, crate::mixin_class_loading::LoadFailure>,
+    >,
+    pub(crate) refused_mixin_package: std::sync::RwLock<crate::fx_hash::FxHashMap<String, bool>>,
+    pub(crate) instance_of: std::sync::RwLock<
+        crate::fx_hash::FxHashMap<String, crate::fx_hash::FxHashMap<String, bool>>,
+    >,
+    pub(crate) interface_extends: std::sync::RwLock<
+        crate::fx_hash::FxHashMap<String, crate::fx_hash::FxHashMap<String, bool>>,
+    >,
+    pub(crate) member_owners: std::sync::RwLock<
+        crate::fx_hash::FxHashMap<
+            String,
+            crate::fx_hash::FxHashMap<String, Vec<(String, Option<(String, bool)>)>>,
+        >,
+    >,
+    pub(crate) field_owners: std::sync::RwLock<
+        crate::fx_hash::FxHashMap<String, crate::fx_hash::FxHashMap<String, Vec<(String, String)>>>,
+    >,
+}
+
+impl SharedRuntimeCache {
+    pub(crate) fn get_instance_of(&self, class: &str, wanted: &str) -> Option<bool> {
+        let guard = self.instance_of.read().ok()?;
+        guard.get(class)?.get(wanted).copied()
+    }
+
+    pub(crate) fn insert_instance_of(&self, class: &str, wanted: &str, answer: bool) {
+        if let Ok(mut guard) = self.instance_of.write() {
+            if let Some(inner) = guard.get_mut(class) {
+                if inner.len() < MAX_CACHED_TARGETS_PER_CLASS {
+                    inner.insert(wanted.to_owned(), answer);
+                }
+            } else if guard.len() < MAX_CACHED_CLASSES {
+                let mut inner = crate::fx_hash::FxHashMap::default();
+                inner.insert(wanted.to_owned(), answer);
+                guard.insert(class.to_owned(), inner);
+            }
+        }
+    }
+
+    pub(crate) fn get_interface_extends(&self, interface: &str, wanted: &str) -> Option<bool> {
+        let guard = self.interface_extends.read().ok()?;
+        guard.get(interface)?.get(wanted).copied()
+    }
+
+    pub(crate) fn insert_interface_extends(&self, interface: &str, wanted: &str, answer: bool) {
+        if let Ok(mut guard) = self.interface_extends.write() {
+            if let Some(inner) = guard.get_mut(interface) {
+                if inner.len() < MAX_CACHED_TARGETS_PER_CLASS {
+                    inner.insert(wanted.to_owned(), answer);
+                }
+            } else if guard.len() < MAX_CACHED_CLASSES {
+                let mut inner = crate::fx_hash::FxHashMap::default();
+                inner.insert(wanted.to_owned(), answer);
+                guard.insert(interface.to_owned(), inner);
+            }
+        }
+    }
+
+    pub(crate) fn get_member_owner(
+        &self,
+        class: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<Option<(String, bool)>> {
+        let guard = self.member_owners.read().ok()?;
+        let by_name = guard.get(class)?;
+        let entries = by_name.get(name)?;
+        entries
+            .iter()
+            .find(|(d, _)| d == descriptor)
+            .map(|(_, ans)| ans.clone())
+    }
+
+    pub(crate) fn insert_member_owner(
+        &self,
+        class: &str,
+        name: &str,
+        descriptor: &str,
+        answer: Option<(String, bool)>,
+    ) {
+        if let Ok(mut guard) = self.member_owners.write() {
+            if let Some(by_name) = guard.get_mut(class) {
+                if let Some(entries) = by_name.get_mut(name) {
+                    if !entries.iter().any(|(d, _)| d == descriptor) && entries.len() < 64 {
+                        entries.push((descriptor.to_owned(), answer));
+                    }
+                } else if by_name.len() < MAX_CACHED_MEMBERS_PER_CLASS {
+                    by_name.insert(name.to_owned(), vec![(descriptor.to_owned(), answer)]);
+                }
+            } else if guard.len() < MAX_CACHED_CLASSES {
+                let mut by_name = crate::fx_hash::FxHashMap::default();
+                by_name.insert(name.to_owned(), vec![(descriptor.to_owned(), answer)]);
+                guard.insert(class.to_owned(), by_name);
+            }
+        }
+    }
+
+    pub(crate) fn get_field_owner(
+        &self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<String> {
+        let guard = self.field_owners.read().ok()?;
+        let by_name = guard.get(owner)?;
+        let entries = by_name.get(name)?;
+        entries
+            .iter()
+            .find(|(d, _)| d == descriptor)
+            .map(|(_, ans)| ans.clone())
+    }
+
+    pub(crate) fn insert_field_owner(
+        &self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        resolved: &str,
+    ) {
+        if let Ok(mut guard) = self.field_owners.write() {
+            if let Some(by_name) = guard.get_mut(owner) {
+                if let Some(entries) = by_name.get_mut(name) {
+                    if !entries.iter().any(|(d, _)| d == descriptor) && entries.len() < 64 {
+                        entries.push((descriptor.to_owned(), resolved.to_owned()));
+                    }
+                } else if by_name.len() < MAX_CACHED_MEMBERS_PER_CLASS {
+                    by_name.insert(
+                        name.to_owned(),
+                        vec![(descriptor.to_owned(), resolved.to_owned())],
+                    );
+                }
+            } else if guard.len() < MAX_CACHED_CLASSES {
+                let mut by_name = crate::fx_hash::FxHashMap::default();
+                by_name.insert(
+                    name.to_owned(),
+                    vec![(descriptor.to_owned(), resolved.to_owned())],
+                );
+                guard.insert(owner.to_owned(), by_name);
+            }
+        }
+    }
+}
+
+/// Per-[`NativeJar`] cache of immutable metadata parsed from jar resources and class files.
+///
+/// Reset when [`NativeJar::with_woven_classes`] replaces classes on a jar.
+#[derive(Debug, Default)]
+pub(crate) struct JarMetaCache {
+    pub(crate) mixin_config_scan:
+        std::sync::OnceLock<(std::sync::Arc<Vec<MixinConfig>>, Vec<(String, String)>)>,
+    pub(crate) mixin_config_sides: std::sync::OnceLock<std::sync::Arc<BTreeMap<String, MixinSide>>>,
+    pub(crate) tooltip_create_callbacks:
+        std::sync::RwLock<BTreeMap<String, Result<Vec<crate::MixinInjectionPlan>, String>>>,
+    pub(crate) runtime_caches: std::sync::RwLock<
+        crate::fx_hash::FxHashMap<RuntimeCacheKey, std::sync::Arc<SharedRuntimeCache>>,
+    >,
+}
+
+impl JarMetaCache {
+    pub(crate) fn runtime_cache(&self, key: RuntimeCacheKey) -> std::sync::Arc<SharedRuntimeCache> {
+        if let Ok(guard) = self.runtime_caches.read()
+            && let Some(existing) = guard.get(&key)
+        {
+            return std::sync::Arc::clone(existing);
+        }
+        if let Ok(mut guard) = self.runtime_caches.write() {
+            if let Some(existing) = guard.get(&key) {
+                return std::sync::Arc::clone(existing);
+            }
+            let fresh = std::sync::Arc::new(SharedRuntimeCache::default());
+            if guard.len() < MAX_RUNTIME_CACHES_PER_JAR {
+                guard.insert(key, std::sync::Arc::clone(&fresh));
+            }
+            return fresh;
+        }
+        std::sync::Arc::new(SharedRuntimeCache::default())
+    }
+}
+
+/// Per-`Runtime` mixin configuration gate and shared immutable cache handle.
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeMixinState {
-    pub(crate) configs: Vec<MixinConfig>,
-    pub(crate) config_sides: BTreeMap<String, MixinSide>,
-    plugins: ConfigPlugins,
+    pub(crate) configs: std::sync::Arc<Vec<MixinConfig>>,
+    pub(crate) config_sides: std::sync::Arc<BTreeMap<String, MixinSide>>,
+    plugins: std::sync::Arc<ConfigPlugins>,
     pub(crate) side: Option<MixinSide>,
     require_config: bool,
     /// Classes (jar and game) a `required` config's rejected mixin fails to load, with
     /// why ([`NativeJar::failed_required_targets`]).
-    pub(crate) failed_required_targets: BTreeMap<String, FailedTarget>,
-    index: OnceCell<RuntimeMixinIndex>,
-    /// The selected Mixin configs' packages as internal-name prefixes
-    /// (`mixin_class_loading.rs`).
-    pub(crate) package_prefixes: OnceCell<Vec<String>>,
-    /// Per class: the pool entries its code may not resolve (`mixin_class_loading.rs`).
-    pub(crate) unloadable_pools:
-        std::cell::RefCell<BTreeMap<String, Option<std::rc::Rc<BTreeSet<u16>>>>>,
-    /// Per class: what its load does (`Runtime::class_load_failure`).
-    pub(crate) load_failures:
-        std::cell::RefCell<BTreeMap<String, crate::mixin_class_loading::LoadFailure>>,
+    pub(crate) failed_required_targets: std::sync::Arc<BTreeMap<String, FailedTarget>>,
+    pub(crate) cache: std::sync::Arc<SharedRuntimeCache>,
 }
 
 impl RuntimeMixinState {
     /// Build state for a real `NativeJar` invocation, honouring the jar's mixin configs,
     /// config plugins, and the host's physical side.
     pub(crate) fn from_jar<H: Host>(jar: &NativeJar, host: &H) -> Self {
-        Self::from_jar_side(jar, host.mixin_side())
+        Self::from_jar_side_host(jar, host.mixin_side(), host)
     }
 
-    /// Build state for a real `NativeJar` invocation pinned to an explicit physical side.
-    pub(crate) fn from_jar_side(jar: &NativeJar, side: MixinSide) -> Self {
+    /// Build state for a real `NativeJar` invocation pinned to an explicit physical side,
+    /// sharing immutable per-jar caches when the host's class-precedence rule is cacheable.
+    pub(crate) fn from_jar_side_host<H: Host>(jar: &NativeJar, side: MixinSide, host: &H) -> Self {
+        let cache = if crate::mixin_plugins::running_config_plugins() {
+            std::sync::Arc::new(SharedRuntimeCache::default())
+        } else if let Some(precedence) = host.class_precedence_key() {
+            let linked_id = host.linked_class_table().map_or(0, |t| t.cache_id());
+            jar.meta_cache.runtime_cache((side, linked_id, precedence))
+        } else {
+            std::sync::Arc::new(SharedRuntimeCache::default())
+        };
         Self {
-            configs: jar.mixin_configs(),
-            config_sides: jar.mixin_config_sides(),
-            plugins: jar.cached_config_plugins(side).clone(),
+            configs: jar.cached_mixin_configs_arc(),
+            config_sides: jar.cached_mixin_config_sides_arc(),
+            plugins: jar.cached_config_plugins_arc(side),
             side: Some(side),
             require_config: true,
-            failed_required_targets: jar.failed_required_targets(side).clone(),
-            index: OnceCell::new(),
-            package_prefixes: OnceCell::new(),
-            unloadable_pools: Default::default(),
-            load_failures: Default::default(),
+            failed_required_targets: jar.failed_required_targets_arc(side),
+            cache,
         }
     }
 
@@ -767,16 +969,13 @@ impl RuntimeMixinState {
     #[cfg(test)]
     pub(crate) fn unconfigured() -> Self {
         Self {
-            configs: Vec::new(),
-            config_sides: BTreeMap::new(),
-            plugins: ConfigPlugins::default(),
+            configs: std::sync::Arc::new(Vec::new()),
+            config_sides: std::sync::Arc::new(BTreeMap::new()),
+            plugins: std::sync::Arc::new(ConfigPlugins::default()),
             side: None,
             require_config: false,
-            failed_required_targets: BTreeMap::new(),
-            index: OnceCell::new(),
-            package_prefixes: OnceCell::new(),
-            unloadable_pools: Default::default(),
-            load_failures: Default::default(),
+            failed_required_targets: std::sync::Arc::new(BTreeMap::new()),
+            cache: std::sync::Arc::new(SharedRuntimeCache::default()),
         }
     }
 
@@ -1416,13 +1615,13 @@ impl NativeJar {
             MixinSide::Client => &self.client_failed_required_targets,
         };
         if let Some(failed) = slot.get() {
-            return failed;
+            return failed.as_ref();
         }
         // Before the cell: the sessions build runtimes of their own.
         let plugins = self.cached_config_plugins(side);
         slot.get_or_init(|| {
-            let configs = self.mixin_configs();
-            let config_sides = self.mixin_config_sides();
+            let configs = self.cached_mixin_configs_arc();
+            let config_sides = self.cached_mixin_config_sides_arc();
             let mut failed = BTreeMap::new();
             for class in self.classes.values() {
                 if mixin_annotations(class).is_empty() {
@@ -1470,8 +1669,27 @@ impl NativeJar {
                     }
                 }
             }
-            failed
+            std::sync::Arc::new(failed)
         })
+        .as_ref()
+    }
+
+    pub(crate) fn failed_required_targets_arc(
+        &self,
+        side: MixinSide,
+    ) -> std::sync::Arc<BTreeMap<String, FailedTarget>> {
+        if crate::mixin_plugins::running_config_plugins() {
+            return std::sync::Arc::new(BTreeMap::new());
+        }
+        // Populate the OnceLock via `failed_required_targets`, then clone the Arc.
+        let _ = self.failed_required_targets(side);
+        let slot = match side {
+            MixinSide::Server => &self.server_failed_required_targets,
+            MixinSide::Client => &self.client_failed_required_targets,
+        };
+        slot.get()
+            .map(std::sync::Arc::clone)
+            .unwrap_or_else(|| std::sync::Arc::new(BTreeMap::new()))
     }
 
     /// Plan interface-injection mixins for [`NativeJar::plan_load_time_weave`] /
@@ -1693,10 +1911,10 @@ impl NativeJar {
 }
 
 impl<H: Host> Runtime<'_, H> {
-    /// Build or fetch the per-runtime index of active `@Mixin` classes across the primary
+    /// Build or fetch the cached index of active `@Mixin` classes across the primary
     /// jar and all linked jars.
     fn runtime_mixin_index(&self) -> &RuntimeMixinIndex {
-        self.mixin_index.index.get_or_init(|| {
+        self.mixin_index.cache.index.get_or_init(|| {
             let mut index = RuntimeMixinIndex::default();
             let mut seen_mixins = BTreeSet::new();
 
@@ -2530,18 +2748,22 @@ impl<H: Host> Runtime<'_, H> {
     /// cannot load it (`mixin_class_loading.rs`). An unresolved shadow is left for
     /// [`Self::invoke_static_shadow_body`] to count.
     #[inline(never)]
-    pub(crate) fn rewrite_static_shadow_call(&self, op: u8, frame_class: &str, r: &mut MethodRef) {
+    pub(crate) fn rewritten_static_shadow_call(
+        &self,
+        frame_class: &str,
+        r: &MethodRef,
+    ) -> Option<MethodRef> {
         let merged_self = frame_class == r.owner
             || frame_class
                 .strip_prefix(r.owner.as_str())
                 .is_some_and(|rest| rest.starts_with('$'));
         if merged_self
-            && op == 0xb8
             && let StaticShadowCall::Target(target) =
                 self.resolve_static_shadow_method(&r.owner, &r.name, &r.descriptor)
         {
-            *r = target;
+            return Some(target);
         }
+        None
     }
 
     /// The targets `@Mixin` class `mixin` names (applied or not), from the index.

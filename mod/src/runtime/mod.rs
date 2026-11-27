@@ -292,9 +292,13 @@ pub use parked_threads::ParkedThread;
 #[cfg(test)]
 #[path = "allocation_numbers_tests.rs"]
 mod allocation_numbers_tests;
+mod fx_hash;
 #[cfg(test)]
 #[path = "host_minted_keys_tests.rs"]
 mod host_minted_keys_tests;
+#[cfg(test)]
+#[path = "memo_cache_tests.rs"]
+mod memo_cache_tests;
 mod priority_queue;
 mod pure_helpers;
 mod random_source;
@@ -808,7 +812,7 @@ impl MixinDiscoveryReport {
 /// its mixins agree on where they run. Real Mixin follows the physical side, but
 /// Horizon's integrated server is its own host that runs `server` entrypoints
 /// and reports `SERVER`, so it takes [`Self::Server`] here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MixinSide {
     Client,
     Server,
@@ -3385,6 +3389,11 @@ pub trait Host {
         None
     }
 
+    /// Borrowed source tag for a host iterator without cloning its element list or source string.
+    fn host_iterator_source(&self, _marker: &str) -> Option<&str> {
+        None
+    }
+
     /// `next()` on a host iterator.
     fn host_iterator_next(&mut self, marker: &str) -> Result<Value, NativeError> {
         Err(NativeError::Metadata(format!(
@@ -3537,6 +3546,12 @@ pub trait Host {
         false
     }
 
+    /// Cache key describing how [`Self::models_class`] answers for linked classes.
+    /// `None` disables cross-runtime class-hierarchy caching for custom hosts.
+    fn class_precedence_key(&self) -> Option<class_precedence::HostClassPrecedence> {
+        None
+    }
+
     /// Whether `Class.forName` finds a platform class (a loader or loader
     /// API class) the running jar's loader provides. Multi-loader mods probe
     /// `Class.forName("net.fabricmc.loader.api.FabricLoader")` to pick their
@@ -3658,6 +3673,19 @@ pub trait Host {
         (BTreeMap::new(), std::collections::BTreeSet::new())
     }
 
+    /// Return a shared handle to jar-owned class state for a persistent invocation,
+    /// avoiding cloning all static fields and initialized classes on read-only calls
+    /// while preserving the host's pre-call snapshot during execution.
+    fn persistent_class_state_shared(
+        &self,
+    ) -> (
+        Arc<BTreeMap<String, Value>>,
+        Arc<std::collections::BTreeSet<String>>,
+    ) {
+        let (fields, initialized) = self.persistent_class_state();
+        (Arc::new(fields), Arc::new(initialized))
+    }
+
     /// Store jar-owned static fields and initialized-class markers after an
     /// invocation. The bounded host rejects a state set that exceeds its
     /// resident-instance cap rather than silently dropping fields.
@@ -3667,6 +3695,18 @@ pub trait Host {
         _initialized: std::collections::BTreeSet<String>,
     ) -> Result<(), NativeError> {
         Ok(())
+    }
+
+    /// Store shared jar-owned class state after an invocation, avoiding cloning
+    /// when the host retains `Arc`-wrapped maps directly.
+    fn store_persistent_class_state_shared(
+        &mut self,
+        fields: Arc<BTreeMap<String, Value>>,
+        initialized: Arc<std::collections::BTreeSet<String>>,
+    ) -> Result<(), NativeError> {
+        let fields = Arc::try_unwrap(fields).unwrap_or_else(|arc| (*arc).clone());
+        let initialized = Arc::try_unwrap(initialized).unwrap_or_else(|arc| (*arc).clone());
+        self.store_persistent_class_state(fields, initialized)
     }
 
     /// The per-jar virtual file namespace. A resident host owns these tables
@@ -3931,7 +3971,11 @@ pub trait Host {
 
 #[derive(Debug, Default)]
 pub struct NullHost;
-impl Host for NullHost {}
+impl Host for NullHost {
+    fn class_precedence_key(&self) -> Option<class_precedence::HostClassPrecedence> {
+        Some(class_precedence::HostClassPrecedence::None)
+    }
+}
 
 /// The `Item.Properties` builder mods chain before `new Item(properties)`.
 /// `java.lang.reflect.Type[]`, the class of the generic reflection arrays.
@@ -4395,12 +4439,12 @@ pub struct StdHost {
     throwable_suppressed: BTreeMap<String, Vec<Value>>,
     /// Jar-owned static fields retained across entrypoint/event invocations.
     /// The runtime still owns the map; the host only provides the lifetime.
-    persistent_static_fields: BTreeMap<String, Value>,
+    persistent_static_fields: Arc<BTreeMap<String, Value>>,
     /// Per-jar DFU construction budget, retained across callbacks.
     dfu_codec_nodes: usize,
     dfu_codec_callback_roots: BTreeSet<String>,
     dfu_codec_refusals: Vec<String>,
-    persistent_initialized_classes: std::collections::BTreeSet<String>,
+    persistent_initialized_classes: Arc<std::collections::BTreeSet<String>>,
     /// `mixin|game_object_key` pairs whose interface-injection Mixin `<init>()V`
     /// field initialiser has already run on this host (`interface_mixins.rs`).
     initialized_game_mixins: BTreeSet<String>,
@@ -4419,6 +4463,9 @@ pub struct StdHost {
     /// No collection runs (`Host::pause_collections`): a run that may be
     /// rolled back is in progress.
     collections_paused: bool,
+    /// Active count of ephemeral call-log scopes (`rewind_call_log` at exit):
+    /// skips logging non-event calls in [`Self::record`] that would only be truncated.
+    suppress_call_log_depth: usize,
     /// Bounded diagnostics for calls outside the modeled host surface.
     unknown_host_calls: BTreeMap<String, usize>,
     /// Runtime outcomes whose Java answer is inherently per-process or order-dependent.
@@ -4772,17 +4819,18 @@ impl StdHost {
             throwable_messages: BTreeMap::new(),
             throwable_causes: BTreeMap::new(),
             throwable_suppressed: BTreeMap::new(),
-            persistent_static_fields: BTreeMap::new(),
+            persistent_static_fields: Arc::default(),
             dfu_codec_nodes: 0,
             dfu_codec_callback_roots: BTreeSet::new(),
             dfu_codec_refusals: Vec::new(),
-            persistent_initialized_classes: std::collections::BTreeSet::new(),
+            persistent_initialized_classes: Arc::default(),
             initialized_game_mixins: BTreeSet::new(),
             heap: heap::JavaHeap::default(),
             log4j_levels: crate::runtime::host_log4j_level::CustomLevels::new(),
             retained: BTreeMap::new(),
             freed_objects: heap::FreedObjects::default(),
             collections_paused: false,
+            suppress_call_log_depth: 0,
             unknown_host_calls: BTreeMap::new(),
             nondeterministic: BTreeSet::new(),
             threads: parked_threads::ThreadTable::default(),
@@ -7486,6 +7534,9 @@ impl StdHost {
     }
 
     fn record(&mut self, r: &MethodRef, receiver: Option<&Value>, args: &[Value]) {
+        if self.suppress_call_log_depth > 0 && !crate::runtime::events::read_back_call(r) {
+            return;
+        }
         self.calls.push(r.clone());
         self.invocations.push(HostInvocation {
             method: r.clone(),
@@ -9753,6 +9804,10 @@ impl Host for StdHost {
         ))
     }
 
+    fn host_iterator_source(&self, marker: &str) -> Option<&str> {
+        self.iterator_sources.get(marker).map(String::as_str)
+    }
+
     fn host_iterator_next(&mut self, marker: &str) -> Result<Value, NativeError> {
         let entry = self
             .iterators
@@ -9960,6 +10015,10 @@ impl Host for StdHost {
     /// the host's place.
     fn models_class(&self, name: &str) -> bool {
         host_models_class(name) && !self.runs_jar_copy(name)
+    }
+
+    fn class_precedence_key(&self) -> Option<class_precedence::HostClassPrecedence> {
+        Some(class_precedence::HostClassPrecedence::Std(self.run_loader))
     }
 
     /// A jar seeded with Fabric entrypoints runs on Fabric Loader, whose
@@ -12268,10 +12327,14 @@ impl Host for StdHost {
         receiver: &Value,
         args: &[Value],
     ) -> Result<Value, NativeError> {
-        if let Some(value) = self.placement_context_call(r, receiver) {
+        if !self.placement_contexts.is_empty()
+            && let Some(value) = self.placement_context_call(r, receiver)
+        {
             return value;
         }
-        if let Some(value) = self.menu_instance_call(r, receiver, args) {
+        if (!self.menu_states.is_empty() || r.owner.starts_with("net/minecraft/"))
+            && let Some(value) = self.menu_instance_call(r, receiver, args)
+        {
             return value;
         }
         // 26.3's vanilla Item/BlockItem implementation is `0: return`. Mod-owned
@@ -12376,11 +12439,17 @@ impl Host for StdHost {
         if let Some(v) = host_url::instance_call(r, receiver) {
             return v;
         }
-        let mut render_objects = std::mem::take(&mut self.render_objects);
-        let render_result = render_math::call(self, &mut render_objects, r, receiver, args);
-        self.render_objects = render_objects;
-        if let Some(result) = render_result {
-            return result;
+        if !self.render_objects.is_empty()
+            || r.owner.starts_with("org/joml/")
+            || r.owner.starts_with("com/mojang/math/")
+            || r.owner.starts_with("com/mojang/blaze3d/")
+        {
+            let mut render_objects = std::mem::take(&mut self.render_objects);
+            let render_result = render_math::call(self, &mut render_objects, r, receiver, args);
+            self.render_objects = render_objects;
+            if let Some(result) = render_result {
+                return result;
+            }
         }
         if let Some(result) = vanilla_values::instance_call(self, r, receiver, args) {
             return result;
@@ -17024,8 +17093,20 @@ impl Host for StdHost {
         &self,
     ) -> (BTreeMap<String, Value>, std::collections::BTreeSet<String>) {
         (
-            self.persistent_static_fields.clone(),
-            self.persistent_initialized_classes.clone(),
+            (*self.persistent_static_fields).clone(),
+            (*self.persistent_initialized_classes).clone(),
+        )
+    }
+
+    fn persistent_class_state_shared(
+        &self,
+    ) -> (
+        Arc<BTreeMap<String, Value>>,
+        Arc<std::collections::BTreeSet<String>>,
+    ) {
+        (
+            Arc::clone(&self.persistent_static_fields),
+            Arc::clone(&self.persistent_initialized_classes),
         )
     }
 
@@ -17033,6 +17114,14 @@ impl Host for StdHost {
         &mut self,
         fields: BTreeMap<String, Value>,
         initialized: std::collections::BTreeSet<String>,
+    ) -> Result<(), NativeError> {
+        self.store_persistent_class_state_shared(Arc::new(fields), Arc::new(initialized))
+    }
+
+    fn store_persistent_class_state_shared(
+        &mut self,
+        fields: Arc<BTreeMap<String, Value>>,
+        initialized: Arc<std::collections::BTreeSet<String>>,
     ) -> Result<(), NativeError> {
         if fields.len() > MAX_PERSISTENT_CLASS_FIELDS {
             return Err(NativeError::Metadata(format!(
@@ -17046,8 +17135,12 @@ impl Host for StdHost {
                 MAX_PERSISTENT_INITIALIZED_CLASSES
             )));
         }
-        self.persistent_static_fields = fields;
-        self.persistent_initialized_classes = initialized;
+        if !Arc::ptr_eq(&self.persistent_static_fields, &fields) {
+            self.persistent_static_fields = fields;
+        }
+        if !Arc::ptr_eq(&self.persistent_initialized_classes, &initialized) {
+            self.persistent_initialized_classes = initialized;
+        }
         Ok(())
     }
 
@@ -19932,6 +20025,9 @@ fn host_call_context(host: &StdHost, error: NativeError) -> NativeError {
     let NativeError::Metadata(message) = error else {
         return error;
     };
+    if host.suppress_call_log_depth > 0 {
+        return NativeError::Metadata(message);
+    }
     let Some(call) = host.calls.last() else {
         return NativeError::Metadata(message);
     };
@@ -20498,10 +20594,16 @@ impl<H: Host> Runtime<'_, H> {
 
 fn instance_field_key(receiver: &Value, field: &MethodRef) -> Option<String> {
     jar_object::instance_key(receiver).map(|receiver| {
-        format!(
-            "{receiver}|{}#{}{}",
-            field.owner, field.name, field.descriptor
-        )
+        let mut out = String::with_capacity(
+            receiver.len() + field.owner.len() + field.name.len() + field.descriptor.len() + 2,
+        );
+        out.push_str(receiver);
+        out.push('|');
+        out.push_str(&field.owner);
+        out.push('#');
+        out.push_str(&field.name);
+        out.push_str(&field.descriptor);
+        out
     })
 }
 
@@ -21284,6 +21386,26 @@ impl Field {
     }
 }
 
+/// Lazily-populated, thread-safe table of resolved `MethodRef`s indexed by
+/// constant-pool slot so bytecode execution borrows `&MethodRef` without
+/// allocating three `String`s per instruction.
+#[derive(Debug, Clone, Default)]
+struct PoolRefCache {
+    refs: std::sync::Arc<std::sync::OnceLock<Box<[Option<MethodRef>]>>>,
+}
+
+/// Immutable header metadata parsed once from the class bytes during
+/// [`ClassFile::parse_with_warnings`], so access flags, declared interfaces,
+/// and on-demand attribute readers never re-parse the constant pool.
+#[derive(Debug, Clone, Default)]
+struct ClassParsedMeta {
+    access_flags: Option<u16>,
+    interfaces: Vec<String>,
+    /// Byte offset in [`ClassFile::raw`] immediately following the constant pool.
+    pool_end: usize,
+    pool_refs: PoolRefCache,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClassFile {
     pub name: String,
@@ -21297,6 +21419,7 @@ pub struct ClassFile {
     /// [`Self::write`], [`weaver::weave_head`] and [`weaver::weave_return`]
     /// can reproduce and rewrite the byte ranges the parser does not model.
     raw: Vec<u8>,
+    meta: ClassParsedMeta,
 }
 
 #[derive(Debug, Clone)]
@@ -21328,13 +21451,27 @@ impl ClassFile {
         }
         r.skip(4)?;
         let pool = read_pool(&mut r)?;
-        let _access = r.u2()?;
+        let pool_end = r.at;
+        let access = r.u2()?;
         let this = r.u2()?;
         let super_index = r.u2()?;
         let name = class_name(&pool, this)?;
         let super_name = class_name(&pool, super_index)?;
         let interface_count = r.u2()? as usize;
-        r.skip(interface_count * 2)?;
+        let mut interfaces = Vec::with_capacity(interface_count);
+        let mut interfaces_ok = true;
+        for _ in 0..interface_count {
+            let index = r.u2()?;
+            if interfaces_ok {
+                match class_name(&pool, index) {
+                    Ok(interface) => interfaces.push(interface),
+                    Err(_) => {
+                        interfaces.clear();
+                        interfaces_ok = false;
+                    }
+                }
+            }
+        }
         let fields = read_fields(&mut r, &pool)?;
         let (methods, method_warnings) = read_methods(&mut r, &pool)?;
         let (annotations, bootstrap_methods, warnings) = read_class_attributes(&mut r, &pool)?;
@@ -21353,6 +21490,12 @@ impl ClassFile {
                 fields,
                 annotations,
                 raw: bytes.to_vec(),
+                meta: ClassParsedMeta {
+                    access_flags: Some(access),
+                    interfaces,
+                    pool_end,
+                    pool_refs: PoolRefCache::default(),
+                },
             },
             warnings,
         ))
@@ -21381,31 +21524,32 @@ impl ClassFile {
     /// class-file order.
     ///
     /// `Class#getInterfaces` answers from this model, so a mod that reflects on
-    /// a linked library's class sees the same list a JVM would. The parser
-    /// skips the table for every other use, so it is read back from the class
-    /// bytes instead of widening every `ClassFile`; unreadable bytes answer an
-    /// empty list, which cannot happen for a class this crate parsed.
+    /// a linked library's class sees the same list a JVM would. Parsed once with
+    /// the class file so callers never re-parse the constant pool.
     pub fn interface_names(&self) -> Vec<String> {
-        self.read_interface_names().unwrap_or_default()
+        self.meta.interfaces.clone()
     }
 
-    fn read_interface_names(&self) -> Result<Vec<String>, NativeError> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4()? != 0xCAFE_BABE {
-            return Err(NativeError::InvalidClass("bad magic"));
+    /// Borrowed view of [`Self::interface_names`], avoiding allocation on hot
+    /// hierarchy and class-loading walks.
+    pub(crate) fn interfaces(&self) -> &[String] {
+        &self.meta.interfaces
+    }
+
+    /// The class file's own `access_flags`, or `None` for a synthetic in-memory
+    /// class built without raw class bytes.
+    pub(crate) fn access_flags(&self) -> Option<u16> {
+        self.meta.access_flags
+    }
+
+    /// A [`Reader`] positioned immediately after the constant pool in
+    /// [`Self::raw`], so on-demand attribute readers reuse `&self.pool` without
+    /// re-parsing the constant pool.
+    pub(crate) fn reader_after_pool(&self) -> Option<Reader<'_>> {
+        if self.meta.pool_end == 0 || self.meta.pool_end > self.raw.len() {
+            return None;
         }
-        r.skip(4)?;
-        let pool = read_pool(&mut r)?;
-        r.u2()?; // access flags
-        r.u2()?; // this class
-        r.u2()?; // super class
-        let count = r.u2()? as usize;
-        let mut interfaces = Vec::new();
-        for _ in 0..count {
-            let index = r.u2()?;
-            interfaces.push(class_name(&pool, index)?);
-        }
-        Ok(interfaces)
+        Some(Reader::new(&self.raw[self.meta.pool_end..]))
     }
 
     /// The exception-table rows of one method's `Code` attribute.
@@ -21422,12 +21566,12 @@ impl ClassFile {
         method: &str,
         descriptor: &str,
     ) -> Result<Vec<ExceptionHandler>, NativeError> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4()? != 0xCAFE_BABE {
-            return Err(NativeError::InvalidClass("bad magic"));
-        }
-        r.skip(4)?;
-        let pool = read_pool(&mut r)?;
+        let mut r = match self.reader_after_pool() {
+            Some(r) => r,
+            None if self.raw.is_empty() => return Err(NativeError::Truncated),
+            None => return Err(NativeError::InvalidClass("bad magic")),
+        };
+        let pool = &self.pool;
         let _access = r.u2()?;
         let _this = r.u2()?;
         let _super = r.u2()?;
@@ -21438,17 +21582,17 @@ impl ClassFile {
             let _ = r.u2()?;
             let _ = r.u2()?;
             let _ = r.u2()?;
-            skip_attributes(&mut r, &pool)?;
+            skip_attributes(&mut r, pool)?;
         }
         let methods = r.u2()? as usize;
         for _ in 0..methods {
             let _ = r.u2()?;
-            let name = utf8(&pool, r.u2()?)?;
-            let method_descriptor = utf8(&pool, r.u2()?)?;
+            let name = utf8(pool, r.u2()?)?;
+            let method_descriptor = utf8(pool, r.u2()?)?;
             let attributes = r.u2()? as usize;
             let mut handlers = Vec::new();
             for _ in 0..attributes {
-                let attribute = utf8(&pool, r.u2()?)?;
+                let attribute = utf8(pool, r.u2()?)?;
                 let length = r.u4()? as usize;
                 let bytes = r.bytes(length)?;
                 if attribute != "Code" {
@@ -21474,7 +21618,7 @@ impl ClassFile {
                     let catch_type = if catch_type == 0 {
                         None
                     } else {
-                        Some(class_name(&pool, catch_type)?)
+                        Some(class_name(pool, catch_type)?)
                     };
                     handlers.push(ExceptionHandler {
                         start_pc,
@@ -21501,12 +21645,8 @@ impl ClassFile {
     /// makes this query answer `None`; the caller then falls back to the
     /// erased descriptor exactly as the JVM does for a non-generic field.
     fn field_signature(&self, field_name: &str, field_descriptor: &str) -> Option<String> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4().ok()? != 0xCAFE_BABE {
-            return None;
-        }
-        r.skip(4).ok()?;
-        let pool = read_pool(&mut r).ok()?;
+        let mut r = self.reader_after_pool()?;
+        let pool = &self.pool;
         let _access = r.u2().ok()?;
         let _this = r.u2().ok()?;
         let _super = r.u2().ok()?;
@@ -21515,16 +21655,16 @@ impl ClassFile {
         let fields = r.u2().ok()? as usize;
         for _ in 0..fields {
             let _access = r.u2().ok()?;
-            let name = utf8(&pool, r.u2().ok()?).ok()?;
-            let descriptor = utf8(&pool, r.u2().ok()?).ok()?;
+            let name = utf8(pool, r.u2().ok()?).ok()?;
+            let descriptor = utf8(pool, r.u2().ok()?).ok()?;
             let attributes = r.u2().ok()? as usize;
             let matching = name == field_name && descriptor == field_descriptor;
             let mut signature = None;
             for _ in 0..attributes {
-                let attribute = utf8(&pool, r.u2().ok()?).ok()?;
+                let attribute = utf8(pool, r.u2().ok()?).ok()?;
                 let length = r.u4().ok()? as usize;
                 if matching && attribute == "Signature" && length == 2 {
-                    signature = utf8(&pool, r.u2().ok()?).ok();
+                    signature = utf8(pool, r.u2().ok()?).ok();
                 } else {
                     r.skip(length).ok()?;
                 }
@@ -21557,29 +21697,25 @@ impl ClassFile {
         field_name: &str,
         field_descriptor: &str,
     ) -> Option<Vec<Annotation>> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4().ok()? != 0xCAFE_BABE {
-            return None;
-        }
-        r.skip(4).ok()?;
-        let pool = read_pool(&mut r).ok()?;
+        let mut r = self.reader_after_pool()?;
+        let pool = &self.pool;
         r.skip(6).ok()?; // access, this, super
         let interfaces = r.u2().ok()? as usize;
         r.skip(interfaces.checked_mul(2)?).ok()?;
         let fields = r.u2().ok()? as usize;
         for _ in 0..fields {
             let _access = r.u2().ok()?;
-            let name = utf8(&pool, r.u2().ok()?).ok()?;
-            let descriptor = utf8(&pool, r.u2().ok()?).ok()?;
+            let name = utf8(pool, r.u2().ok()?).ok()?;
+            let descriptor = utf8(pool, r.u2().ok()?).ok()?;
             let attributes = r.u2().ok()? as usize;
             let matching = name == field_name && descriptor == field_descriptor;
             let mut annotations = Vec::new();
             for _ in 0..attributes {
-                let attribute = utf8(&pool, r.u2().ok()?).ok()?;
+                let attribute = utf8(pool, r.u2().ok()?).ok()?;
                 let length = r.u4().ok()? as usize;
                 let bytes = r.bytes(length).ok()?;
                 if matching && attribute == "RuntimeVisibleAnnotations" {
-                    annotations.extend(read_annotations(&mut Reader::new(bytes), &pool).ok()?);
+                    annotations.extend(read_annotations(&mut Reader::new(bytes), pool).ok()?);
                 }
             }
             if matching {
@@ -21587,6 +21723,57 @@ impl ClassFile {
             }
         }
         None
+    }
+
+    fn resolved_pool_refs(&self) -> &[Option<MethodRef>] {
+        self.meta.pool_refs.refs.get_or_init(|| {
+            let mut out = vec![None; self.pool.len()];
+            for (index, entry) in self.pool.iter().enumerate() {
+                let (class, nt) = match entry {
+                    Cp::MethodRef { class, nt }
+                    | Cp::InterfaceMethodRef { class, nt }
+                    | Cp::FieldRef { class, nt } => (*class, *nt),
+                    _ => continue,
+                };
+                if let (Ok(owner), Ok((name, descriptor))) =
+                    (class_name(&self.pool, class), name_type(&self.pool, nt))
+                {
+                    out[index] = Some(MethodRef {
+                        owner,
+                        name,
+                        descriptor,
+                    });
+                }
+            }
+            out.into_boxed_slice()
+        })
+    }
+
+    fn method_ref_cached(&self, index: u16) -> Result<&MethodRef, NativeError> {
+        match self.pool.get(index as usize) {
+            Some(Cp::MethodRef { .. } | Cp::InterfaceMethodRef { .. }) => {
+                if let Some(Some(resolved)) = self.resolved_pool_refs().get(index as usize) {
+                    return Ok(resolved);
+                }
+                // Preserve exact error for malformed sub-entries.
+                let _ = self.method_ref(index)?;
+                unreachable!("method_ref succeeded after resolved_pool_refs missed")
+            }
+            other => Err(NativeError::InvalidConstant(index, format!("{other:?}"))),
+        }
+    }
+
+    fn field_ref_cached(&self, index: u16) -> Result<&MethodRef, NativeError> {
+        match self.pool.get(index as usize) {
+            Some(Cp::FieldRef { .. }) => {
+                if let Some(Some(resolved)) = self.resolved_pool_refs().get(index as usize) {
+                    return Ok(resolved);
+                }
+                let _ = self.field_ref(index)?;
+                unreachable!("field_ref succeeded after resolved_pool_refs missed")
+            }
+            other => Err(NativeError::InvalidConstant(index, format!("{other:?}"))),
+        }
     }
 
     fn method_ref(&self, index: u16) -> Result<MethodRef, NativeError> {
@@ -22166,6 +22353,14 @@ pub struct LinkedClassTable {
     /// class names, so interface-injection Mixins from linked jars honour the exact same
     /// config, side, and plugin gating as primary jars.
     mixin_configs: Vec<LinkedMixinConfigSet>,
+    /// Monotonic identity bumped on every mutation; `0` for an empty table.
+    cache_id: u64,
+}
+
+static NEXT_LINKED_TABLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_linked_table_id() -> u64 {
+    NEXT_LINKED_TABLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -22226,6 +22421,7 @@ impl LinkedClassTable {
                 server_plugins,
                 client_plugins,
             });
+            self.bump_cache_id();
         }
         Ok(added)
     }
@@ -22327,7 +22523,16 @@ impl LinkedClassTable {
             // the class path has not resolved yet.
             self.classes.entry(name).or_insert(class);
         }
+        self.bump_cache_id();
         Ok(added)
+    }
+
+    pub(crate) fn cache_id(&self) -> u64 {
+        self.cache_id
+    }
+
+    pub(crate) fn bump_cache_id(&mut self) {
+        self.cache_id = next_linked_table_id();
     }
 
     /// Resolve one class by its internal name, or `None` when no linked jar
@@ -22435,14 +22640,17 @@ pub struct NativeJar {
     class_annotation_warnings: Vec<String>,
     /// Cached Mixin config-plugin sessions per physical side so runtime indexing
     /// and game-hook dispatch share one gated evaluation without re-running plugins.
-    server_config_plugins: Arc<std::sync::OnceLock<mixin_plugins::ConfigPlugins>>,
-    client_config_plugins: Arc<std::sync::OnceLock<mixin_plugins::ConfigPlugins>>,
+    server_config_plugins: Arc<std::sync::OnceLock<Arc<mixin_plugins::ConfigPlugins>>>,
+    client_config_plugins: Arc<std::sync::OnceLock<Arc<mixin_plugins::ConfigPlugins>>>,
     /// Cached jar classes a `required` config's rejected mixin fails, per physical
     /// side ([`NativeJar::failed_required_targets`]).
     server_failed_required_targets:
-        Arc<std::sync::OnceLock<BTreeMap<String, interface_mixins::FailedTarget>>>,
+        Arc<std::sync::OnceLock<Arc<BTreeMap<String, interface_mixins::FailedTarget>>>>,
     client_failed_required_targets:
-        Arc<std::sync::OnceLock<BTreeMap<String, interface_mixins::FailedTarget>>>,
+        Arc<std::sync::OnceLock<Arc<BTreeMap<String, interface_mixins::FailedTarget>>>>,
+    /// Cached immutable jar metadata and per-`(side, linked, precedence)` runtime
+    /// lookup tables (mixin configs, mixin index, unloadable pools, supertype queries).
+    meta_cache: Arc<interface_mixins::JarMetaCache>,
 }
 
 /// Zero-length array backing a host answer such as `Thread.getStackTrace`
@@ -23757,14 +23965,35 @@ impl NativeJar {
     /// malformed, oversized or out-of-bound config is skipped and reported by
     /// [`Self::mixin_config_errors`] so it never hides the rest.
     pub fn mixin_configs(&self) -> Vec<MixinConfig> {
-        self.mixin_config_scan().0
+        self.cached_mixin_config_scan().0.as_ref().clone()
     }
 
     /// Config paths that could not be read, as `(path, reason)`, in discovery
     /// order. These are diagnostics, not a failure: the remaining configs are
     /// still returned by [`Self::mixin_configs`].
     pub fn mixin_config_errors(&self) -> Vec<(String, String)> {
-        self.mixin_config_scan().1
+        self.cached_mixin_config_scan().1.clone()
+    }
+
+    pub(crate) fn cached_mixin_config_scan(
+        &self,
+    ) -> &(Arc<Vec<MixinConfig>>, Vec<(String, String)>) {
+        self.meta_cache.mixin_config_scan.get_or_init(|| {
+            let (configs, errors) = self.mixin_config_scan();
+            (Arc::new(configs), errors)
+        })
+    }
+
+    pub(crate) fn cached_mixin_configs_arc(&self) -> Arc<Vec<MixinConfig>> {
+        Arc::clone(&self.cached_mixin_config_scan().0)
+    }
+
+    pub(crate) fn cached_mixin_config_sides_arc(&self) -> Arc<BTreeMap<String, MixinSide>> {
+        Arc::clone(
+            self.meta_cache
+                .mixin_config_sides
+                .get_or_init(|| Arc::new(self.compute_mixin_config_sides())),
+        )
     }
 
     /// Config-discovery diagnostics that leave the config usable.
@@ -23900,6 +24129,10 @@ impl NativeJar {
     /// block's `environment`/`side` key both land here; a config with no such
     /// declaration applies on both sides.
     fn mixin_config_sides(&self) -> BTreeMap<String, MixinSide> {
+        self.cached_mixin_config_sides_arc().as_ref().clone()
+    }
+
+    fn compute_mixin_config_sides(&self) -> BTreeMap<String, MixinSide> {
         let mut sides = self
             .resource_bytes
             .get("fabric.mod.json")
@@ -24345,6 +24578,11 @@ impl NativeJar {
                 self.classes.insert(name.clone(), parse_named(name, bytes)?);
             }
         }
+        self.server_config_plugins = Arc::new(std::sync::OnceLock::new());
+        self.client_config_plugins = Arc::new(std::sync::OnceLock::new());
+        self.server_failed_required_targets = Arc::new(std::sync::OnceLock::new());
+        self.client_failed_required_targets = Arc::new(std::sync::OnceLock::new());
+        self.meta_cache = Arc::new(interface_mixins::JarMetaCache::default());
         Ok(self)
     }
 
@@ -25565,7 +25803,7 @@ impl NativeJar {
         // rolled back and never refuses the jar.
         self.prepare_config_plugins_for_entrypoint(kind, host);
         let (persistent_static_fields, persistent_initialized_classes) =
-            host.persistent_class_state();
+            host.persistent_class_state_shared();
         let (io_paths, io_files, io_file_bytes, io_dirs) = host.persistent_io_state();
         let mut runtime = Runtime {
             classes: &self.classes,
@@ -25622,6 +25860,7 @@ impl NativeJar {
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget,
         };
         if !runtime.classes.contains_key(&class_name) {
@@ -25826,7 +26065,7 @@ impl NativeJar {
         budget: &ExecutionBudget,
         shape_extraction: Option<u64>,
     ) -> Result<Value, NativeError> {
-        let (static_fields, initialized_classes) = host.persistent_class_state();
+        let (static_fields, initialized_classes) = host.persistent_class_state_shared();
         let (io_paths, io_files, io_file_bytes, io_dirs) = host.persistent_io_state();
         let mut callback_infos = CallbackInfos::new();
         let check_shape_probes = shape_extraction.is_some() || host.has_retained_shape_probes();
@@ -25885,6 +26124,7 @@ impl NativeJar {
             next_frame_id: 0,
             shape_extraction,
             check_shape_probes,
+            heap_flags: 0,
             budget,
         };
         // The callback sees the objects its entrypoint built, and the next
@@ -25943,7 +26183,7 @@ impl NativeJar {
         budget: &ExecutionBudget,
         action: impl FnOnce(&mut Runtime<'_, H>) -> Result<Value, NativeError>,
     ) -> Result<Value, NativeError> {
-        let (static_fields, initialized_classes) = host.persistent_class_state();
+        let (static_fields, initialized_classes) = host.persistent_class_state_shared();
         let (io_paths, io_files, io_file_bytes, io_dirs) = host.persistent_io_state();
         let mut callback_infos = CallbackInfos::new();
         let mut runtime = Runtime {
@@ -26001,6 +26241,7 @@ impl NativeJar {
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget,
         };
         let resident = runtime.adopt_resident_heap();
@@ -26211,7 +26452,7 @@ impl NativeJar {
         // persistent class state and resident heap, as an entrypoint and a
         // listener do (`invoke_persistent`), so what one callback writes the
         // next sees, and `<clinit>` runs once.
-        let (static_fields, initialized_classes) = host.persistent_class_state();
+        let (static_fields, initialized_classes) = host.persistent_class_state_shared();
         let (io_paths, io_files, io_file_bytes, io_dirs) = host.persistent_io_state();
         let mut runtime = Runtime {
             classes: &self.classes,
@@ -26268,6 +26509,7 @@ impl NativeJar {
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let resident = runtime.adopt_resident_heap();
@@ -28474,8 +28716,8 @@ struct Runtime<'a, H> {
     host: &'a mut H,
     calls: usize,
     fields: BTreeMap<String, Value>,
-    static_fields: BTreeMap<String, Value>,
-    initialized_classes: std::collections::BTreeSet<String>,
+    static_fields: Arc<BTreeMap<String, Value>>,
+    initialized_classes: Arc<std::collections::BTreeSet<String>>,
     /// The arrays this invocation owns, by key (`host_array.rs`): a `byte[]` compact, every other
     /// array as `Value`s (`array_data.rs`, #274).
     arrays: BTreeMap<String, ArrayData>,
@@ -28597,6 +28839,7 @@ struct Runtime<'a, H> {
     /// host, or when a probe was passed directly); enables
     /// [`Self::check_shape_probe_opcode`] in [`Runtime::invoke_frame`].
     check_shape_probes: bool,
+    heap_flags: u8,
     /// The wall-clock budget this execution honours, checked with
     /// [`BUDGET_CHECK_INSTRUCTIONS`] and in [`Runtime::invoke`].
     budget: &'a ExecutionBudget,
@@ -28626,7 +28869,14 @@ fn declares_field(file: &ClassFile, field: &MethodRef) -> bool {
 
 impl<H: Host> Runtime<'_, H> {
     fn static_field_key(field: &MethodRef) -> String {
-        format!("{}#{}{}", field.owner, field.name, field.descriptor)
+        let mut out = String::with_capacity(
+            field.owner.len() + field.name.len() + field.descriptor.len() + 1,
+        );
+        out.push_str(&field.owner);
+        out.push('#');
+        out.push_str(&field.name);
+        out.push_str(&field.descriptor);
+        out
     }
 
     /// The class that declares `field`, walking the superclass chain the way
@@ -28637,6 +28887,24 @@ impl<H: Host> Runtime<'_, H> {
     /// the symbolic owner would then miss the value the declaring class's
     /// initializer stored, so both a read and a write resolve first.
     fn field_owner(&self, field: &MethodRef) -> String {
+        if let Some(cached) =
+            self.mixin_index
+                .cache
+                .get_field_owner(&field.owner, &field.name, &field.descriptor)
+        {
+            return cached;
+        }
+        let resolved = self.field_owner_uncached(field);
+        self.mixin_index.cache.insert_field_owner(
+            &field.owner,
+            &field.name,
+            &field.descriptor,
+            &resolved,
+        );
+        resolved
+    }
+
+    fn field_owner_uncached(&self, field: &MethodRef) -> String {
         let mut current = field.owner.clone();
         for _ in 0..MAX_SUPERCLASS_WALK {
             let Some(file) = self.class(&current) else {
@@ -28740,9 +29008,9 @@ impl<H: Host> Runtime<'_, H> {
     fn persist_class_state(&mut self) -> Result<(), NativeError> {
         if self
             .host
-            .store_persistent_class_state(
-                self.static_fields.clone(),
-                self.initialized_classes.clone(),
+            .store_persistent_class_state_shared(
+                std::mem::take(&mut self.static_fields),
+                std::mem::take(&mut self.initialized_classes),
             )
             .is_err()
         {
@@ -28760,10 +29028,10 @@ impl<H: Host> Runtime<'_, H> {
     /// empty just like a fresh filesystem sandbox.
     fn persist_io_state(&mut self) -> Result<(), NativeError> {
         self.host.store_persistent_io_state(
-            self.io_paths.clone(),
-            self.io_files.clone(),
-            self.io_file_bytes.clone(),
-            self.io_dirs.clone(),
+            std::mem::take(&mut self.io_paths),
+            std::mem::take(&mut self.io_files),
+            std::mem::take(&mut self.io_file_bytes),
+            std::mem::take(&mut self.io_dirs),
         )
     }
 
@@ -29563,7 +29831,7 @@ impl<H: Host> Runtime<'_, H> {
                         };
                         if value != Value::Ref(None) {
                             if plan.static_target {
-                                self.static_fields
+                                Arc::make_mut(&mut self.static_fields)
                                     .insert(Self::static_field_key(&target), value.clone());
                             } else if let Some(key) =
                                 receiver.and_then(|receiver| instance_field_key(receiver, &target))
@@ -29587,7 +29855,7 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 let value = args.first().cloned().unwrap_or(Value::Void);
                 if plan.static_target {
-                    self.static_fields
+                    Arc::make_mut(&mut self.static_fields)
                         .insert(Self::static_field_key(&target), value);
                 } else if let Some(key) =
                     receiver.and_then(|receiver| instance_field_key(receiver, &target))
@@ -29638,9 +29906,15 @@ impl<H: Host> Runtime<'_, H> {
         desc: &str,
         at: usize,
     ) -> Result<(Value, bool), NativeError> {
-        let field = MethodRef {
-            owner: self.field_owner(symbolic),
-            ..symbolic.clone()
+        let resolved_owner = self.field_owner(symbolic);
+        let field: std::borrow::Cow<'_, MethodRef> = if resolved_owner == symbolic.owner {
+            std::borrow::Cow::Borrowed(symbolic)
+        } else {
+            std::borrow::Cow::Owned(MethodRef {
+                owner: resolved_owner,
+                name: symbolic.name.clone(),
+                descriptor: symbolic.descriptor.clone(),
+            })
         };
         // `merged`: the declaring mixin of a static Mixin moved onto its target.
         let (target, init, merged) = match self.resolve_static_shadow(&field) {
@@ -29650,10 +29924,10 @@ impl<H: Host> Runtime<'_, H> {
             }
             interface_mixins::StaticShadowResolution::Resolved { target, .. } => {
                 let init = target.owner.clone();
-                (target, init, None)
+                (std::borrow::Cow::Owned(target), init, None)
             }
             interface_mixins::StaticShadowResolution::Merged { slot, init, .. } => {
-                (slot, init.clone(), Some(init))
+                (std::borrow::Cow::Owned(slot), init.clone(), Some(init))
             }
             interface_mixins::StaticShadowResolution::Unresolved => {
                 self.host.unknown_operand_call(&field)?;
@@ -29793,8 +30067,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(());
         }
         if !through_shadow || self.has_class(&target.owner) {
-            self.static_fields
-                .insert(Self::static_field_key(&target), value);
+            Arc::make_mut(&mut self.static_fields).insert(Self::static_field_key(&target), value);
         } else if self.host.defers_game_field_write_check() {
             return Err(NativeError::Metadata(format!(
                 "game hook callback writes the game's static field {}#{} through @Shadow, which the host does not apply",
@@ -31010,6 +31283,21 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     pub(crate) fn class_is_instance(&self, name: &str, wanted: &str) -> bool {
+        let class_name = jar_object::marker_class_or_text(name);
+        if class_name == wanted {
+            return true;
+        }
+        if let Some(cached) = self.mixin_index.cache.get_instance_of(class_name, wanted) {
+            return cached;
+        }
+        let answer = self.class_is_instance_uncached(class_name, wanted);
+        self.mixin_index
+            .cache
+            .insert_instance_of(class_name, wanted, answer);
+        answer
+    }
+
+    pub(crate) fn class_is_instance_uncached(&self, name: &str, wanted: &str) -> bool {
         let mut current = jar_object::marker_class_or_text(name).to_owned();
         for _ in 0..MAX_SUPERCLASS_WALK {
             if current == wanted {
@@ -31026,7 +31314,7 @@ impl<H: Host> Runtime<'_, H> {
                     .unwrap_or_else(|| jar_throwables::throwable_is_instance(&current, wanted));
             };
             if file
-                .interface_names()
+                .interfaces()
                 .iter()
                 .any(|interface| interface == wanted || self.interface_extends(interface, wanted))
             {
@@ -31170,6 +31458,24 @@ impl<H: Host> Runtime<'_, H> {
     /// `super_class` is always `Object`), so the walk is breadth first over
     /// those, bounded by [`MAX_SUPERCLASS_WALK`] interfaces.
     fn interface_extends(&self, interface: &str, wanted: &str) -> bool {
+        if interface == wanted {
+            return true;
+        }
+        if let Some(cached) = self
+            .mixin_index
+            .cache
+            .get_interface_extends(interface, wanted)
+        {
+            return cached;
+        }
+        let answer = self.interface_extends_uncached(interface, wanted);
+        self.mixin_index
+            .cache
+            .insert_interface_extends(interface, wanted, answer);
+        answer
+    }
+
+    pub(crate) fn interface_extends_uncached(&self, interface: &str, wanted: &str) -> bool {
         let mut queue = std::collections::VecDeque::from([interface.to_owned()]);
         let mut seen = std::collections::BTreeSet::new();
         while let Some(current) = queue.pop_front() {
@@ -31180,7 +31486,7 @@ impl<H: Host> Runtime<'_, H> {
                 continue;
             }
             if let Some(file) = self.class(&current) {
-                queue.extend(file.interface_names());
+                queue.extend(file.interfaces().iter().cloned());
             } else if current.starts_with("java/")
                 && host_ref::ClassHierarchy::is_instance(&host_ref::JdkHierarchy, &current, wanted)
                     == Some(true)
@@ -32562,7 +32868,7 @@ impl<H: Host> Runtime<'_, H> {
                     let value = coerce_argument(&descriptor, &value).unwrap_or(value);
                     let value = declared_value(&descriptor, value);
                     if access & 8 != 0 {
-                        self.static_fields.insert(key, value);
+                        Arc::make_mut(&mut self.static_fields).insert(key, value);
                     } else {
                         self.fields.insert(key, value);
                     }
@@ -36390,6 +36696,26 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     fn member_owner(&self, class: &str, name: &str, descriptor: &str) -> Option<(String, bool)> {
+        if let Some(cached) = self
+            .mixin_index
+            .cache
+            .get_member_owner(class, name, descriptor)
+        {
+            return cached;
+        }
+        let answer = self.member_owner_uncached(class, name, descriptor);
+        self.mixin_index
+            .cache
+            .insert_member_owner(class, name, descriptor, answer.clone());
+        answer
+    }
+
+    fn member_owner_uncached(
+        &self,
+        class: &str,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<(String, bool)> {
         let mut current = class.to_owned();
         let mut chain = Vec::new();
         for _ in 0..MAX_SUPERCLASS_WALK {
@@ -38701,9 +39027,6 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.count_unmodelled_jar_operand(r, op, receiver, args)? {
             return Ok(Some(value));
         }
-        if let Some(value) = self.invoke_guava(r, receiver, args)? {
-            return Ok(Some(value));
-        }
         if let Some(value) =
             self.invoke_immutable_collection(r, op, receiver, args, identity_args)?
         {
@@ -39110,33 +39433,50 @@ impl<H: Host> Runtime<'_, H> {
         // Kotlin stdlib facades and holder methods are registration/runtime
         // surfaces: the native interpreter records their exact bounded result
         // without executing the bundled implementation.
-        let kotlin_call = MethodRef {
-            owner: class.to_owned(),
-            name: method.to_owned(),
-            descriptor: desc.to_owned(),
-        };
-        if let Some(receiver) = receiver.as_ref()
-            && let Some(value) = kotlin_stdlib::instance(self, &kotlin_call, receiver, args)
-        {
-            return value;
-        }
-        if receiver.is_none()
-            && let Some(value) = kotlin_stdlib::invoke(self, &kotlin_call, args)
-        {
-            return value;
+        let check_kotlin_instance = matches!(
+            receiver.as_ref(),
+            Some(Value::Host(handle))
+                if matches!(
+                    handle.kind(),
+                    HostKind::KotlinLazy
+                        | HostKind::KotlinEmptyCollection
+                        | HostKind::KotlinEnumEntries
+                )
+        );
+        let check_kotlin_static = receiver.is_none() && class.starts_with("kotlin/");
+        if check_kotlin_instance || check_kotlin_static {
+            let kotlin_call = MethodRef {
+                owner: class.to_owned(),
+                name: method.to_owned(),
+                descriptor: desc.to_owned(),
+            };
+            if let Some(receiver) = receiver.as_ref()
+                && let Some(value) = kotlin_stdlib::instance(self, &kotlin_call, receiver, args)
+            {
+                return value;
+            }
+            if receiver.is_none()
+                && let Some(value) = kotlin_stdlib::invoke(self, &kotlin_call, args)
+            {
+                return value;
+            }
         }
         // Snapshot the table so the frame's class reference outlives the
         // `&mut self` calls the instruction loop makes.
         let linked = Arc::clone(&self.linked);
-        let host_models = self.host.models_class(class);
-        // A JDK body's call-site frame (`jdk_call.rs`).
-        let site = jdk_call::site(class);
-        let file = match (self.classes.get(class), site.as_deref()) {
-            (Some(file), _) | (None, Some(file)) => file,
-            (None, None) if !host_models => linked
-                .get(class)
-                .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?,
-            (None, None) if host_models => {
+        let site;
+        let file = if let Some(file) = self.classes.get(class) {
+            file
+        } else {
+            // A JDK body's call-site frame (`jdk_call.rs`).
+            site = jdk_call::site(class);
+            if let Some(file) = site.as_deref() {
+                file
+            } else if !self.host.models_class(class) {
+                linked
+                    .get(class)
+                    .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?
+            } else {
                 let r = MethodRef {
                     owner: class.to_owned(),
                     name: method.to_owned(),
@@ -39150,22 +39490,16 @@ impl<H: Host> Runtime<'_, H> {
                     None => self.invoke_host_static(&r, args),
                 };
             }
-            (None, None) => {
-                return Err(NativeError::MissingMethod(format!(
-                    "{class}#{method}{desc}"
-                )));
-            }
         };
         let target = file
             .method(method, desc)
-            .cloned()
             .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
         // A game-hook callback's Mixin members on a game object resolve
         // through the host first (`Host::redirect_jar_call`); every other host
         // answers `None` and the body below runs as before.
         if let Some(redirect) = self
             .host
-            .redirect_jar_call(class, &target, receiver.as_ref())
+            .redirect_jar_call(class, target, receiver.as_ref())
         {
             return match redirect {
                 JarCallRedirect::Host(r) => match receiver.as_ref() {
@@ -39192,7 +39526,7 @@ impl<H: Host> Runtime<'_, H> {
             };
         }
         // A static `@Shadow` method's body is a placeholder Mixin never merges.
-        if let Some(value) = self.invoke_static_shadow_body(class, &target, args)? {
+        if let Some(value) = self.invoke_static_shadow_body(class, target, args)? {
             return Ok(value);
         }
         // A `static` accessor in a Mixin interface has a placeholder body that
@@ -39292,17 +39626,48 @@ impl<H: Host> Runtime<'_, H> {
             locals[0] = receiver.unwrap_or(Value::Ref(None));
             local = 1;
         }
-        // A `long` argument occupies two local slots, exactly as on the JVM, so
-        // a following parameter is not read out of a truncated slot.
-        let arguments = descriptor_arguments(desc);
-        for (index, arg) in args.iter().enumerate() {
-            if let Some(slot) = locals.get_mut(local) {
-                *slot = arg.clone();
+        // A `long` or `double` argument occupies two local slots, exactly as on
+        // the JVM, so a following parameter is not read out of a truncated slot.
+        if !args.is_empty() {
+            let dbytes = desc.as_bytes();
+            let mut dpos = usize::from(dbytes.first() == Some(&b'('));
+            for arg in args {
+                if let Some(slot) = locals.get_mut(local) {
+                    *slot = arg.clone();
+                }
+                let mut width = 1;
+                if let Some(&b) = dbytes.get(dpos)
+                    && b != b')'
+                {
+                    match b {
+                        b'J' | b'D' => {
+                            width = 2;
+                            dpos += 1;
+                        }
+                        b'L' => {
+                            while dpos < dbytes.len() && dbytes[dpos] != b';' {
+                                dpos += 1;
+                            }
+                            dpos = (dpos + 1).min(dbytes.len());
+                        }
+                        b'[' => {
+                            while dpos < dbytes.len() && dbytes[dpos] == b'[' {
+                                dpos += 1;
+                            }
+                            if dbytes.get(dpos) == Some(&b'L') {
+                                while dpos < dbytes.len() && dbytes[dpos] != b';' {
+                                    dpos += 1;
+                                }
+                            }
+                            dpos = (dpos + 1).min(dbytes.len());
+                        }
+                        _ => {
+                            dpos += 1;
+                        }
+                    }
+                }
+                local += width;
             }
-            local += match arguments.get(index).map(String::as_str) {
-                Some("J" | "D") => 2,
-                _ => 1,
-            };
         }
         let mut stack = Vec::new();
         let mut pc = 0;
@@ -40401,10 +40766,10 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb2 => {
                     let i = read_u16(code, &mut pc)?;
-                    let symbolic = file.field_ref(i)?;
+                    let symbolic = file.field_ref_cached(i)?;
                     let (value, modified) = invoke_or_catch!(
                         at,
-                        self.execute_getstatic(&symbolic, class, method, desc, at)
+                        self.execute_getstatic(symbolic, class, method, desc, at)
                     );
                     if modified {
                         frame_modified_identity = true;
@@ -40413,19 +40778,25 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb3 => {
                     let i = read_u16(code, &mut pc)?;
-                    let symbolic = file.field_ref(i)?;
+                    let symbolic = file.field_ref_cached(i)?;
                     let value = pop(&mut stack, class, method, at)?;
                     invoke_or_catch!(
                         at,
-                        self.execute_putstatic(&symbolic, value, class, method, desc, at)
+                        self.execute_putstatic(symbolic, value, class, method, desc, at)
                     );
                 }
                 0xb4 => {
                     let i = read_u16(code, &mut pc)?;
-                    let symbolic = file.field_ref(i)?;
-                    let r = MethodRef {
-                        owner: self.field_owner(&symbolic),
-                        ..symbolic
+                    let symbolic = file.field_ref_cached(i)?;
+                    let owner = self.field_owner(symbolic);
+                    let r: std::borrow::Cow<'_, MethodRef> = if owner == symbolic.owner {
+                        std::borrow::Cow::Borrowed(symbolic)
+                    } else {
+                        std::borrow::Cow::Owned(MethodRef {
+                            owner,
+                            name: symbolic.name.clone(),
+                            descriptor: symbolic.descriptor.clone(),
+                        })
                     };
                     let receiver = pop(&mut stack, class, method, at)?;
                     let outcome =
@@ -40448,10 +40819,16 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb5 => {
                     let i = read_u16(code, &mut pc)?;
-                    let symbolic = file.field_ref(i)?;
-                    let r = MethodRef {
-                        owner: self.field_owner(&symbolic),
-                        ..symbolic
+                    let symbolic = file.field_ref_cached(i)?;
+                    let owner = self.field_owner(symbolic);
+                    let r: std::borrow::Cow<'_, MethodRef> = if owner == symbolic.owner {
+                        std::borrow::Cow::Borrowed(symbolic)
+                    } else {
+                        std::borrow::Cow::Owned(MethodRef {
+                            owner,
+                            name: symbolic.name.clone(),
+                            descriptor: symbolic.descriptor.clone(),
+                        })
                     };
                     let value = pop(&mut stack, class, method, at)?;
                     let receiver = pop(&mut stack, class, method, at)?;
@@ -40486,14 +40863,27 @@ impl<H: Host> Runtime<'_, H> {
                             ));
                         }
                     }
-                    let mut r = file.method_ref(i)?;
+                    let raw_r = file.method_ref_cached(i)?;
                     // Mixin's rewrite of a merged method's static `@Shadow` call.
-                    self.rewrite_static_shadow_call(op, class, &mut r);
+                    let r: std::borrow::Cow<'_, MethodRef> = if op == 0xb8
+                        && let Some(rewritten) = self.rewritten_static_shadow_call(class, raw_r)
+                    {
+                        std::borrow::Cow::Owned(rewritten)
+                    } else {
+                        std::borrow::Cow::Borrowed(raw_r)
+                    };
                     let n = arg_count(&r.descriptor);
-                    let mut args = (0..n)
-                        .map(|_| pop(&mut stack, class, method, at))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    args.reverse();
+                    let mut args = if n == 0 {
+                        Vec::new()
+                    } else if stack.len() >= n {
+                        stack.split_off(stack.len() - n)
+                    } else {
+                        let mut a = (0..n)
+                            .map(|_| pop(&mut stack, class, method, at))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        a.reverse();
+                        a
+                    };
                     let receiver = if op == 0xb8 {
                         None
                     } else {
@@ -40502,8 +40892,11 @@ impl<H: Host> Runtime<'_, H> {
                     // `@ModifyArg` replaces one argument before the call runs;
                     // a redirect that replaces the whole call sees (and then
                     // discards) the modified value, deterministically.
-                    let modified_args =
-                        self.dispatch_modify_arg(&r, &mut args, class, method, desc, at)?;
+                    let modified_args = if self.modify_hooks.is_some() {
+                        self.dispatch_modify_arg(&r, &mut args, class, method, desc, at)?
+                    } else {
+                        Vec::new()
+                    };
                     if !modified_args.is_empty()
                         && r.owner == "java/lang/String"
                         && r.name == "valueOf"
@@ -40563,12 +40956,15 @@ impl<H: Host> Runtime<'_, H> {
                     // `@At("INVOKE")` callback runs just before it and a
                     // cancelled one replaces it with the invoked descriptor's
                     // default value.
-                    let anchor_replacement =
+                    let anchor_replacement = if self.anchor_hooks.is_some() {
                         match self.dispatch_invoke_anchor(&r, class, method, desc, at)? {
                             AnchorOutcome::Replace(value) => Some(value),
                             AnchorOutcome::Suppress => Some(Value::default_for(&r.descriptor)),
                             AnchorOutcome::Normal => None,
-                        };
+                        }
+                    } else {
+                        None
+                    };
                     if anchor_replacement.is_some()
                         && return_desc(&r.descriptor).starts_with(['L', '['])
                     {
@@ -40638,6 +41034,7 @@ impl<H: Host> Runtime<'_, H> {
                     // jar implementation of Set is checked through its own
                     // size/iterator methods before the host view shortcut.
                     if dispatched.is_none()
+                        && r.name == "equals"
                         && let Some(value) =
                             self.invoke_set_from_map_equals(&r, receiver.as_ref(), &args)
                     {
@@ -40663,6 +41060,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     // `java.util.Base64` and the encoders and decoders it makes (`jdk_base64.rs`).
                     if dispatched.is_none()
+                        && r.owner.starts_with("java/util/Base64")
                         && let Some(value) = invoke_or_catch!(
                             at,
                             jdk_base64::invoke(self, &r, receiver.as_ref(), &args)
@@ -40690,6 +41088,7 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(builder.clone());
                     }
                     if dispatched.is_none()
+                        && self.invoke_hooks.is_some()
                         && let Some(value) = self.dispatch_invoke_hooks(&r, class, method, at)?
                     {
                         dispatched = Some(value);
@@ -40814,6 +41213,7 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/util/Properties"
                         && let Some(value) = invoke_or_catch!(
                             at,
                             self.invoke_properties_reader(&r, receiver.as_ref(), &args)
@@ -40830,6 +41230,7 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && r.name == "sort"
                         && let Some(value) =
                             self.invoke_singleton_sort(&r, receiver.as_ref(), &args)
                     {
@@ -40848,6 +41249,7 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/lang/Class"
                         && let Some(value) =
                             invoke_or_catch!(at, self.invoke_owned_class(&r, receiver.as_ref()))
                     {
@@ -41020,6 +41422,7 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/math/BigDecimal"
                         && let Some(value) =
                             invoke_or_catch!(at, self.invoke_bigdecimal_static(&r, &args))
                     {
@@ -41103,6 +41506,8 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/lang/String"
+                        && r.name == "<init>"
                         && let Some(text) =
                             invoke_or_catch!(at, string_constructors::build(self, &r, &args))
                     {
@@ -41124,6 +41529,7 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.name == "<init>"
                         && let Some(value) = self.invoke_sound_event_init(
                             &r,
                             receiver.as_ref(),
@@ -41183,18 +41589,6 @@ impl<H: Host> Runtime<'_, H> {
                     if dispatched.is_none()
                         && let Some(value) = invoke_or_catch!(
                             at,
-                            self.invoke_gson_types(&r, receiver.as_ref(), &args)
-                        )
-                    {
-                        dispatched = Some({
-                            // Gson's `TypeToken`, whose `equals`/`hashCode`/`toString`
-                            // a jar's subclass inherits (`gson_type_token.rs`).
-                            value
-                        });
-                    }
-                    if dispatched.is_none()
-                        && let Some(value) = invoke_or_catch!(
-                            at,
                             self.invoke_object_methods(&r, op, receiver.as_ref(), &args)
                         )
                     {
@@ -41235,17 +41629,6 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some({
                             // `Collections.enumeration`, `Vector.elements()`, the empty
                             // iterator and enumeration (`host_iterator.rs`).
-                            value
-                        });
-                    }
-                    if dispatched.is_none()
-                        && let Some(value) = invoke_or_catch!(
-                            at,
-                            self.invoke_service_loader(&r, receiver.as_ref(), &args)
-                        )
-                    {
-                        dispatched = Some({
-                            // Providers built as the JDK builds them (`service_loader.rs`).
                             value
                         });
                     }
@@ -41325,6 +41708,8 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/lang/String"
+                        && r.name == "join"
                         && let Some(value) =
                             invoke_or_catch!(at, self.invoke_string_join(&r, &args))
                     {
@@ -41340,12 +41725,15 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/lang/reflect/Array"
                         && let Some(value) =
                             invoke_or_catch!(at, self.invoke_reflect_array(&r, &args))
                     {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/lang/System"
+                        && r.name == "arraycopy"
                         && let Some(value) = invoke_or_catch!(at, self.invoke_array_copy(&r, &args))
                     {
                         dispatched = Some({
@@ -41354,6 +41742,7 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/util/Arrays"
                         && let Some(value) = invoke_or_catch!(at, self.invoke_arrays(&r, &args))
                     {
                         dispatched = Some(value);
@@ -41370,14 +41759,7 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
-                        && let Some(value) = invoke_or_catch!(
-                            at,
-                            self.invoke_stream(&r, receiver.as_ref(), &args, class, method)
-                        )
-                    {
-                        dispatched = Some(value);
-                    }
-                    if dispatched.is_none()
+                        && r.owner == "java/nio/file/Files"
                         && let Some(value) = invoke_or_catch!(at, self.invoke_files_move(&r, &args))
                     {
                         dispatched = Some({
@@ -41386,6 +41768,7 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/nio/file/Files"
                         && let Some(value) = invoke_or_catch!(at, self.invoke_files_copy(&r, &args))
                     {
                         dispatched = Some({
@@ -41394,6 +41777,12 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && matches!(
+                            r.owner.as_str(),
+                            "java/nio/file/Files"
+                                | "java/io/OutputStream"
+                                | "java/io/FileOutputStream"
+                        )
                         && let Some(value) = invoke_or_catch!(
                             at,
                             open_options::invoke(self, &r, receiver.as_ref(), &args, class, method)
@@ -41468,6 +41857,8 @@ impl<H: Host> Runtime<'_, H> {
                         });
                     }
                     if dispatched.is_none()
+                        && r.owner == "com/google/gson/Gson"
+                        && r.name == "toJsonTree"
                         && let Some(value) = invoke_or_catch!(
                             at,
                             gson_to_json_tree::instance_call(
@@ -41480,17 +41871,6 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         dispatched = Some({
                             // Gson's `toJsonTree` instance surface (`gson_to_json_tree.rs`).
-                            value
-                        });
-                    }
-                    if dispatched.is_none()
-                        && let Some(value) = invoke_or_catch!(
-                            at,
-                            self.invoke_gson_tree(&r, receiver.as_ref(), &args)
-                        )
-                    {
-                        dispatched = Some({
-                            // Gson's JSON tree (`gson_tree.rs`).
                             value
                         });
                     }
@@ -41536,6 +41916,7 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && r.owner.starts_with("java/lang/StackWalker")
                         && let Some(value) = invoke_or_catch!(
                             at,
                             self.invoke_stack_walker(&r, receiver.as_ref(), &args)
@@ -41568,6 +41949,7 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && r.owner == "net/minecraft/Optionull"
                         && let Some(value) = invoke_or_catch!(at, self.invoke_optionull(&r, &args))
                     {
                         dispatched = Some({
@@ -41592,6 +41974,8 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && r.owner
+                            .starts_with("org/spongepowered/asm/mixin/injection/callback/")
                         && let Some(value) = invoke_or_catch!(
                             at,
                             self.invoke_callback_info(&r, receiver.as_ref(), &args)
@@ -41607,11 +41991,13 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(invoke_or_catch!(at, self.class_for_name(&r, &args)));
                     }
                     if dispatched.is_none()
+                        && r.owner == "java/lang/Class"
                         && let Some(value) = self.invoke_class_interfaces(&r, receiver.as_ref())
                     {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && r.name == "clone"
                         && let Some(value) = self.invoke_array_clone(&r, receiver.as_ref())
                     {
                         dispatched = Some(value);
@@ -41620,14 +42006,6 @@ impl<H: Host> Runtime<'_, H> {
                         && let Some(value) = invoke_or_catch!(
                             at,
                             self.invoke_string_or_builder(&r, receiver.as_ref(), &args)
-                        )
-                    {
-                        dispatched = Some(value);
-                    }
-                    if dispatched.is_none()
-                        && let Some(value) = invoke_or_catch!(
-                            at,
-                            self.invoke_library_model(&r, receiver.as_ref(), &args, class, method)
                         )
                     {
                         dispatched = Some(value);
@@ -41652,11 +42030,15 @@ impl<H: Host> Runtime<'_, H> {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && op == 0xb8
+                        && r.name == "values"
                         && let Some(value) = self.invoke_game_enum_values(&r)
                     {
                         dispatched = Some(value);
                     }
                     if dispatched.is_none()
+                        && op == 0xb8
+                        && r.name == "valueOf"
                         && let Some(value) =
                             invoke_or_catch!(at, self.invoke_game_enum_value_of(&r, &args))
                     {
@@ -41685,10 +42067,14 @@ impl<H: Host> Runtime<'_, H> {
                             self.dispatch_owner(&r, op, receiver.as_ref())
                     {
                         dispatched = Some({
-                            let resolved = MethodRef {
-                                owner,
-                                name: r.name.clone(),
-                                descriptor: r.descriptor.clone(),
+                            let resolved: std::borrow::Cow<'_, MethodRef> = if owner == r.owner {
+                                std::borrow::Cow::Borrowed(&r)
+                            } else {
+                                std::borrow::Cow::Owned(MethodRef {
+                                    owner,
+                                    name: r.name.clone(),
+                                    descriptor: r.descriptor.clone(),
+                                })
                             };
                             if let Some(value) = invoke_or_catch!(
                                 at,
@@ -42346,48 +42732,32 @@ fn result_descriptor(desc: &str) -> &str {
     }
 }
 
-/// Descriptor argument counts are read at every `invoke*` call site.  Keep a
-/// small thread-local cache so repeated calls through a hot mod callback do
-/// not rescan the same JVM descriptor on every dispatch.  The cache is
-/// intentionally bounded and per-thread: it has no lock on the interpreter's
-/// hot path and cannot retain an unbounded set of optional-mod descriptors.
-const MAX_DESCRIPTOR_COUNT_CACHE: usize = 2048;
-
-thread_local! {
-    static DESCRIPTOR_COUNT_CACHE: RefCell<BTreeMap<String, usize>> =
-        const { RefCell::new(BTreeMap::new()) };
-}
-
+/// Descriptor argument counts are read at every `invoke*` call site. Direct
+/// byte scanning avoids thread-local `RefCell`/`BTreeMap` overhead on the hot path.
+#[inline]
 fn arg_count(desc: &str) -> usize {
-    if let Some(count) = DESCRIPTOR_COUNT_CACHE.with(|cache| cache.borrow().get(desc).copied()) {
-        return count;
-    }
-    let Some(end) = desc.find(')') else { return 0 };
     let b = desc.as_bytes();
-    let mut i = 1;
+    if b.len() >= 2 && b[0] == b'(' && b[1] == b')' {
+        return 0;
+    }
+    let mut i = usize::from(b.first() == Some(&b'('));
+    let len = b.len();
     let mut n = 0;
-    while i < end {
-        while i < end && b[i] == b'[' {
+    while i < len && b[i] != b')' {
+        while i < len && b[i] == b'[' {
             i += 1;
         }
-        if i >= end {
+        if i >= len || b[i] == b')' {
             break;
         }
         if b[i] == b'L' {
-            while i < end && b[i] != b';' {
+            while i < len && b[i] != b';' {
                 i += 1;
             }
         }
         i += 1;
         n += 1;
     }
-    DESCRIPTOR_COUNT_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() >= MAX_DESCRIPTOR_COUNT_CACHE {
-            cache.clear();
-        }
-        cache.insert(desc.to_owned(), n);
-    });
     n
 }
 
@@ -45670,7 +46040,7 @@ fn split_injection_method(spec: &str) -> Option<(&str, &str)> {
     }
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
@@ -46551,6 +46921,7 @@ mod tests {
             }],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let callback = |owner: &str, access: u16| ClassFile {
             name: owner.into(),
@@ -46569,6 +46940,7 @@ mod tests {
             }],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([
             target,
@@ -46728,18 +47100,13 @@ mod tests {
 
     #[test]
     fn descriptor_argument_count_cache_is_exact_and_bounded() {
-        DESCRIPTOR_COUNT_CACHE.with(|cache| cache.borrow_mut().clear());
         assert_eq!(arg_count("(IJLjava/lang/String;[I)V"), 4);
         assert_eq!(arg_count("()V"), 0);
 
-        for index in 0..(MAX_DESCRIPTOR_COUNT_CACHE + 32) {
+        for index in 0..2080 {
             let descriptor = format!("(Ldemo/Type{index};)V");
             assert_eq!(arg_count(&descriptor), 1);
         }
-
-        DESCRIPTOR_COUNT_CACHE.with(|cache| {
-            assert!(cache.borrow().len() <= MAX_DESCRIPTOR_COUNT_CACHE);
-        });
     }
 
     #[test]
@@ -46753,8 +47120,8 @@ mod tests {
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::from([(
                 "[Ljava/lang/Object;#0".into(),
                 vec![Value::Int(7), Value::Ref(Some("ok".into()))].into(),
@@ -46803,6 +47170,7 @@ mod tests {
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let method = MethodRef {
@@ -46833,8 +47201,8 @@ mod tests {
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::from([
                 ("[Ljava/lang/Object;#0".into(), vec![Value::Int(7)].into()),
                 (
@@ -46891,6 +47259,7 @@ mod tests {
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let method = MethodRef {
@@ -47735,6 +48104,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let e = jar
@@ -47799,6 +48169,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let mut host = NullHost;
@@ -47912,6 +48283,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let expected = [
@@ -47963,6 +48335,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let expected = [
@@ -48005,6 +48378,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         assert_eq!(
@@ -48104,6 +48478,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let mut host = NullHost;
@@ -48209,6 +48584,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         assert_eq!(
@@ -48239,6 +48615,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let error = jar
@@ -48295,6 +48672,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -48332,6 +48710,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -48442,6 +48821,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let limit = std::time::Duration::from_millis(5);
@@ -48489,6 +48869,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         assert_eq!(
@@ -48514,6 +48895,7 @@ modId="minecraft"
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         assert_eq!(
@@ -48615,6 +48997,7 @@ mandatory = true
             ],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -48784,6 +49167,7 @@ mandatory = true
                         methods: vec![entry_only_constructor()],
                         annotations: Vec::new(),
                         raw: Vec::new(),
+                        meta: ClassParsedMeta::default(),
                     },
                 ),
             ]),
@@ -48950,6 +49334,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let report = jar.execute("demo.NeoMod", None, "neoforge", &mut NullHost);
@@ -49773,6 +50158,7 @@ mandatory = true
             ],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let mut host = NullHost;
@@ -53903,6 +54289,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         let value = jar
@@ -53977,6 +54364,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         assert_eq!(
             class.invoke_dynamic_target(1).unwrap(),
@@ -54020,6 +54408,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         assert_eq!(
@@ -54048,8 +54437,8 @@ mandatory = true
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -54095,6 +54484,7 @@ mandatory = true
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let first = runtime.new_object("demo/Fields");
@@ -54165,6 +54555,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         assert_eq!(
@@ -54204,6 +54595,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         assert_eq!(
@@ -54254,6 +54646,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([class]);
         for (name, java) in [("wide", 44), ("high", -56), ("low", 127)] {
@@ -54278,8 +54671,8 @@ mandatory = true
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -54325,6 +54718,7 @@ mandatory = true
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let new_instance = MethodRef {
@@ -54483,8 +54877,8 @@ mandatory = true
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -54530,6 +54924,7 @@ mandatory = true
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         // A stream takes one stage or terminal (`linkedOrConsumed`): each
@@ -54845,6 +55240,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let classes = BTreeMap::from([(target.name.clone(), target)]);
         let mut host = NullHost;
@@ -54856,8 +55252,8 @@ mandatory = true
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::from([
                 ("[Ljava/lang/Class;#0".into(), Vec::new().into()),
                 ("[Ljava/lang/Object;#1".into(), Vec::new().into()),
@@ -54911,6 +55307,7 @@ mandatory = true
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let lookup = MethodRef {
@@ -55189,8 +55586,8 @@ mandatory = true
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -55236,6 +55633,7 @@ mandatory = true
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let class = host_class::class_value("demo/ReflectiveFields");
@@ -55333,6 +55731,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let caller = ClassFile {
             name: "demo/Caller".into(),
@@ -55385,6 +55784,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([caller, target]);
         let marker = crate::runtime::callback_marker::lambda_from_text(
@@ -55463,6 +55863,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target]);
         let dispatch = EventDispatch {
@@ -58132,6 +58533,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let callback = ClassFile {
             name: "demo/Mixin".into(),
@@ -58153,6 +58555,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target, callback]);
         let plan = MixinInjectionPlan::inject_at_head(
@@ -58196,6 +58599,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let callback = |name: &str| ClassFile {
             name: format!("demo/{name}"),
@@ -58216,6 +58620,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target, callback("MixinA"), callback("MixinB")]);
         let target_ref = MethodRef {
@@ -58269,6 +58674,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let callback = ClassFile {
             name: "demo/Mixin".into(),
@@ -58290,6 +58696,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target, callback]);
         let mut plan = MixinInjectionPlan::inject_at_head(
@@ -58337,6 +58744,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let callback = ClassFile {
             name: "demo/Mixin".into(),
@@ -58357,6 +58765,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target, callback]);
         let mut plan = MixinInjectionPlan::inject_at_head(
@@ -58402,6 +58811,7 @@ mandatory = true
             }],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let code = if override_result {
             // aload_0; iconst_3; invokevirtual setReturnValue(Object); return
@@ -58441,6 +58851,7 @@ mandatory = true
             }],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target, callback]);
         let mut plan = MixinInjectionPlan::inject_at_return(
@@ -58506,6 +58917,7 @@ mandatory = true
             }],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let callback = ClassFile {
             name: "demo/Mixin".into(),
@@ -58526,6 +58938,7 @@ mandatory = true
             }],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target, callback]);
         let plan = MixinInjectionPlan::inject_at_return(
@@ -58643,6 +59056,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let replacement = ClassFile {
             name: "demo/Mixin".into(),
@@ -58663,6 +59077,7 @@ mandatory = true
 
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target, replacement]);
         let mut plan = MixinInjectionPlan::inject_at_head(
@@ -58960,6 +59375,7 @@ mandatory = true
             ],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -58991,6 +59407,7 @@ mandatory = true
                 values: BTreeMap::from([("targets".into(), string_array(&["Ldemo/Target;"]))]),
             }],
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -59407,6 +59824,7 @@ mandatory = true
                 values: BTreeMap::from([("targets".into(), string_array(&["Ldemo/Target;"]))]),
             }],
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target_class(), mixin]);
         let error = jar
@@ -59542,6 +59960,7 @@ mandatory = true
                 values: BTreeMap::from([("targets".into(), string_array(&["Ldemo/Target;"]))]),
             }],
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -59664,6 +60083,7 @@ mandatory = true
                 values: BTreeMap::from([("targets".into(), string_array(&["Ldemo/Target;"]))]),
             }],
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         };
         let jar = NativeJar::from_classes([target_class(), mixin]);
         let error = run_discovered(&jar, "run", &mut MarkerHost::default()).unwrap_err();
@@ -59721,6 +60141,7 @@ mandatory = true
             )],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -59768,6 +60189,7 @@ mandatory = true
             )],
             annotations: Vec::new(),
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -60033,6 +60455,7 @@ mandatory = true
                 values: BTreeMap::from([("targets".into(), string_array(&["Ldemo/Target;"]))]),
             }],
             raw: Vec::new(),
+            meta: ClassParsedMeta::default(),
         }
     }
 
@@ -60499,8 +60922,8 @@ mandatory = true
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -60546,6 +60969,7 @@ mandatory = true
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let grid = runtime.new_multidim_array("[[I", &[2, 3]).unwrap();
@@ -60574,8 +60998,8 @@ mandatory = true
             calls: 0,
             instructions: 0,
             fields: BTreeMap::new(),
-            static_fields: BTreeMap::new(),
-            initialized_classes: std::collections::BTreeSet::new(),
+            static_fields: Arc::default(),
+            initialized_classes: Arc::default(),
             arrays: BTreeMap::new(),
             next_array: 0,
             next_object: 0,
@@ -60621,6 +61045,7 @@ mandatory = true
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget: &ExecutionBudget::UNBOUNDED,
         };
         let error = runtime

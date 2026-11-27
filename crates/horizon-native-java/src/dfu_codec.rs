@@ -4104,7 +4104,7 @@ mod tests {
         )
         .unwrap();
         let mut host = crate::StdHost::new();
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .insert("demo/Main.CODEC".into(), mapped.clone());
         drop(callback);
         drop(inner);

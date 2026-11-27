@@ -66,6 +66,16 @@ pub struct IteratorGuard {
     deque_cursor: Option<DequeCursor>,
 }
 
+impl IteratorGuard {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        out.push(self.source.as_str());
+        out.push(self.root.as_str());
+        for entry in &self.structure {
+            out.push(entry.as_str());
+        }
+    }
+}
+
 /// `ArrayDeque.DeqIterator`'s fields: `cursor`, `remaining` and `lastRet`
 /// (`None` for `-1`), and whether it is the `DescendingIterator`.
 #[derive(Clone, Copy, Debug, PartialEq)]

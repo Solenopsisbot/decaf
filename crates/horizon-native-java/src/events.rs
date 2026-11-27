@@ -1584,6 +1584,12 @@ pub struct EventFiring {
 }
 
 impl EventFiring {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for (_, object) in &self.objects {
+            crate::heap::visit_value_texts(object, |t| out.push(t));
+        }
+    }
+
     pub fn new(event: GameEvent, facade: Arc<EventFacade>, context: EventContext) -> Self {
         Self {
             event,

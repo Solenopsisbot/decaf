@@ -99,6 +99,53 @@ pub(crate) struct State {
     pub(crate) model_data: model_layers::State,
 }
 
+impl State {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        fn push<'a>(out: &mut Vec<&'a str>, v: &'a Value) {
+            crate::runtime::heap::visit_value_texts(v, |t| out.push(t));
+        }
+        for reg in &self.registrations {
+            match reg {
+                Registration::DebugEntry { entry, .. } => push(out, entry),
+                Registration::ParticleProvider {
+                    particle_type,
+                    provider,
+                } => {
+                    push(out, particle_type);
+                    push(out, provider);
+                }
+                Registration::MenuScreen { menu, constructor } => {
+                    push(out, menu);
+                    push(out, constructor);
+                }
+                Registration::EntityRenderer {
+                    entity_type,
+                    provider,
+                } => {
+                    push(out, entity_type);
+                    push(out, provider);
+                }
+                Registration::ModelLayer { location, provider } => {
+                    push(out, location);
+                    push(out, provider);
+                }
+                Registration::ModelLoadingPlugin { plugin } => push(out, plugin),
+                Registration::RangeSelectProperty { codec, .. } => push(out, codec),
+            }
+        }
+        for (key, (a, b)) in &self.particle_codecs {
+            out.push(key.as_str());
+            push(out, a);
+            push(out, b);
+        }
+        for (key, value) in &self.static_values {
+            out.push(key.as_str());
+            push(out, value);
+        }
+        self.model_data.root_texts(out);
+    }
+}
+
 fn client_handle(text: impl Into<String>) -> Value {
     crate::runtime::game_object::client_value(format!("client/{}", text.into()))
 }

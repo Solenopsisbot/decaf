@@ -133,7 +133,12 @@ impl<H: Host> Runtime<'_, H> {
         // is CCE. The host's generic collection row cannot enforce that
         // element type, so enforce it at the model boundary before add.
         if let Some(receiver) = receiver
+            && matches!(
+                r.name.as_str(),
+                "add" | "addAll" | "retainAll" | "removeAll" | "removeIf"
+            )
             && let Some(marker) = crate::jar_object::object_key(receiver)
+            && marker.starts_with("java/util/EnumSet#")
             && let Some(Value::Ref(Some(enum_class))) =
                 self.fields.get(&format!("{marker}|enum-set-type"))
         {
@@ -1055,13 +1060,10 @@ impl<H: Host> Runtime<'_, H> {
             };
             return Ok(Some(answer));
         }
-        let Some(marker) = receiver
-            .and_then(crate::jar_object::instance_key)
-            .map(str::to_owned)
-        else {
+        let Some(marker) = receiver.and_then(crate::jar_object::instance_key) else {
             return Ok(None);
         };
-        let Some(class) = crate::jar_object::marker_class(&marker) else {
+        let Some(class) = crate::jar_object::marker_class(marker) else {
             return Ok(None);
         };
         if class != SIMPLE && class != IMMUTABLE {
@@ -1746,6 +1748,24 @@ impl<H: Host> Runtime<'_, H> {
     ) -> Result<Option<Value>, NativeError> {
         const FILTER: &str = "java/io/FilterInputStream";
         const IN_FIELD: &str = "#inLjava/io/InputStream;";
+        let is_init = r.name == "<init>"
+            && matches!(
+                r.descriptor.as_str(),
+                "(Ljava/io/InputStream;)V" | "(Ljava/io/InputStream;I)V"
+            );
+        let forwarded = !is_init
+            && matches!(
+                (r.name.as_str(), r.descriptor.as_str()),
+                ("read", "()I" | "([B)I" | "([BII)I")
+                    | ("skip", "(J)J")
+                    | ("available", "()I")
+                    | ("close" | "mark" | "reset", "()V" | "(I)V")
+                    | ("markSupported", "()Z")
+                    | ("readAllBytes" | "readNBytes", "()[B")
+            );
+        if !is_init && !forwarded {
+            return Ok(None);
+        }
         let Some(marker) = receiver
             .and_then(crate::jar_object::instance_key)
             .map(str::to_owned)
@@ -1764,13 +1784,7 @@ impl<H: Host> Runtime<'_, H> {
                 | "java/io/DataInputStream"
                 | "java/io/PushbackInputStream"
         );
-        if (r.owner == FILTER || jdk_filter)
-            && r.name == "<init>"
-            && matches!(
-                r.descriptor.as_str(),
-                "(Ljava/io/InputStream;)V" | "(Ljava/io/InputStream;I)V"
-            )
-        {
+        if is_init && (r.owner == FILTER || jdk_filter) {
             // `new BufferedInputStream(in)` builds the JDK class itself; a
             // `FilterInputStream` super call comes from a jar subclass.
             if !(jdk_filter && receiver_class == r.owner) && !self.has_class(&receiver_class) {
@@ -1786,15 +1800,6 @@ impl<H: Host> Runtime<'_, H> {
                 .insert(format!("{marker}|{receiver_class}{IN_FIELD}"), wrapped);
             return Ok(Some(Value::Void));
         }
-        let forwarded = matches!(
-            (r.name.as_str(), r.descriptor.as_str()),
-            ("read", "()I" | "([B)I" | "([BII)I")
-                | ("skip", "(J)J")
-                | ("available", "()I")
-                | ("close" | "mark" | "reset", "()V" | "(I)V")
-                | ("markSupported", "()Z")
-                | ("readAllBytes" | "readNBytes", "()[B")
-        );
         if !forwarded {
             return Ok(None);
         }

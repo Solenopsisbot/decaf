@@ -1356,8 +1356,196 @@ pub(crate) fn take_action(states: &mut States) -> Option<MenuAction> {
     }
 }
 
-pub(crate) fn keyed_text(states: &States, key: &str) -> Option<String> {
-    states.get(key).map(|object| format!("{object:?}"))
+pub(crate) fn keyed_root_texts<'a>(states: &'a States, key: &str, out: &mut Vec<&'a str>) {
+    fn push_val<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+        crate::heap::visit_value_texts(value, |t| out.push(t));
+    }
+    fn push_slot_def<'a>(def: &'a SlotDef, out: &mut Vec<&'a str>) {
+        push_val(&def.may_place, out);
+    }
+    fn push_remote<'a>(slot: &'a RemoteSlot, out: &mut Vec<&'a str>) {
+        if let RemoteSlot::Synchronized(Some(v)) = slot {
+            push_val(v, out);
+        }
+    }
+    let Some(object) = states.get(key) else {
+        return;
+    };
+    match object {
+        Object::Menu(menu) => {
+            push_val(&menu.menu_type, out);
+            out.push(menu.slots.as_str());
+            for listener in &menu.container_listeners {
+                push_val(listener, out);
+            }
+            if let Some(combiner) = &menu.combiner {
+                out.push(combiner.input.as_str());
+                out.push(combiner.result.as_str());
+                for def in &combiner.definition.inputs {
+                    push_slot_def(def, out);
+                }
+                push_slot_def(&combiner.definition.result, out);
+                push_val(&combiner.access, out);
+                push_val(&combiner.player, out);
+            }
+            push_val(&menu.live.carried, out);
+            for slot in &menu.live.quickcraft_slots {
+                push_val(slot, out);
+            }
+            for entry in &menu.live.data_slots {
+                push_val(&entry.slot, out);
+            }
+            if let Some(sync) = &menu.live.synchronizer {
+                push_val(sync, out);
+            }
+            for slot in &menu.live.remote_slots {
+                push_remote(slot, out);
+            }
+            push_remote(&menu.live.remote_carried, out);
+        }
+        Object::MenuType {
+            constructor,
+            required_features,
+        } => {
+            push_val(constructor, out);
+            push_val(required_features, out);
+        }
+        Object::SimpleMenuProvider {
+            menu_constructor,
+            title,
+        } => {
+            push_val(menu_constructor, out);
+            push_val(title, out);
+        }
+        Object::ContainerLevelAccess { level, pos } => {
+            push_val(level, out);
+            push_val(pos, out);
+        }
+        Object::Screen(screen) => {
+            push_val(&screen.menu, out);
+            push_val(&screen.title, out);
+            push_val(&screen.minecraft, out);
+            push_val(&screen.font, out);
+            push_val(&screen.player_inventory_title, out);
+            if let Some(res) = &screen.menu_resource {
+                push_val(res, out);
+            }
+        }
+        Object::Inventory { player, contents } => {
+            push_val(player, out);
+            if let Some(contents) = contents {
+                for item in &contents.items {
+                    push_val(item, out);
+                }
+                if let Some(equipment) = &contents.equipment {
+                    for item in equipment {
+                        push_val(item, out);
+                    }
+                }
+            }
+        }
+        Object::Builder { inputs, result } => {
+            for def in inputs {
+                push_slot_def(def, out);
+            }
+            if let Some(def) = result {
+                push_slot_def(def, out);
+            }
+        }
+        Object::Definition(def) => {
+            for input in &def.inputs {
+                push_slot_def(input, out);
+            }
+            push_slot_def(&def.result, out);
+        }
+        Object::SlotDefinition(def) => push_slot_def(def, out),
+        Object::Slot(slot) => {
+            push_val(&slot.container, out);
+            if let Some(may_place) = &slot.may_place {
+                push_val(may_place, out);
+            }
+        }
+        Object::SlotList { slots } => {
+            for slot in slots {
+                out.push(slot.as_str());
+            }
+        }
+        Object::Container {
+            items,
+            owner,
+            recipe_used,
+            ..
+        } => {
+            for item in items {
+                push_val(item, out);
+            }
+            if let Some(owner) = owner {
+                out.push(owner.as_str());
+            }
+            if let Some(recipe) = recipe_used {
+                push_val(recipe, out);
+            }
+        }
+        Object::Predicate(_) => {}
+        Object::Pending(action) => match action {
+            MenuAction::SlotsChanged { menu, container } => {
+                push_val(menu, out);
+                push_val(container, out);
+            }
+            MenuAction::CreateResult { menu } => push_val(menu, out),
+            MenuAction::Predicate { predicate, stack } => {
+                push_val(predicate, out);
+                push_val(stack, out);
+            }
+            MenuAction::MenuSupplier {
+                supplier,
+                container_id,
+                inventory,
+            } => {
+                push_val(supplier, out);
+                push_val(container_id, out);
+                push_val(inventory, out);
+            }
+            MenuAction::MenuConstructor {
+                constructor,
+                container_id,
+                inventory,
+                player,
+            } => {
+                push_val(constructor, out);
+                push_val(container_id, out);
+                push_val(inventory, out);
+                push_val(player, out);
+            }
+            MenuAction::AccessEvaluate {
+                function,
+                level,
+                pos,
+                default,
+            } => {
+                push_val(function, out);
+                push_val(level, out);
+                push_val(pos, out);
+                if let Some(default) = default {
+                    push_val(default, out);
+                }
+            }
+            MenuAction::AccessExecute {
+                consumer,
+                level,
+                pos,
+            } => {
+                push_val(consumer, out);
+                push_val(level, out);
+                push_val(pos, out);
+            }
+        },
+        Object::DataSlot {
+            kind: Some(DataSlotKind::Container { data, .. }),
+            ..
+        } => push_val(data, out),
+        Object::DataSlot { .. } => {}
+    }
 }
 
 /// Default vanilla `Container.getMaxStackSize()` in Minecraft 26.3 (`Container.DEFAULT_MAX_STACK_SIZE`).

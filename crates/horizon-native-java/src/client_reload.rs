@@ -390,7 +390,7 @@ pub(crate) fn host_instance_call(
             }
             return Some(
                 register_in(
-                    &mut host.persistent_static_fields,
+                    std::sync::Arc::make_mut(&mut host.persistent_static_fields),
                     "neoforge-client",
                     &id,
                     listener,
@@ -433,7 +433,7 @@ pub(crate) fn host_instance_call(
             }
             return Some(
                 add_order(
-                    &mut host.persistent_static_fields,
+                    std::sync::Arc::make_mut(&mut host.persistent_static_fields),
                     "neoforge-client",
                     &first,
                     &second,
@@ -519,7 +519,7 @@ fn register(
     duplicate_listener_message: String,
 ) -> Result<Value, NativeError> {
     register_in(
-        &mut runtime.static_fields,
+        std::sync::Arc::make_mut(&mut runtime.static_fields),
         resource,
         id,
         listener,
@@ -651,9 +651,12 @@ pub(crate) fn runtime_instance_call<H: Host>(
                     }) else {
                         return None;
                     };
-                    if let Err(error) =
-                        add_order(&mut runtime.static_fields, &resource, &dependency, &id)
-                    {
+                    if let Err(error) = add_order(
+                        std::sync::Arc::make_mut(&mut runtime.static_fields),
+                        &resource,
+                        &dependency,
+                        &id,
+                    ) {
                         return Some(Err(error));
                     }
                 }
@@ -680,8 +683,13 @@ pub(crate) fn runtime_instance_call<H: Host>(
                 return None;
             };
             return Some(
-                add_order(&mut runtime.static_fields, &resource, &first, &second)
-                    .map(|_| Value::Void),
+                add_order(
+                    std::sync::Arc::make_mut(&mut runtime.static_fields),
+                    &resource,
+                    &first,
+                    &second,
+                )
+                .map(|_| Value::Void),
             );
         }
         return None;
@@ -746,7 +754,7 @@ pub(crate) fn runtime_instance_call<H: Host>(
             }
             return Some(
                 add_order(
-                    &mut runtime.static_fields,
+                    std::sync::Arc::make_mut(&mut runtime.static_fields),
                     "neoforge-client",
                     &first,
                     &second,

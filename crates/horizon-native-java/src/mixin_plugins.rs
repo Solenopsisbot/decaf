@@ -205,13 +205,35 @@ impl NativeJar {
             MixinSide::Client => &self.client_config_plugins,
         };
         slot.get_or_init(|| {
-            let configs = self.mixin_configs();
+            let configs = self.cached_mixin_configs_arc();
             if configs.iter().all(|c| c.plugin.is_none()) {
-                return ConfigPlugins::default();
+                return std::sync::Arc::new(ConfigPlugins::default());
             }
-            let config_sides = self.mixin_config_sides();
-            self.run_config_plugins(&configs, &config_sides, side)
+            let config_sides = self.cached_mixin_config_sides_arc();
+            std::sync::Arc::new(self.run_config_plugins(&configs, &config_sides, side))
         })
+        .as_ref()
+    }
+
+    pub(crate) fn cached_config_plugins_arc(
+        &self,
+        side: MixinSide,
+    ) -> std::sync::Arc<ConfigPlugins> {
+        if running_config_plugins() {
+            return std::sync::Arc::new(ConfigPlugins::default());
+        }
+        let slot = match side {
+            MixinSide::Server => &self.server_config_plugins,
+            MixinSide::Client => &self.client_config_plugins,
+        };
+        std::sync::Arc::clone(slot.get_or_init(|| {
+            let configs = self.cached_mixin_configs_arc();
+            if configs.iter().all(|c| c.plugin.is_none()) {
+                return std::sync::Arc::new(ConfigPlugins::default());
+            }
+            let config_sides = self.cached_mixin_config_sides_arc();
+            std::sync::Arc::new(self.run_config_plugins(&configs, &config_sides, side))
+        }))
     }
 
     /// Run every config plugin that loads on `side`, in config order, the way

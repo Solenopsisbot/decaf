@@ -127,7 +127,8 @@ impl<H: Host> Runtime<'_, H> {
                     | "resetToDefault" => {
                         if name == "resetToDefault" {
                             let fresh = self.construct_default(&class)?;
-                            self.static_fields.insert(slot(&class), fresh);
+                            std::sync::Arc::make_mut(&mut self.static_fields)
+                                .insert(slot(&class), fresh);
                         }
                         Some(Value::default_for(crate::return_desc(&r.descriptor)))
                     }
@@ -184,7 +185,8 @@ impl<H: Host> Runtime<'_, H> {
                 if n >= MAX_CONFIGLIB_VALUES {
                     return None;
                 }
-                self.static_fields.insert(format!("configlib#{n}"), boxed);
+                std::sync::Arc::make_mut(&mut self.static_fields)
+                    .insert(format!("configlib#{n}"), boxed);
                 Some(host_config::handle(
                     HostKind::ConfiglibValue,
                     &[Value::Int(n as i32)],
@@ -224,7 +226,7 @@ impl<H: Host> Runtime<'_, H> {
             return Ok(value.clone());
         }
         let value = self.construct_default(class)?;
-        self.static_fields.insert(slot(class), value.clone());
+        std::sync::Arc::make_mut(&mut self.static_fields).insert(slot(class), value.clone());
         Ok(value)
     }
 

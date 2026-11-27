@@ -46,7 +46,7 @@ use super::*;
 const NEOFORGE_NAMESPACES: &[&str] = &["net/neoforged/", "net/minecraftforge/"];
 
 /// The loader a jar's execution runs on, for class precedence.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RunLoader {
     /// Not seeded from a jar: every host-modelled namespace stays the host's,
     /// as before the rule existed.
@@ -56,6 +56,20 @@ pub enum RunLoader {
     Fabric,
     /// FML (NeoForge, or legacy Forge through the same model).
     NeoForge,
+}
+
+/// Cache key capturing how a [`Host`]'s `models_class` answers for linked classes.
+///
+/// Only hosts whose `models_class` answer is a pure function of `(name, linked_classes)`
+/// parameterized by this key may share a per-jar runtime metadata cache; custom hosts
+/// return `None` from [`Host::class_precedence_key`] and use a per-invocation cache.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HostClassPrecedence {
+    /// `StdHost` (or a delegating wrapper such as `GameHookHost`) with this loader.
+    Std(RunLoader),
+    /// A host whose `models_class` always answers `false`.
+    None,
 }
 
 impl RunLoader {
