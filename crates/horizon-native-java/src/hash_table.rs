@@ -128,6 +128,19 @@ pub struct HashTable {
 }
 
 impl HashTable {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for bin in &self.bins {
+            for node in bin {
+                out.push(node.marker.as_str());
+                crate::heap::visit_value_texts(&node.key, |t| out.push(t));
+            }
+        }
+        for (marker, value) in &self.unplaced {
+            out.push(marker.as_str());
+            crate::heap::visit_value_texts(value, |t| out.push(t));
+        }
+    }
+
     /// `new HashMap<>(initialCapacity, loadFactor)`; `None` is `new
     /// HashMap<>()`.
     pub(crate) fn new(initial_capacity: Option<i32>, load_factor: f32) -> Self {

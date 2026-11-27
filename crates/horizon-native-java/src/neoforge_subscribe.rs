@@ -44,8 +44,7 @@ use crate::neoforge_bus::{
     BusKind, BusListener, bus_kind, bus_value, class_text, illegal_argument,
 };
 use crate::{
-    AnnotationValue, ClassFile, Host, Method, MethodRef, NativeError, Reader, Runtime, Value,
-    read_pool, utf8,
+    AnnotationValue, ClassFile, Host, Method, MethodRef, NativeError, Reader, Runtime, Value, utf8,
 };
 
 const SUBSCRIBE_EVENT: &str = "Lnet/neoforged/bus/api/SubscribeEvent;";
@@ -381,12 +380,8 @@ pub(crate) fn method_exceptions(
     name: &str,
     descriptor: &str,
 ) -> Option<Vec<String>> {
-    let mut r = Reader::new(&file.raw);
-    if r.u4().ok()? != 0xCAFE_BABE {
-        return None;
-    }
-    r.skip(4).ok()?;
-    let pool = read_pool(&mut r).ok()?;
+    let mut r = file.reader_after_pool()?;
+    let pool = &file.pool;
     r.skip(6).ok()?;
     let interfaces = r.u2().ok()? as usize;
     r.skip(interfaces * 2).ok()?;
@@ -398,8 +393,8 @@ pub(crate) fn method_exceptions(
     let methods = r.u2().ok()?;
     for _ in 0..methods {
         r.skip(2).ok()?;
-        let this_name = utf8(&pool, r.u2().ok()?).ok()?;
-        let this_descriptor = utf8(&pool, r.u2().ok()?).ok()?;
+        let this_name = utf8(pool, r.u2().ok()?).ok()?;
+        let this_descriptor = utf8(pool, r.u2().ok()?).ok()?;
         if this_name != name || this_descriptor != descriptor {
             skip_attributes(&mut r)?;
             continue;
@@ -407,7 +402,7 @@ pub(crate) fn method_exceptions(
         let count = r.u2().ok()?;
         let mut thrown = Vec::new();
         for _ in 0..count {
-            let attribute = utf8(&pool, r.u2().ok()?).ok()?;
+            let attribute = utf8(pool, r.u2().ok()?).ok()?;
             let length = r.u4().ok()? as usize;
             if attribute != "Exceptions" {
                 r.skip(length).ok()?;
@@ -415,7 +410,7 @@ pub(crate) fn method_exceptions(
             }
             let classes = r.u2().ok()?;
             for _ in 0..classes {
-                thrown.push(crate::class_name(&pool, r.u2().ok()?).ok()?);
+                thrown.push(crate::class_name(pool, r.u2().ok()?).ok()?);
             }
         }
         return Some(thrown);

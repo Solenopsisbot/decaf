@@ -48,8 +48,9 @@
 //! refused with an error that names it, so the callback that grew it fails
 //! instead of the server running out of memory.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::runtime::fx_hash::{FxHashMap, FxHashSet};
 use crate::runtime::{Host, NativeError, Runtime, StdHost, Value, game_hooks::GAME_OBJECT_PREFIX};
 
 /// Instance fields one jar's resident heap may keep after collection.
@@ -63,6 +64,13 @@ pub(crate) const MAX_RESIDENT_BYTES: usize = 32 << 20;
 /// the next store collects it. Small heaps collect rarely; a large one at most
 /// every time it doubles, so a store costs amortised O(1) per entry.
 const COLLECT_SLACK: usize = 1024;
+
+/// Bitmask flags persisted on [`JavaHeap`] so hot-path guards skip `BTreeMap`
+/// lookups when a feature has never been constructed on this heap.
+pub(crate) const HEAP_FLAG_GUAVA_MULTIMAP: u8 = 1 << 0;
+pub(crate) const HEAP_FLAG_GUAVA_BIMAP: u8 = 1 << 1;
+pub(crate) const HEAP_FLAG_GUAVA_TYPE_TOKEN: u8 = 1 << 2;
+pub(crate) const HEAP_FLAG_UNCERTAIN_COLLECTION: u8 = 1 << 3;
 
 /// The instance state a jar's invocations built, kept between them.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -87,6 +95,8 @@ pub struct JavaHeap {
     /// Texts the storing caller holds outside the host (the game-hook tier's
     /// fields on game objects), roots of this store's collection only.
     roots: Vec<String>,
+    /// Feature-presence flags (`HEAP_FLAG_*`) accumulated on this heap.
+    pub(crate) heap_flags: u8,
 }
 
 impl JavaHeap {
@@ -346,7 +356,7 @@ impl StdHost {
     /// is listed, including bootstrap-only ones.
     fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
         fn value<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
-            out.extend(value_texts(value));
+            visit_value_texts(value, |t| out.push(t));
         }
         for field in self.persistent_static_fields.values() {
             value(field, out);
@@ -490,22 +500,40 @@ impl StdHost {
         for held in self.level_sound.level_random_handles.values() {
             value(held, out);
         }
+        // Host subsystems whose values and object keys are walked directly rather
+        // than `Debug`-formatted into temporary strings.
+        self.neoforge_bus.root_texts(out);
+        self.threads.root_texts(out);
+        for req in &self.capability_requests {
+            out.push(req.owner.as_str());
+            out.push(req.capability.as_str());
+            if let Some(pos) = &req.position {
+                out.push(pos.as_str());
+            }
+            if let Some(side) = &req.side {
+                out.push(side.as_str());
+            }
+        }
+        self.client.root_texts(out);
+        if let Some(firing) = &self.game_event {
+            firing.root_texts(out);
+        }
+        for container in &self.fabric_entrypoint_containers {
+            out.push(container.class.as_str());
+        }
+        self.content_builders.root_texts(out);
+        for row in &self.holder_rows {
+            out.push(row.register.as_str());
+            if let Some((registry, _)) = &row.id {
+                value(registry, out);
+            }
+        }
     }
 
-    /// The host's own state that may name a jar object without a table this
-    /// module reads field by field: each one's whole `Debug` text, scanned
-    /// for markers as a root (keeping too much, never too little).
+    /// Root texts that live behind interior mutability (`ImcHandle`'s shared bus)
+    /// and must be copied out as owned strings while tracing.
     fn opaque_root_texts(&self, out: &mut Vec<String>) {
-        out.push(format!("{:?}", self.neoforge_bus));
-        out.push(format!("{:?}", self.imc));
-        out.push(format!("{:?}", self.threads));
-        out.push(format!("{:?}", self.levels));
-        out.push(format!("{:?}", self.capability_requests));
-        out.push(format!("{:?}", self.client));
-        out.push(format!("{:?}", self.game_event));
-        out.push(format!("{:?}", self.fabric_entrypoint_containers));
-        out.push(format!("{:?}", self.content_builders));
-        out.push(format!("{:?}", self.holder_rows));
+        self.imc.root_texts_owned(out);
     }
 
     /// What the host keeps for the object `marker` in a table keyed by it: a
@@ -513,56 +541,95 @@ impl StdHost {
     /// guard, a comparator, a reference's referent, a throwable's cause, a
     /// collection's layout. Edges from `marker` when it is collectable,
     /// roots when not.
-    fn keyed_texts(&self, marker: &str, out: &mut Vec<String>) {
-        fn push(entry: Option<&impl std::fmt::Debug>, out: &mut Vec<String>) {
-            if let Some(entry) = entry {
-                out.push(format!("{entry:?}"));
+    fn keyed_root_texts<'a>(&'a self, marker: &str, out: &mut Vec<&'a str>) {
+        fn push_val<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
+            visit_value_texts(value, |t| out.push(t));
+        }
+        if let Some(s) = self.io_paths.get(marker) {
+            out.push(s.as_str());
+        }
+        if let Some(s) = self.set_from_map_views.get(marker) {
+            out.push(s.as_str());
+        }
+        if let Some(Some(s)) = self.unmodifiable_collections.get(marker) {
+            out.push(s.as_str());
+        }
+        if let Some((s, _)) = self.reversed_views.get(marker) {
+            out.push(s.as_str());
+        }
+        if let Some(v) = self.synchronized_views.get(marker) {
+            push_val(v, out);
+        }
+        if let Some(s) = self.view_copies.get(marker) {
+            out.push(s.as_str());
+        }
+        if let Some(link) = self.sub_lists.get(marker) {
+            out.push(link.parent());
+        }
+        if let Some(s) = self.iterator_sources.get(marker) {
+            out.push(s.as_str());
+        }
+        if let Some(v) = self.iterator_last.get(marker) {
+            push_val(v, out);
+        }
+        if let Some(iter) = self.list_iterators.get(marker) {
+            push_val(iter.source(), out);
+        }
+        if let Some(guard) = self.iterator_guards.get(marker) {
+            guard.root_texts(out);
+        }
+        if let Some(v) = self.collection_comparators.get(marker) {
+            push_val(v, out);
+        }
+        if let Some(v) = self.references.get(marker) {
+            push_val(v, out);
+        }
+        if let Some(Some(v)) = self.throwable_causes.get(marker) {
+            push_val(v, out);
+        }
+        if let Some(list) = self.throwable_suppressed.get(marker) {
+            for v in list {
+                push_val(v, out);
             }
         }
-        push(self.io_paths.get(marker), out);
-        push(self.set_from_map_views.get(marker), out);
-        push(self.unmodifiable_collections.get(marker), out);
-        push(self.reversed_views.get(marker), out);
-        push(self.synchronized_views.get(marker), out);
-        push(self.view_copies.get(marker), out);
-        push(self.sub_lists.get(marker), out);
-        push(self.iterator_sources.get(marker), out);
-        push(self.iterator_last.get(marker), out);
-        push(self.list_iterators.get(marker), out);
-        push(self.iterator_guards.get(marker), out);
-        push(self.collection_comparators.get(marker), out);
-        push(self.references.get(marker), out);
-        if self.random_sources.contains_key(marker) {
-            out.push(format!("{:?}", self.random_sources.get(marker)));
+        if let Some(table) = self.hash_tables.get(marker) {
+            table.root_texts(out);
         }
-        push(self.throwable_causes.get(marker), out);
-        push(self.throwable_suppressed.get(marker), out);
-        push(self.hash_tables.get(marker), out);
-        push(self.red_black_trees.get(marker), out);
-        push(self.probe_tables.get(marker), out);
-        push(self.block_items.get(marker), out);
-        push(self.item_lores.get(marker), out);
-        push(self.state_definition_builders.get(marker), out);
-        // An `Arrays.asList` view's array, which its `get`/`set` work on, and
-        // the view an iterator over one follows.
-        push(self.array_view_array(marker), out);
-        push(self.array_view_of_iterator(marker), out);
-        if self.render_objects.contains_key(marker) {
-            out.push(marker.to_owned());
+        if let Some(tree) = self.red_black_trees.get(marker) {
+            tree.root_texts(out);
         }
-        push(self.ranged_attributes.get(marker), out);
-        if let Some(text) = crate::runtime::menu_models::keyed_text(&self.menu_states, marker) {
-            out.push(text);
+        if let Some(table) = self.probe_tables.get(marker) {
+            table.root_texts(out);
         }
-        if let Some(text) = self.block_use.keyed_text(marker) {
-            out.push(text);
+        if let Some(v) = self.block_items.get(marker) {
+            push_val(v, out);
         }
-        if let Some(lines) = self.tooltip_sinks.get(marker) {
-            out.push(marker.to_owned());
+        if let Some(v) = self.item_lores.get(marker) {
+            push_val(v, out);
+        }
+        if let Some(s) = self.state_definition_builders.get(marker) {
+            out.push(s.as_str());
+        }
+        if let Some(s) = self.array_view_array(marker) {
+            out.push(s);
+        }
+        if let Some(s) = self.array_view_of_iterator(marker) {
+            out.push(s);
+        }
+        if let Some((key, _)) = self.render_objects.get_key_value(marker) {
+            out.push(key.as_str());
+        }
+        if let Some(attr) = self.ranged_attributes.get(marker)
+            && let Some(desc) = &attr.description_id
+        {
+            out.push(desc.as_str());
+        }
+        crate::runtime::menu_models::keyed_root_texts(&self.menu_states, marker, out);
+        self.block_use.keyed_root_texts(marker, out);
+        if let Some((key, lines)) = self.tooltip_sinks.get_key_value(marker) {
+            out.push(key.as_str());
             for line in lines {
-                for text in value_texts(line) {
-                    out.push(text.to_owned());
-                }
+                push_val(line, out);
             }
         }
     }
@@ -872,27 +939,51 @@ fn value_bytes(value: &Value) -> usize {
 /// top. It is a loop over a worklist, so a chain 200,000 deep takes no native
 /// stack, and it visits each shared row or held list once, so a chain that
 /// holds one operand twice per link (`p = p.or(p)`) is not walked 2^n times.
+/// Visit every text `value` names other objects through without allocating for
+/// plain references, primitives, or bare handles (no row / held list).
+pub(crate) fn visit_value_texts<'a>(value: &'a Value, mut visit: impl FnMut(&'a str)) {
+    match value {
+        Value::Ref(Some(text)) => visit(text),
+        Value::Host(handle) => {
+            visit(handle.key());
+            if handle.row().is_none() && handle.held().is_empty() {
+                return;
+            }
+            let mut seen: FxHashSet<*const u8> = FxHashSet::default();
+            let mut pending: Vec<&'a Value> = Vec::new();
+            if let Some(row) = handle.row() {
+                seen.insert(std::ptr::from_ref(row).cast::<u8>());
+                pending.extend(row.values());
+            }
+            let held = handle.held();
+            if !held.is_empty() && seen.insert(held.as_ptr().cast::<u8>()) {
+                pending.extend(held);
+            }
+            while let Some(current) = pending.pop() {
+                if let Some(text) = value_text(current) {
+                    visit(text);
+                }
+                let Value::Host(h) = current else {
+                    continue;
+                };
+                if let Some(row) = h.row()
+                    && seen.insert(std::ptr::from_ref(row).cast::<u8>())
+                {
+                    pending.extend(row.values());
+                }
+                let held = h.held();
+                if !held.is_empty() && seen.insert(held.as_ptr().cast::<u8>()) {
+                    pending.extend(held);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn value_texts(value: &Value) -> Vec<&str> {
     let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        if let Some(text) = value_text(value) {
-            out.push(text);
-        }
-        let Value::Host(handle) = value else {
-            continue;
-        };
-        if let Some(row) = handle.row()
-            && seen.insert(std::ptr::from_ref(row).cast::<u8>())
-        {
-            pending.extend(row.values());
-        }
-        let held = handle.held();
-        if !held.is_empty() && seen.insert(held.as_ptr().cast::<u8>()) {
-            pending.extend(held);
-        }
-    }
+    visit_value_texts(value, |t| out.push(t));
     out
 }
 
@@ -982,109 +1073,390 @@ fn cache_owner(identity: &str) -> Option<String> {
     collectable(&key).then_some(key)
 }
 
-/// Note the allocation number of every `#<digits>` in `text` (`class#n`
-/// keys, embedded ones included): over-reading only keeps a number out of
-/// the freed set, which costs a diagnostic, never an answer.
-fn note_numbers(text: &str, out: &mut Vec<usize>) {
-    let bytes = text.as_bytes();
-    let mut at = 0;
-    while let Some(offset) = bytes[at..].iter().position(|&b| b == b'#') {
-        let start = at + offset + 1;
-        let end = start
-            + bytes[start..]
-                .iter()
-                .take_while(|b| b.is_ascii_digit())
-                .count();
-        if end > start
-            && let Ok(number) = text[start..end].parse()
-        {
-            out.push(number);
+enum TailEntry {
+    One(u32),
+    Many(Vec<u32>),
+}
+
+impl TailEntry {
+    fn push(&mut self, idx: u32) {
+        match self {
+            TailEntry::One(first) => {
+                let a = *first;
+                *self = TailEntry::Many(vec![a, idx]);
+            }
+            TailEntry::Many(list) => list.push(idx),
         }
-        at = end.max(start);
     }
 }
 
-/// Note the allocation number of every `#menu<digits>` in `text` so live
-/// host-synthesized menu objects stay out of `freed_menu_objects`.
-fn note_menu_numbers(text: &str, out: &mut Vec<usize>) {
-    let bytes = text.as_bytes();
-    let mut at = 0;
-    while let Some(offset) = bytes[at..].windows(5).position(|w| w == b"#menu") {
-        let start = at + offset + 5;
-        let end = start
-            + bytes[start..]
-                .iter()
-                .take_while(|b| b.is_ascii_digit())
-                .count();
-        if end > start
-            && let Ok(number) = text[start..end].parse()
-        {
-            out.push(number);
-        }
-        at = end.max(start);
+/// Parse an ASCII digit slice as a canonical `u64` (no leading zeros except `"0"` itself).
+fn parse_canonical_u64(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() || (digits.len() > 1 && digits[0] == b'0') {
+        return None;
     }
+    let mut value = 0u64;
+    for &b in digits {
+        value = value.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
+    }
+    Some(value)
 }
 
-/// The collectable markers of a heap and the distinct lengths they come in,
-/// which is what [`scan`] tries at each digit-run end.
-struct Collectable {
-    markers: HashSet<String>,
-    lengths: Vec<usize>,
+const SRC_FIELDS: u16 = 1 << 0;
+const SRC_ARRAYS: u16 = 1 << 1;
+const SRC_COLLECTIONS: u16 = 1 << 2;
+const SRC_REPEATED: u16 = 1 << 3;
+const SRC_ITERATORS: u16 = 1 << 4;
+const SRC_ITER_LAST: u16 = 1 << 5;
+const SRC_ENUMS: u16 = 1 << 6;
+const SRC_COMPONENTS: u16 = 1 << 7;
+const SRC_MAP_ENTRIES: u16 = 1 << 8;
+const SRC_RECIPES: u16 = 1 << 9;
+const SRC_KEYED: u16 = 1 << 10;
+
+/// The collectable markers of a heap, borrowed for the trace and indexed by
+/// their trailing maximal ASCII digit run so [`scan_text`] tests only the 1-2
+/// markers sharing each digit run instead of every marker length.
+///
+/// Each marker also records which tables contain it (`sources` bitmask) and,
+/// for `heap.fields`, its contiguous slice in `field_values`, eliminating
+/// per-node `BTreeMap` lookups during the BFS trace.
+struct Collectable<'a> {
+    markers: Vec<&'a str>,
+    sources: Vec<u16>,
+    /// Contiguous slice `(start, end)` inside `field_values` for each marker.
+    field_spans: Vec<(u32, u32)>,
+    field_values: Vec<&'a Value>,
+    /// Values from non-collectable receivers in `heap.fields` (roots), collected
+    /// during the same linear pass so `heap.fields` is scanned only once.
+    root_field_values: Vec<&'a Value>,
+    index: FxHashMap<&'a str, u32>,
+    by_num: FxHashMap<u64, TailEntry>,
+    by_tail: FxHashMap<&'a str, TailEntry>,
+    all_digits: Vec<u32>,
 }
 
-impl Collectable {
-    fn new(heap: &JavaHeap, host: &StdHost) -> Self {
-        // Field keys are sorted, so an object's fields are adjacent: each
-        // receiver is checked once.
-        let mut previous = "";
-        let markers: HashSet<String> = heap
-            .fields
-            .keys()
-            .map(|key| field_receiver(key))
-            .filter(move |receiver| std::mem::replace(&mut previous, receiver) != *receiver)
-            .chain(heap.arrays.keys().map(String::as_str))
-            .chain(heap.string_builders.keys().map(String::as_str))
-            .chain(heap.enum_constants.keys().map(String::as_str))
-            .chain(host.mutable_collections.keys().map(String::as_str))
-            .chain(host.repeated_collections.keys().map(String::as_str))
-            .chain(host.set_from_map_views.keys().map(String::as_str))
-            .chain(host.random_sources.keys().map(String::as_str))
-            .chain(host.iterators.keys().map(String::as_str))
-            .chain(host.enumerations.keys().map(String::as_str))
-            .chain(host.component_states.keys().map(String::as_str))
-            .chain(host.map_entries.keys().map(String::as_str))
-            .chain(host.block_states.values().map(|(block, _)| block.as_str()))
-            .chain(host.keyed_table_keys())
-            .filter(|marker| collectable(marker))
-            // The recipe rows a transient scope minted (`recipe_models::RecipeState::
-            // collectable_rows`): `recipe-stack/<n>` and the like, which end in their serial
-            // as every marker here does, so `scan` finds them where a text names them.
-            .chain(host.recipes.collectable_rows.iter().map(String::as_str))
-            .map(str::to_owned)
-            .collect();
-        let lengths: BTreeSet<usize> = markers.iter().map(String::len).collect();
-        Self {
-            markers,
-            lengths: lengths.into_iter().collect(),
+impl<'a> Collectable<'a> {
+    #[inline]
+    fn register(&mut self, marker: &'a str, src_bit: u16) -> u32 {
+        use std::collections::hash_map::Entry;
+        match self.index.entry(marker) {
+            Entry::Occupied(occ) => {
+                let idx = *occ.get();
+                self.sources[idx as usize] |= src_bit;
+                idx
+            }
+            Entry::Vacant(vac) => {
+                let idx = self.markers.len() as u32;
+                vac.insert(idx);
+                self.markers.push(marker);
+                self.sources.push(src_bit);
+                self.field_spans.push((0, 0));
+                let bytes = marker.as_bytes();
+                let mut digit_start = bytes.len();
+                while digit_start > 0 && bytes[digit_start - 1].is_ascii_digit() {
+                    digit_start -= 1;
+                }
+                if digit_start == 0 {
+                    self.all_digits.push(idx);
+                } else if digit_start < bytes.len() {
+                    let tail_bytes = &bytes[digit_start..];
+                    if let Some(num) = parse_canonical_u64(tail_bytes) {
+                        self.by_num
+                            .entry(num)
+                            .and_modify(|e| e.push(idx))
+                            .or_insert(TailEntry::One(idx));
+                    } else {
+                        let tail = &marker[digit_start..];
+                        self.by_tail
+                            .entry(tail)
+                            .and_modify(|e| e.push(idx))
+                            .or_insert(TailEntry::One(idx));
+                    }
+                }
+                idx
+            }
         }
     }
 
-    /// Every collectable marker `text` names, itself or embedded: each one
-    /// ends where a run of digits ends.
-    fn scan(&self, text: &str, out: &mut Vec<String>) {
+    fn new(heap: &'a JavaHeap, host: &'a StdHost) -> Self {
+        let est = (heap.fields.len() / 2)
+            .saturating_add(heap.arrays.len())
+            .saturating_add(host.mutable_collections.len())
+            .saturating_add(host.recipes.collectable_rows.len())
+            .saturating_add(256);
+        let mut out = Self {
+            markers: Vec::with_capacity(est),
+            sources: Vec::with_capacity(est),
+            field_spans: Vec::with_capacity(est),
+            field_values: Vec::with_capacity(heap.fields.len()),
+            root_field_values: Vec::new(),
+            index: FxHashMap::with_capacity_and_hasher(est, Default::default()),
+            by_num: FxHashMap::with_capacity_and_hasher(est, Default::default()),
+            by_tail: FxHashMap::default(),
+            all_digits: Vec::new(),
+        };
+
+        // Single linear pass over `heap.fields`. Because `field_receiver(key)`
+        // splits at the first `|`, all entries for a given receiver form one
+        // contiguous run in `BTreeMap` order.
+        let mut cur_recv = "";
+        let mut cur_idx: Option<u32> = None;
+        let mut cur_start: u32 = 0;
+        for (key, value) in &heap.fields {
+            let recv = field_receiver(key);
+            if recv != cur_recv {
+                if let Some(idx) = cur_idx {
+                    out.field_spans[idx as usize] = (cur_start, out.field_values.len() as u32);
+                }
+                cur_recv = recv;
+                if collectable(recv) {
+                    let idx = out.register(recv, SRC_FIELDS);
+                    cur_idx = Some(idx);
+                    cur_start = out.field_values.len() as u32;
+                } else {
+                    cur_idx = None;
+                }
+            }
+            if cur_idx.is_some() {
+                out.field_values.push(value);
+            } else {
+                out.root_field_values.push(value);
+            }
+        }
+        if let Some(idx) = cur_idx {
+            out.field_spans[idx as usize] = (cur_start, out.field_values.len() as u32);
+        }
+
+        for marker in heap.arrays.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_ARRAYS);
+            }
+        }
+        for marker in heap.string_builders.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, 0);
+            }
+        }
+        for marker in heap.enum_constants.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, 0);
+            }
+        }
+        for marker in host.mutable_collections.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_COLLECTIONS);
+            }
+        }
+        for marker in host.repeated_collections.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_REPEATED);
+            }
+        }
+        for marker in host.set_from_map_views.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_KEYED);
+            }
+        }
+        for marker in host.random_sources.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, 0);
+            }
+        }
+        for marker in host.iterators.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_ITERATORS);
+            }
+        }
+        for marker in host.iterator_last.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_ITER_LAST);
+            }
+        }
+        for marker in host.enumerations.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_ENUMS);
+            }
+        }
+        for marker in host.component_states.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_COMPONENTS);
+            }
+        }
+        for marker in host.map_entries.keys().map(String::as_str) {
+            if collectable(marker) {
+                out.register(marker, SRC_MAP_ENTRIES);
+            }
+        }
+        for (block, _) in host.block_states.values() {
+            if collectable(block.as_str()) {
+                out.register(block.as_str(), 0);
+            }
+        }
+        for marker in host.keyed_table_keys() {
+            if collectable(marker) {
+                out.register(marker, SRC_KEYED);
+            }
+        }
+        // The recipe rows a transient scope minted (`recipe_models::RecipeState::
+        // collectable_rows`): `recipe-stack/<n>` and the like, which end in their serial
+        // as every marker here does, so `scan_text` finds them where a text names them.
+        for marker in host.recipes.collectable_rows.iter().map(String::as_str) {
+            out.register(marker, SRC_RECIPES);
+        }
+        out
+    }
+
+    #[inline]
+    fn contains(&self, marker: &str) -> bool {
+        self.index.contains_key(marker)
+    }
+
+    #[inline]
+    fn check_entry(
+        &self,
+        prefix: &[u8],
+        entry: &TailEntry,
+        reached: &mut [bool],
+        pending: &mut Vec<u32>,
+    ) {
+        match entry {
+            TailEntry::One(idx) => {
+                let i = *idx as usize;
+                if !reached[i] && prefix.ends_with(self.markers[i].as_bytes()) {
+                    reached[i] = true;
+                    pending.push(*idx);
+                }
+            }
+            TailEntry::Many(list) => {
+                for &idx in list {
+                    let i = idx as usize;
+                    if !reached[i] && prefix.ends_with(self.markers[i].as_bytes()) {
+                        reached[i] = true;
+                        pending.push(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Mark every collectable marker `text` names (itself or embedded) and push
+    /// newly reached indices onto `pending`.
+    fn scan(&self, text: &str, reached: &mut [bool], pending: &mut Vec<u32>) {
         let bytes = text.as_bytes();
-        for end in 1..=bytes.len() {
-            if !bytes[end - 1].is_ascii_digit() || bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if !bytes[i].is_ascii_digit() {
+                i += 1;
                 continue;
             }
-            for &length in &self.lengths {
-                let Some(start) = end.checked_sub(length) else {
-                    break;
-                };
-                if let Some(candidate) = text.get(start..end)
-                    && self.markers.contains(candidate)
-                {
-                    out.push(candidate.to_owned());
+            let start = i;
+            let mut canonical = bytes[start] != b'0';
+            let mut num = u64::from(bytes[start] - b'0');
+            i += 1;
+            while i < len && bytes[i].is_ascii_digit() {
+                if canonical {
+                    match num
+                        .checked_mul(10)
+                        .and_then(|v| v.checked_add(u64::from(bytes[i] - b'0')))
+                    {
+                        Some(next) => num = next,
+                        None => canonical = false,
+                    }
+                }
+                i += 1;
+            }
+            let end = i;
+            let prefix = &bytes[..end];
+            if canonical || end - start == 1 {
+                if let Some(entry) = self.by_num.get(&num) {
+                    self.check_entry(prefix, entry, reached, pending);
+                }
+            } else if let Some(entry) = self.by_tail.get(&text[start..end]) {
+                self.check_entry(prefix, entry, reached, pending);
+            }
+            if !self.all_digits.is_empty() {
+                for &idx in &self.all_digits {
+                    let j = idx as usize;
+                    if !reached[j] && prefix.ends_with(self.markers[j].as_bytes()) {
+                        reached[j] = true;
+                        pending.push(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Single-pass trace of `text`: marks collectable markers, notes `#<digits>`
+    /// allocation numbers into `live`, and notes `#menu<digits>` numbers into `live_menu`.
+    #[inline]
+    fn scan_text(
+        &self,
+        text: &str,
+        reached: &mut [bool],
+        pending: &mut Vec<u32>,
+        live: &mut Vec<usize>,
+        live_menu: &mut Vec<usize>,
+    ) {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+        while i < len {
+            if !bytes[i].is_ascii_digit() {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let mut canonical = bytes[start] != b'0';
+            let mut num = u64::from(bytes[start] - b'0');
+            i += 1;
+            while i < len && bytes[i].is_ascii_digit() {
+                if canonical {
+                    match num
+                        .checked_mul(10)
+                        .and_then(|v| v.checked_add(u64::from(bytes[i] - b'0')))
+                    {
+                        Some(next) => num = next,
+                        None => canonical = false,
+                    }
+                }
+                i += 1;
+            }
+            let end = i;
+            let prefix = &bytes[..end];
+            let is_u64 = canonical || end - start == 1;
+            if is_u64 {
+                if let Some(entry) = self.by_num.get(&num) {
+                    self.check_entry(prefix, entry, reached, pending);
+                }
+            } else if let Some(entry) = self.by_tail.get(&text[start..end]) {
+                self.check_entry(prefix, entry, reached, pending);
+            }
+            if !self.all_digits.is_empty() {
+                for &idx in &self.all_digits {
+                    let j = idx as usize;
+                    if !reached[j] && prefix.ends_with(self.markers[j].as_bytes()) {
+                        reached[j] = true;
+                        pending.push(idx);
+                    }
+                }
+            }
+            if start > 0 && bytes[start - 1] == b'#' {
+                if is_u64 {
+                    if let Ok(n) = usize::try_from(num) {
+                        live.push(n);
+                    }
+                } else if let Ok(n) = text[start..end].parse::<usize>() {
+                    live.push(n);
+                }
+            } else if start >= 5 && &bytes[start - 5..start] == b"#menu" {
+                if is_u64 {
+                    if let Ok(n) = usize::try_from(num) {
+                        live_menu.push(n);
+                    }
+                } else if let Ok(n) = text[start..end].parse::<usize>() {
+                    live_menu.push(n);
                 }
             }
         }
@@ -1239,9 +1611,10 @@ impl<'h> LazyHolders<'h> {
 fn mark_kotlin_lazy_states<'t>(
     lazy: &LazyHolders<'t>,
     text: &'t str,
-    reached: &mut HashSet<String>,
-    pending: &mut Vec<String>,
-    collectable: &Collectable,
+    reached_lazy: &mut FxHashSet<String>,
+    reached_markers: &mut [bool],
+    pending: &mut Vec<u32>,
+    collectable: &Collectable<'_>,
 ) {
     if lazy.is_empty() {
         return;
@@ -1250,12 +1623,12 @@ fn mark_kotlin_lazy_states<'t>(
     while let Some(text) = texts.pop() {
         lazy.matches(text, |index| {
             let (holder, value) = lazy.holders[index];
-            if reached.contains(holder) {
+            if reached_lazy.contains(holder) {
                 return;
             }
-            reached.insert(holder.to_owned());
+            reached_lazy.insert(holder.to_owned());
             if let Some(value) = value_text(value) {
-                collectable.scan(value, pending);
+                collectable.scan(value, reached_markers, pending);
                 texts.push(value);
             }
         });
@@ -1269,7 +1642,7 @@ fn text_has_shape_probe(text: &str) -> bool {
 }
 
 fn value_has_shape_probe(value: &Value) -> bool {
-    let mut seen = HashSet::new();
+    let mut seen: FxHashSet<*const u8> = FxHashSet::default();
     let mut pending = vec![value];
     while let Some(current) = pending.pop() {
         match current {
@@ -1374,12 +1747,93 @@ fn has_live_shape_probe(heap: &JavaHeap, host: &StdHost, extra: &[String]) -> bo
     let mut keyed = Vec::new();
     for key in host.keyed_table_keys() {
         keyed.clear();
-        host.keyed_texts(key, &mut keyed);
+        host.keyed_root_texts(key, &mut keyed);
         if keyed.iter().any(|text| text_has_shape_probe(text)) {
             return true;
         }
     }
     false
+}
+
+/// Compact owned set of dead markers backed by one contiguous `String` arena
+/// indexed by trailing canonical `u64` digit run, eliminating per-dead-marker
+/// heap allocations and full-string hashing during sweep.
+struct DeadSet {
+    arena: String,
+    spans: Vec<(u32, u32)>,
+    by_num: FxHashMap<u64, TailEntry>,
+    other: FxHashSet<String>,
+    count: usize,
+}
+
+impl DeadSet {
+    fn with_capacity(est: usize) -> Self {
+        Self {
+            arena: String::with_capacity(est.saturating_mul(36)),
+            spans: Vec::with_capacity(est),
+            by_num: FxHashMap::with_capacity_and_hasher(est, Default::default()),
+            other: FxHashSet::default(),
+            count: 0,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    #[inline]
+    fn trailing_u64(bytes: &[u8]) -> Option<u64> {
+        let mut start = bytes.len();
+        while start > 0 && bytes[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+        if start == bytes.len() {
+            return None;
+        }
+        parse_canonical_u64(&bytes[start..])
+    }
+
+    #[inline]
+    fn insert(&mut self, marker: &str) {
+        self.count += 1;
+        let bytes = marker.as_bytes();
+        if let Some(num) = Self::trailing_u64(bytes) {
+            let start = self.arena.len() as u32;
+            self.arena.push_str(marker);
+            let end = self.arena.len() as u32;
+            let idx = self.spans.len() as u32;
+            self.spans.push((start, end));
+            self.by_num
+                .entry(num)
+                .and_modify(|e| e.push(idx))
+                .or_insert(TailEntry::One(idx));
+        } else {
+            self.other.insert(marker.to_owned());
+        }
+    }
+
+    #[inline]
+    fn contains(&self, marker: &str) -> bool {
+        let bytes = marker.as_bytes();
+        if let Some(num) = Self::trailing_u64(bytes) {
+            let Some(entry) = self.by_num.get(&num) else {
+                return false;
+            };
+            let arena = self.arena.as_bytes();
+            return match entry {
+                TailEntry::One(idx) => {
+                    let (s, e) = self.spans[*idx as usize];
+                    &arena[s as usize..e as usize] == bytes
+                }
+                TailEntry::Many(list) => list.iter().any(|&idx| {
+                    let (s, e) = self.spans[idx as usize];
+                    &arena[s as usize..e as usize] == bytes
+                }),
+            };
+        }
+        !self.other.is_empty() && self.other.contains(marker)
+    }
 }
 
 /// Drop every collectable object of `heap` (and every collectable collection
@@ -1390,215 +1844,266 @@ fn has_live_shape_probe(heap: &JavaHeap, host: &StdHost, extra: &[String]) -> bo
 /// collectable. Edges: an object's instance fields, array elements,
 /// collection elements and iterator snapshot.
 pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String]) {
-    let collectable = Collectable::new(heap, host);
-    let mut render_roots = Vec::new();
-    host.root_texts(&mut render_roots);
-    render_roots.extend(extra.iter().map(String::as_str));
-    let render_live = crate::runtime::render_math::reachable_keys(&host.render_objects, render_roots);
-    if collectable.markers.is_empty() {
-        host.render_objects
-            .retain(|key, _| render_live.contains(key));
-        host.render_handles.retain(|key| render_live.contains(key));
-        if host.retained_shape_probes {
-            host.retained_shape_probes = has_live_shape_probe(heap, host, extra);
+    let render_live = if host.render_objects.is_empty() {
+        BTreeSet::new()
+    } else {
+        let mut render_roots = Vec::new();
+        host.root_texts(&mut render_roots);
+        render_roots.extend(extra.iter().map(String::as_str));
+        crate::runtime::render_math::reachable_keys(&host.render_objects, render_roots)
+    };
+    let (dead, reached_kotlin_lazy, limit, live, live_menu) = {
+        let collectable = Collectable::new(heap, host);
+        if collectable.markers.is_empty() {
+            drop(collectable);
+            host.render_objects
+                .retain(|key, _| render_live.contains(key));
+            host.render_handles.retain(|key| render_live.contains(key));
+            if host.retained_shape_probes {
+                host.retained_shape_probes = has_live_shape_probe(heap, host, extra);
+            }
+            return;
         }
-        return;
-    }
-    let mut pending = Vec::new();
-    let mut reached_kotlin_lazy = HashSet::new();
-    // Built once per collection; borrows the heap only while the trace reads it.
-    let lazy = LazyHolders::new(heap);
-    // Every allocation number a text the trace reaches names: the objects
-    // found live, those without a row of their own included (`FreedObjects`).
-    let mut live = Vec::new();
-    let mut live_menu = Vec::new();
-    {
-        let mut roots: Vec<&str> = extra.iter().map(String::as_str).collect();
-        host.root_texts(&mut roots);
-        // Opaque state, and what the per-object tables keep for an object
-        // that is never collected, are roots too.
-        let mut owned = Vec::new();
-        host.opaque_root_texts(&mut owned);
-        for key in host.keyed_table_keys() {
-            if !collectable.markers.contains(key) {
-                host.keyed_texts(key, &mut owned);
+        let mut reached = vec![false; collectable.markers.len()];
+        let mut pending: Vec<u32> = Vec::with_capacity(collectable.markers.len() / 2);
+        let mut reached_kotlin_lazy: FxHashSet<String> = FxHashSet::default();
+        // Built once per collection; borrows the heap only while the trace reads it.
+        let lazy = LazyHolders::new(heap);
+        let has_lazy = !lazy.is_empty();
+        // Every allocation number a text the trace reaches names: the objects
+        // found live, those without a row of their own included (`FreedObjects`).
+        let mut live = Vec::with_capacity(collectable.markers.len());
+        let mut live_menu = Vec::new();
+        {
+            let mut roots: Vec<&str> = extra.iter().map(String::as_str).collect();
+            host.root_texts(&mut roots);
+            // Opaque state, and what the per-object tables keep for an object
+            // that is never collected, are roots too.
+            let mut owned = Vec::new();
+            host.opaque_root_texts(&mut owned);
+            for key in host.keyed_table_keys() {
+                if !collectable.contains(key) {
+                    host.keyed_root_texts(key, &mut roots);
+                }
+            }
+            // A collection cached for something that is never collected
+            // (`System.getProperties()`, a mod container's root paths) is a root.
+            for ((identity, _), cached) in &host.cached_collections {
+                if !cache_owner(identity).is_some_and(|owner| collectable.contains(owner.as_str()))
+                {
+                    roots.push(cached.as_str());
+                }
+            }
+            roots.extend(owned.iter().map(String::as_str));
+            for value in &collectable.root_field_values {
+                visit_value_texts(value, |t| roots.push(t));
+            }
+            for (key, elements) in host.mutable_collections.iter() {
+                if !collectable.contains(key.as_str()) {
+                    for value in elements {
+                        visit_value_texts(value, |t| roots.push(t));
+                    }
+                }
+            }
+            for (key, entry) in &host.iterators {
+                if !collectable.contains(key.as_str()) {
+                    for value in entry.values.iter().chain(entry.origin.iter()) {
+                        visit_value_texts(value, |t| roots.push(t));
+                    }
+                }
+            }
+            for text in roots {
+                if has_lazy {
+                    mark_kotlin_lazy_states(
+                        &lazy,
+                        text,
+                        &mut reached_kotlin_lazy,
+                        &mut reached,
+                        &mut pending,
+                        &collectable,
+                    );
+                }
+                collectable.scan_text(text, &mut reached, &mut pending, &mut live, &mut live_menu);
             }
         }
-        // A collection cached for something that is never collected
-        // (`System.getProperties()`, a mod container's root paths) is a root.
+        // The collections cached for an object (a map's `keySet()`/`values()`/
+        // `entrySet()`, #233): edges from it, so each lives as long as its map.
+        let mut cached_for: FxHashMap<u32, Vec<&str>> = FxHashMap::default();
         for ((identity, _), cached) in &host.cached_collections {
-            if !cache_owner(identity).is_some_and(|owner| collectable.markers.contains(&owner)) {
-                owned.push(cached.clone());
+            if let Some(owner) = cache_owner(identity)
+                && let Some(&idx) = collectable.index.get(owner.as_str())
+            {
+                cached_for.entry(idx).or_default().push(cached.as_str());
             }
         }
-        roots.extend(owned.iter().map(String::as_str));
-        let kept_values = heap
-            .fields
-            .iter()
-            .filter(|(key, _)| !collectable.markers.contains(field_receiver(key)))
-            .map(|(_, value)| value)
-            .chain(
-                host.mutable_collections
-                    .iter()
-                    .filter(|(key, _)| !collectable.markers.contains(key.as_str()))
-                    .flat_map(|(_, elements)| elements),
-            )
-            .chain(
-                host.iterators
-                    .iter()
-                    .filter(|(key, _)| !collectable.markers.contains(key.as_str()))
-                    .flat_map(|(_, entry)| entry.values.iter().chain(entry.origin.iter())),
-            );
-        for value in kept_values {
-            roots.extend(value_texts(value));
-        }
-        for text in roots {
-            mark_kotlin_lazy_states(
-                &lazy,
-                text,
-                &mut reached_kotlin_lazy,
-                &mut pending,
-                &collectable,
-            );
-            collectable.scan(text, &mut pending);
-            note_numbers(text, &mut live);
-            note_menu_numbers(text, &mut live_menu);
-        }
-    }
-    // The objects any per-object table keeps a row for: only these need
-    // `keyed_texts`'s lookups as the trace reaches them.
-    let keyed_keys: HashSet<String> = host.keyed_table_keys().map(str::to_owned).collect();
-    // The collections cached for an object (a map's `keySet()`/`values()`/
-    // `entrySet()`, #233): edges from it, so each lives as long as its map.
-    let mut cached_for: HashMap<String, Vec<&str>> = HashMap::new();
-    for ((identity, _), cached) in &host.cached_collections {
-        if let Some(owner) = cache_owner(identity)
-            && collectable.markers.contains(&owner)
-        {
-            cached_for.entry(owner).or_default().push(cached);
-        }
-    }
-    let mut reached = BTreeSet::new();
-    let mut found = Vec::new();
-    while let Some(marker) = pending.pop() {
-        if !reached.insert(marker.clone()) {
-            continue;
-        }
-        let prefix = format!("{marker}|");
-        let fields = heap
-            .fields
-            .range(prefix.clone()..)
-            .take_while(|(key, _)| key.starts_with(&prefix))
-            .map(|(_, value)| value);
-        // A typed array holds no references (`array_data.rs`): nothing to trace.
-        let arrays = heap
-            .arrays
-            .get(&marker)
-            .into_iter()
-            .flat_map(crate::runtime::array_data::ArrayData::references);
-        let collections = host.mutable_collections.get(&marker).into_iter().flatten();
-        let repeated = host
-            .repeated_collections
-            .get(&marker)
-            .into_iter()
-            .map(|(_, value)| value);
-        let iterators = host
-            .iterators
-            .get(&marker)
-            .into_iter()
-            .flat_map(|entry| entry.values.iter().chain(entry.origin.iter()));
-        let iterator_last = host.iterator_last.get(&marker);
-        // An enumeration's iterator or vector (`host_iterator.rs`).
-        let enumerations = host
-            .enumerations
-            .get(&marker)
-            .map(crate::runtime::host_iterator::EnumerationOver::held);
-        // A changed chat component's appended siblings and component
-        // arguments (`host_component.rs`).
-        let components = host
-            .component_states
-            .get(&marker)
-            .into_iter()
-            .flat_map(|state| state.siblings.iter().chain(state.args.iter().flatten()));
-        // A map entry's key and value, and a node's map (`host_map_entry.rs`).
-        let entries = host.map_entries.held(&marker);
-        // A collectable recipe row's item and component values (`RecipeState::row_values`).
-        let rows = host.recipes.row_values(&marker);
-        if let Some(map) = host.map_entries.map_of(&marker) {
-            collectable.scan(map, &mut found);
-        }
-        for value in fields
-            .chain(arrays)
-            .chain(collections)
-            .chain(repeated)
-            .chain(iterators)
-            .chain(iterator_last)
-            .chain(enumerations)
-            .chain(components)
-            .chain(entries)
-            .chain(rows)
-        {
-            for text in value_texts(value) {
-                mark_kotlin_lazy_states(
-                    &lazy,
-                    text,
-                    &mut reached_kotlin_lazy,
-                    &mut found,
-                    &collectable,
-                );
-                collectable.scan(text, &mut found);
-                note_numbers(text, &mut live);
-                note_menu_numbers(text, &mut live_menu);
+        let has_cached = !cached_for.is_empty();
+        let mut keyed_buf: Vec<&str> = Vec::new();
+        while let Some(idx) = pending.pop() {
+            let i = idx as usize;
+            let marker = collectable.markers[i];
+            let src = collectable.sources[i];
+
+            let mut trace_value = |value: &Value| {
+                visit_value_texts(value, |text| {
+                    if has_lazy {
+                        mark_kotlin_lazy_states(
+                            &lazy,
+                            text,
+                            &mut reached_kotlin_lazy,
+                            &mut reached,
+                            &mut pending,
+                            &collectable,
+                        );
+                    }
+                    collectable.scan_text(
+                        text,
+                        &mut reached,
+                        &mut pending,
+                        &mut live,
+                        &mut live_menu,
+                    );
+                });
+            };
+
+            if src & SRC_FIELDS != 0 {
+                let (start, end) = collectable.field_spans[i];
+                for value in &collectable.field_values[start as usize..end as usize] {
+                    trace_value(value);
+                }
+            }
+            if src & SRC_ARRAYS != 0
+                && let Some(array) = heap.arrays.get(marker)
+            {
+                for value in array.references() {
+                    trace_value(value);
+                }
+            }
+            if src & SRC_COLLECTIONS != 0
+                && let Some(elements) = host.mutable_collections.get(marker)
+            {
+                for value in elements {
+                    trace_value(value);
+                }
+            }
+            if src & SRC_REPEATED != 0
+                && let Some((_, value)) = host.repeated_collections.get(marker)
+            {
+                trace_value(value);
+            }
+            if src & SRC_ITERATORS != 0
+                && let Some(entry) = host.iterators.get(marker)
+            {
+                for value in &entry.values {
+                    trace_value(value);
+                }
+                if let Some(origin) = &entry.origin {
+                    trace_value(origin);
+                }
+            }
+            if src & SRC_ITER_LAST != 0
+                && let Some(value) = host.iterator_last.get(marker)
+            {
+                trace_value(value);
+            }
+            if src & SRC_ENUMS != 0
+                && let Some(enumeration) = host.enumerations.get(marker)
+            {
+                trace_value(enumeration.held());
+            }
+            if src & SRC_COMPONENTS != 0
+                && let Some(state) = host.component_states.get(marker)
+            {
+                for value in &state.siblings {
+                    trace_value(value);
+                }
+                if let Some(args) = &state.args {
+                    for value in args {
+                        trace_value(value);
+                    }
+                }
+            }
+            if src & SRC_MAP_ENTRIES != 0 {
+                for value in host.map_entries.held(marker) {
+                    trace_value(value);
+                }
+            }
+            if src & SRC_RECIPES != 0 {
+                host.recipes.visit_row_values(marker, &mut trace_value);
+            }
+            if src & SRC_MAP_ENTRIES != 0
+                && let Some(map) = host.map_entries.map_of(marker)
+            {
+                collectable.scan(map, &mut reached, &mut pending);
+            }
+            if has_cached && let Some(cached_list) = cached_for.get(&idx) {
+                for cached in cached_list {
+                    collectable.scan_text(
+                        cached,
+                        &mut reached,
+                        &mut pending,
+                        &mut live,
+                        &mut live_menu,
+                    );
+                }
+            }
+            // What the host keeps for this object in a table keyed by it.
+            if src & SRC_KEYED != 0 {
+                keyed_buf.clear();
+                host.keyed_root_texts(marker, &mut keyed_buf);
+                for &text in &keyed_buf {
+                    if has_lazy {
+                        mark_kotlin_lazy_states(
+                            &lazy,
+                            text,
+                            &mut reached_kotlin_lazy,
+                            &mut reached,
+                            &mut pending,
+                            &collectable,
+                        );
+                    }
+                    collectable.scan_text(
+                        text,
+                        &mut reached,
+                        &mut pending,
+                        &mut live,
+                        &mut live_menu,
+                    );
+                }
             }
         }
-        for cached in cached_for.get(&marker).into_iter().flatten() {
-            collectable.scan(cached, &mut found);
-            note_numbers(cached, &mut live);
-            note_menu_numbers(cached, &mut live_menu);
-        }
-        // What the host keeps for this object in a table keyed by it.
-        if keyed_keys.contains(&marker) {
-            let mut keyed = Vec::new();
-            host.keyed_texts(&marker, &mut keyed);
-            for text in &keyed {
-                mark_kotlin_lazy_states(
-                    &lazy,
-                    text,
-                    &mut reached_kotlin_lazy,
-                    &mut found,
-                    &collectable,
-                );
-                collectable.scan(text, &mut found);
-                note_numbers(text, &mut live);
-                note_menu_numbers(text, &mut live_menu);
+        drop(lazy);
+        // Every number below the heap's next one that was not found live is
+        // freed, so a later read of its fields is refused by name rather than
+        // answered with defaults. A number with no row that nothing reached is
+        // freed too: that keeps the ranges as few as the live numbers between
+        // them (#226 re-check 3), and an object with no row has nothing a stale
+        // handle could misread.
+        let mut limit = heap.next_object;
+        let reached_count = reached.iter().filter(|&&r| r).count();
+        let dead_est = collectable.markers.len().saturating_sub(reached_count);
+        let mut dead = DeadSet::with_capacity(dead_est);
+        for (i, &marker) in collectable.markers.iter().enumerate() {
+            let is_reached = reached[i];
+            if !is_reached {
+                dead.insert(marker);
+            }
+            if let Some((_, number)) = crate::runtime::jar_object::parse_key(marker)
+                && let Ok(number) = number.parse::<usize>()
+            {
+                if is_reached {
+                    live.push(number);
+                }
+                limit = limit.max(number.saturating_add(1));
+            } else if is_reached
+                && let Some((_, number)) = crate::runtime::jar_object::menu_object_key(marker)
+                && let Ok(number) = number.parse::<usize>()
+            {
+                live_menu.push(number);
             }
         }
-        pending.extend(found.drain(..).filter(|next| !reached.contains(next)));
-    }
-    drop(lazy);
-    let keep = |marker: &str| !collectable.markers.contains(marker) || reached.contains(marker);
-    // Every number below the heap's next one that was not found live is
-    // freed, so a later read of its fields is refused by name rather than
-    // answered with defaults. A number with no row that nothing reached is
-    // freed too: that keeps the ranges as few as the live numbers between
-    // them (#226 re-check 3), and an object with no row has nothing a stale
-    // handle could misread.
-    let mut limit = heap.next_object;
-    for marker in &collectable.markers {
-        if let Some((_, number)) = crate::runtime::jar_object::parse_key(marker)
-            && let Ok(number) = number.parse::<usize>()
-        {
-            if reached.contains(marker) {
-                live.push(number);
-            }
-            limit = limit.max(number.saturating_add(1));
-        } else if let Some((_, number)) = crate::runtime::jar_object::menu_object_key(marker)
-            && let Ok(number) = number.parse::<usize>()
-            && reached.contains(marker)
-        {
-            live_menu.push(number);
-        }
-    }
+        (dead, reached_kotlin_lazy, limit, live, live_menu)
+    };
+    let keep = |marker: &str| !dead.contains(marker);
     host.freed_objects.rebuild(limit, live);
     // Every number below `limit` is now freed or live, so the heap's next object starts at
     // `limit` at the earliest: a number this collection freed is never handed out again,
@@ -1631,31 +2136,45 @@ pub(crate) fn collect(heap: &mut JavaHeap, host: &mut StdHost, extra: &[String])
         keep(cached)
             && cache_owner(identity).is_none_or(|owner| keep(&owner) && !freed.holds_key(&owner))
     });
-    heap.fields.retain(|key, _| {
-        if let Some(holder) = kotlin_lazy_field_handle(key) {
-            reached_kotlin_lazy.contains(holder)
-        } else {
-            keep(field_receiver(key))
-        }
-    });
-    heap.arrays.retain(|key, _| keep(key));
-    heap.string_builders.retain(|key, _| keep(key));
-    heap.enum_constants.retain(|key, _| keep(key));
-    host.mutable_collections.retain_markers(|key| keep(key));
-    host.repeated_collections.retain(|key, _| keep(key));
-    host.iterators.retain(|key, _| keep(key));
-    host.iterator_last.retain(|key, _| keep(key));
-    host.enumerations.retain(|key, _| keep(key));
-    host.component_states.retain(|key, _| keep(key));
-    host.map_entries.retain(keep);
-    host.entity_registration.retain_keys(keep);
-    host.tool_material.retain_keys(keep);
-    host.vec2.retain_keys(keep);
-    host.prune_keyed_tables(keep);
-    host.recipes.prune_rows(keep);
-    host.render_objects
-        .retain(|key, _| render_live.contains(key));
-    host.render_handles.retain(|key| render_live.contains(key));
+    if !dead.is_empty() || !reached_kotlin_lazy.is_empty() {
+        let mut last_recv = String::new();
+        let mut last_keep = true;
+        heap.fields.retain(|key, _| {
+            if let Some(holder) = kotlin_lazy_field_handle(key) {
+                reached_kotlin_lazy.contains(holder)
+            } else {
+                let recv = field_receiver(key);
+                if recv != last_recv.as_str() {
+                    last_recv.clear();
+                    last_recv.push_str(recv);
+                    last_keep = keep(recv);
+                }
+                last_keep
+            }
+        });
+    }
+    if !dead.is_empty() {
+        heap.arrays.retain(|key, _| keep(key));
+        heap.string_builders.retain(|key, _| keep(key));
+        heap.enum_constants.retain(|key, _| keep(key));
+        host.mutable_collections.retain_markers(|key| keep(key));
+        host.repeated_collections.retain(|key, _| keep(key));
+        host.iterators.retain(|key, _| keep(key));
+        host.iterator_last.retain(|key, _| keep(key));
+        host.enumerations.retain(|key, _| keep(key));
+        host.component_states.retain(|key, _| keep(key));
+        host.map_entries.retain(keep);
+        host.entity_registration.retain_keys(keep);
+        host.tool_material.retain_keys(keep);
+        host.vec2.retain_keys(keep);
+        host.prune_keyed_tables(keep);
+        host.recipes.prune_rows(keep);
+    }
+    if !host.render_objects.is_empty() {
+        host.render_objects
+            .retain(|key, _| render_live.contains(key));
+        host.render_handles.retain(|key| render_live.contains(key));
+    }
     // A collected `Arrays.asList` view mirrors nothing any more.
     host.prune_array_views();
     // Disarm the per-opcode shape-probe check once GC confirms no live
@@ -1687,6 +2206,7 @@ impl<H: Host> Runtime<'_, H> {
         self.enum_constants = heap.enum_constants;
         self.next_object = self.next_object.max(heap.next_object);
         self.next_array = self.next_array.max(heap.next_array);
+        self.heap_flags |= heap.heap_flags;
         true
     }
 
@@ -1731,6 +2251,7 @@ impl<H: Host> Runtime<'_, H> {
             live: 0,
             collections: 0,
             roots,
+            heap_flags: self.heap_flags,
         };
         self.host.store_persistent_heap(heap)
     }
@@ -1752,7 +2273,7 @@ mod tests {
     /// `root → a → b`, an orphan `c → d` and an array only `b` names.
     fn graph(root: &str) -> (StdHost, JavaHeap) {
         let mut host = StdHost::new();
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .insert("demo/Mod#ROOTLjava/lang/Object;".into(), text(root));
         let mut heap = JavaHeap::default();
         heap.fields
@@ -1860,7 +2381,7 @@ mod tests {
         let (mut host, mut heap) = graph("demo/Mod#unused");
         // A static embeds holder `L1`; L1's value embeds holder `L2` and names node 3; L2's value
         // names node 1. `L3` is reached by nothing.
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#LAZYLjava/lang/Object;".into(),
             text("@lazy[L1,J:7]"),
         );
@@ -1919,7 +2440,7 @@ mod tests {
             )
         });
         let rooted = stack_holding(&mut host, text("[Ldemo/Node;#1"));
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .insert("demo/Mod#HELDLjava/lang/Object;".into(), reached.clone());
         collect(&mut heap, &mut host, &[]);
         let stacks: Vec<&String> = host.recipes.stacks.keys().collect();
@@ -1940,7 +2461,7 @@ mod tests {
             ]
         );
         // The static lets go: the row and what only it reached go too.
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .insert("demo/Mod#HELDLjava/lang/Object;".into(), Value::Ref(None));
         collect(&mut heap, &mut host, &[]);
         assert_eq!(
@@ -2019,7 +2540,7 @@ mod tests {
         // A static lambda capturing node 3, and node 1 only as a map entry's
         // value inside a list the host keeps for a static.
         let (mut host, mut heap) = graph("demo/Mod#unused");
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#ROOTLjava/lang/Object;".into(),
             crate::runtime::callback_marker::lambda_from_text(
                 "demo/Mod#init",
@@ -2029,7 +2550,7 @@ mod tests {
                 "rdemo/Node#3",
             ),
         );
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#MAPLjava/util/List;".into(),
             text("java/util/ArrayList#7"),
         );
@@ -2066,7 +2587,7 @@ mod tests {
         // A static `Optional` holding node 3: the optional is a host handle,
         // whose key names the node (#156); scanning only references dropped it.
         let (mut host, mut heap) = graph("demo/Node#1");
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#HELDLjava/util/Optional;".into(),
             crate::runtime::optional_wrap(text("demo/Node#3")),
         );
@@ -2202,7 +2723,7 @@ mod tests {
                 .contains_key("java/util/ArrayList#5")
         );
 
-        host.persistent_static_fields.clear();
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).clear();
         collect(&mut heap, &mut host, &[]);
         assert_eq!(objects(&heap), Vec::<&str>::new());
         assert!(
@@ -2282,7 +2803,7 @@ mod tests {
             ..Default::default()
         };
         heap.fields.insert(field("demo/Item#1", "x"), Value::Int(1));
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .insert("demo/Mod#ITEMLdemo/Item;".into(), text("demo/Item#1"));
         // Unreached, numbered by something other than this heap.
         heap.fields
@@ -2343,14 +2864,35 @@ mod tests {
     /// Every `#<digits>` a text holds, embedded keys included.
     #[test]
     fn numbers_are_read_from_every_key_a_text_names() {
+        let heap = JavaHeap::default();
+        let host = StdHost::new();
+        let collectable = Collectable::new(&heap, &host);
+        let mut reached = Vec::new();
+        let mut pending = Vec::new();
         let mut out = Vec::new();
-        note_numbers("demo/Lock#5", &mut out);
-        let callback = crate::runtime::callback_marker::test_token("demo/Main#lambda|demo/Cell#12|x#|#");
-        note_numbers(
-            crate::runtime::callback_marker::callback_text(&callback).unwrap(),
+        let mut out_menu = Vec::new();
+        collectable.scan_text(
+            "demo/Lock#5",
+            &mut reached,
+            &mut pending,
             &mut out,
+            &mut out_menu,
         );
-        note_numbers("HostRef { key: \"demo/A#7\" } #neutral3", &mut out);
+        let callback = crate::runtime::callback_marker::test_token("demo/Main#lambda|demo/Cell#12|x#|#");
+        collectable.scan_text(
+            crate::runtime::callback_marker::callback_text(&callback).unwrap(),
+            &mut reached,
+            &mut pending,
+            &mut out,
+            &mut out_menu,
+        );
+        collectable.scan_text(
+            "HostRef { key: \"demo/A#7\" } #neutral3",
+            &mut reached,
+            &mut pending,
+            &mut out,
+            &mut out_menu,
+        );
         assert_eq!(out, [5, 12, 7]);
     }
 
@@ -2361,7 +2903,7 @@ mod tests {
     #[test]
     fn an_object_without_rows_is_live_while_named() {
         let (mut host, mut heap) = graph("demo/Node#1");
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#LOCKLjava/lang/Object;".into(),
             text("java/lang/Object#9"),
         );
@@ -2369,7 +2911,7 @@ mod tests {
             .insert("java/util/UUID#10".into(), (1, 2));
         host.constructed_uuids
             .insert("java/util/UUID#11".into(), (3, 4));
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#IDLjava/util/UUID;".into(),
             text("java/util/UUID#11"),
         );
@@ -2434,7 +2976,7 @@ mod tests {
         .unwrap()
         .unwrap();
         host.render_handles.extend(diag.render_handles);
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Render#STACKLcom/mojang/blaze3d/vertex/PoseStack;".into(),
             stack.clone(),
         );
@@ -2448,7 +2990,7 @@ mod tests {
             host.render_objects
                 .contains_key("com/mojang/blaze3d/vertex/PoseStack#10/pose/0/matrix4")
         );
-        host.persistent_static_fields.clear();
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).clear();
         host.release(&matrix);
         collect(&mut heap, &mut host, &[]);
         assert!(host.render_objects.is_empty());
@@ -2517,14 +3059,14 @@ mod tests {
             "java/util/ArrayList#neutral0".into(),
             vec![entity.clone(), accessor.clone()],
         );
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#ROOTLjava/util/List;".into(),
             text("java/util/ArrayList#neutral0"),
         );
         collect(&mut heap, &mut host, &[]);
         // The built entity type and the accessor's id row, both reached from the root list.
         assert_eq!(host.entity_registration.entry_count(), 2);
-        host.persistent_static_fields.clear();
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).clear();
         collect(&mut heap, &mut host, &[]);
         assert_eq!(host.entity_registration.entry_count(), 0);
         assert!(heap.fields.is_empty());
@@ -2813,6 +3355,8 @@ mod tests {
             "bootstrap_injectors_ran",
             // A count of registrations handled (`jar_components.rs`).
             "component_defaults_declared",
+            // Active depth of ephemeral call-log scopes (`rewind_call_log` at exit).
+            "suppress_call_log_depth",
         ];
         let debug = format!("{:#?}", StdHost::new());
         let fields: BTreeSet<&str> = debug
@@ -3094,7 +3638,7 @@ mod tests {
 
         // Block #0 is held directly in a static field: all of its canonical states stay alive.
         let live_block = "demo/LiveBlock#0";
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#LIVE_BLOCKLnet/minecraft/world/level/block/Block;".into(),
             crate::runtime::jar_object::handle(live_block.into()),
         );
@@ -3113,7 +3657,7 @@ mod tests {
             state_only_block,
             BTreeMap::from([("facing".into(), "east".into())]),
         );
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Mod#SAVED_STATELnet/minecraft/world/level/block/state/BlockState;".into(),
             state_only_east.clone(),
         );
@@ -3185,7 +3729,7 @@ mod tests {
         // Simulate a leaky extraction arming `retained_shape_probes` and storing the probe
         // in a static field, an instance field, an array, and a list.
         host.retained_shape_probes = true;
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Leak#SAVEDLnet/minecraft/world/level/BlockGetter;".into(),
             probe.clone(),
         );
@@ -3197,18 +3741,18 @@ mod tests {
         );
         host.mutable_collections
             .insert("java/util/ArrayList#neutral3".into(), vec![probe]);
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Leak#HOLDERLdemo/Holder;".into(),
             crate::runtime::jar_object::handle("demo/Holder#1".into()),
         );
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Leak#ARRLjava/lang/Object;".into(),
             Value::Host(crate::runtime::host_ref::HostRef::new(
                 crate::runtime::host_ref::HostKind::Array,
                 "[Ljava/lang/Object;#2",
             )),
         );
-        host.persistent_static_fields.insert(
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields).insert(
             "demo/Leak#LISTLjava/util/List;".into(),
             text("java/util/ArrayList#neutral3"),
         );
@@ -3219,21 +3763,21 @@ mod tests {
         assert!(host.has_retained_shape_probes());
 
         // Drop the static probe; instance field, array, and list still hold it.
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .remove("demo/Leak#SAVEDLnet/minecraft/world/level/BlockGetter;");
         collect(&mut heap, &mut host, &[]);
         assert!(host.has_retained_shape_probes());
 
         // Drop holder and array; list still holds it.
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .remove("demo/Leak#HOLDERLdemo/Holder;");
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .remove("demo/Leak#ARRLjava/lang/Object;");
         collect(&mut heap, &mut host, &[]);
         assert!(host.has_retained_shape_probes());
 
         // Drop the list too: GC sweeps the list and disarms `retained_shape_probes`.
-        host.persistent_static_fields
+        std::sync::Arc::make_mut(&mut host.persistent_static_fields)
             .remove("demo/Leak#LISTLjava/util/List;");
         collect(&mut heap, &mut host, &[]);
         assert!(!host.has_retained_shape_probes());

@@ -75,6 +75,30 @@ pub(crate) struct ThreadTable {
     reported: usize,
 }
 
+impl ThreadTable {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for (marker, thread) in &self.made {
+            out.push(marker.as_str());
+            out.push(thread.runnable.as_str());
+            if let Some(name) = &thread.name {
+                out.push(name.as_str());
+            }
+        }
+        for (marker, state) in &self.state {
+            out.push(marker.as_str());
+            if let Some(name) = &state.name {
+                out.push(name.as_str());
+            }
+        }
+        for thread in &self.parked {
+            out.push(thread.runnable.as_str());
+            if let Some(name) = &thread.name {
+                out.push(name.as_str());
+            }
+        }
+    }
+}
+
 /// How the report names a `Runnable` value.
 fn runnable_name(value: &Value) -> String {
     if let Some(class) = crate::jar_object::object_class(value) {

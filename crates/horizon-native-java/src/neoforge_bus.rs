@@ -142,6 +142,32 @@ pub struct BusState {
     pub(crate) server: bool,
 }
 
+impl BusState {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        let mut push = |v: &'a Value| crate::heap::visit_value_texts(v, |t| out.push(t));
+        for listener in &self.listeners {
+            push(&listener.consumer);
+            push(&listener.bus);
+            match &listener.callback {
+                ListenerCallback::Indy { captures, .. } => {
+                    for capture in captures {
+                        push(capture);
+                    }
+                }
+                ListenerCallback::Object { receiver, .. } => push(receiver),
+                ListenerCallback::Static { .. } => {}
+            }
+        }
+        for (bus, target) in &self.registered {
+            push(bus);
+            push(target);
+        }
+        for task in &self.deferred {
+            push(&task.work);
+        }
+    }
+}
+
 /// What the runtime knows about one event class: the generated table's facts for NeoForge's own,
 /// the class file's for a jar's.
 pub(crate) struct EventFacts {

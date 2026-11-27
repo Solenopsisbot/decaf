@@ -411,11 +411,16 @@ impl NativeJar {
         let Some(type_value) = component_type_value(host, component) else {
             return Ok(None);
         };
+        let mark = host.call_log_mark();
+        host.suppress_call_log_depth += 1;
         let mut decoded = None;
-        self.with_persistent_runtime(host, std::slice::from_ref(&type_value), |rt| {
+        let result = self.with_persistent_runtime(host, std::slice::from_ref(&type_value), |rt| {
             decoded = decode_component(rt, component, &type_value, nbt)?;
             Ok(decoded.clone().unwrap_or(Value::Void))
-        })?;
+        });
+        host.suppress_call_log_depth -= 1;
+        host.rewind_call_log(mark);
+        result?;
         Ok(decoded)
     }
 
@@ -430,11 +435,17 @@ impl NativeJar {
         let Some(type_value) = component_type_value(host, component) else {
             return Ok(None);
         };
+        let mark = host.call_log_mark();
+        host.suppress_call_log_depth += 1;
         let mut encoded = None;
-        self.with_persistent_runtime(host, &[type_value.clone(), value.clone()], |rt| {
-            encoded = encode_component(rt, component, &type_value, value)?;
-            Ok(Value::Void)
-        })?;
+        let result =
+            self.with_persistent_runtime(host, &[type_value.clone(), value.clone()], |rt| {
+                encoded = encode_component(rt, component, &type_value, value)?;
+                Ok(Value::Void)
+            });
+        host.suppress_call_log_depth -= 1;
+        host.rewind_call_log(mark);
+        result?;
         Ok(encoded)
     }
 

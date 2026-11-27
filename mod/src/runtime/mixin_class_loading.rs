@@ -68,7 +68,7 @@
 //! processor is re-entrant and loads pass through: nothing is refused while one runs.
 
 use super::*;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Mixin's custom injection-point base class; a subclass may live in a mixin package.
 const INJECTION_POINT: &str = "org/spongepowered/asm/mixin/injection/InjectionPoint";
@@ -223,7 +223,7 @@ impl<H: Host> Runtime<'_, H> {
     /// The internal-name prefixes (`demo/`) of every Mixin config selected on this side,
     /// the primary jar's and each linked jar's.
     fn mixin_package_prefixes(&self) -> &[String] {
-        self.mixin_index.package_prefixes.get_or_init(|| {
+        self.mixin_index.cache.package_prefixes.get_or_init(|| {
             let Some(side) = self.mixin_index.side else {
                 return Vec::new();
             };
@@ -321,11 +321,25 @@ impl<H: Host> Runtime<'_, H> {
 
     /// Mixin's own refusal ([`Self::is_unloadable_by_name`]'s first half).
     fn in_refused_mixin_package(&self, name: &str) -> bool {
-        self.mixin_package_prefixes()
+        if !self
+            .mixin_package_prefixes()
             .iter()
             .any(|prefix| name.starts_with(prefix.as_str()))
-            && !self.is_passthrough_accessor(name)
-            && !self.is_mixin_library_subtype(name)
+        {
+            return false;
+        }
+        if let Ok(guard) = self.mixin_index.cache.refused_mixin_package.read()
+            && let Some(&cached) = guard.get(name)
+        {
+            return cached;
+        }
+        let refused = !self.is_passthrough_accessor(name) && !self.is_mixin_library_subtype(name);
+        if let Ok(mut guard) = self.mixin_index.cache.refused_mixin_package.write()
+            && guard.len() < 65_536
+        {
+            guard.insert(name.to_owned(), refused);
+        }
+        refused
     }
 
     /// Whether class `name`'s load fails for any reason but its own mixin package:
@@ -352,34 +366,37 @@ impl<H: Host> Runtime<'_, H> {
                 LoadFailure::Unknown
             };
         }
+        if self.mixin_package_prefixes().is_empty() && failed.is_empty() {
+            return LoadFailure::Loads;
+        }
         if depth >= MAX_SUPERCLASS_WALK {
             return LoadFailure::Loads;
         }
-        if let Some(known) = self.mixin_index.load_failures.borrow().get(name) {
-            return *known;
+        if let Ok(guard) = self.mixin_index.cache.load_failures.read()
+            && let Some(&known) = guard.get(name)
+        {
+            return known;
         }
         let outcome = match self.class(name) {
-            Some(_) if self.mixin_package_prefixes().is_empty() && failed.is_empty() => {
-                LoadFailure::Loads
-            }
-            Some(file) => std::iter::once(file.super_name.clone())
-                .chain(file.interface_names())
+            Some(file) => std::iter::once(file.super_name.as_str())
+                .chain(file.interfaces().iter().map(String::as_str))
                 .filter(|parent| !parent.is_empty())
                 .map(|parent| {
-                    if self.in_refused_mixin_package(&parent) {
+                    if self.in_refused_mixin_package(parent) {
                         LoadFailure::Fails
                     } else {
-                        self.class_load_failure(&parent, depth + 1)
+                        self.class_load_failure(parent, depth + 1)
                     }
                 })
                 .max()
                 .unwrap_or(LoadFailure::Loads),
             None => self.game_class_load_failure(name),
         };
-        self.mixin_index
-            .load_failures
-            .borrow_mut()
-            .insert(name.to_owned(), outcome);
+        if let Ok(mut guard) = self.mixin_index.cache.load_failures.write()
+            && guard.len() < 65_536
+        {
+            guard.insert(name.to_owned(), outcome);
+        }
         outcome
     }
 
@@ -549,20 +566,22 @@ impl<H: Host> Runtime<'_, H> {
 
     /// The pool entries of `class` (whose frames run `file`) that load a class this code
     /// may not load ([`Self::is_unloadable_reference`]), or `None` when there are none.
-    /// Cached per class for the runtime's life.
+    /// Cached per class across invocations on the same `(jar, side, linked, precedence)`.
     #[inline(never)]
     pub(crate) fn unloadable_pool_entries(
         &self,
         class: &str,
         file: &ClassFile,
-    ) -> Option<Rc<BTreeSet<u16>>> {
+    ) -> Option<Arc<BTreeSet<u16>>> {
         if crate::runtime::mixin_plugins::running_config_plugins()
             || (self.mixin_package_prefixes().is_empty()
                 && self.mixin_index.failed_required_targets.is_empty())
         {
             return None;
         }
-        if let Some(cached) = self.mixin_index.unloadable_pools.borrow().get(class) {
+        if let Ok(guard) = self.mixin_index.cache.unloadable_pools.read()
+            && let Some(cached) = guard.get(class)
+        {
             return cached.clone();
         }
         let mut refused = BTreeSet::new();
@@ -577,11 +596,12 @@ impl<H: Host> Runtime<'_, H> {
                 refused.insert(index);
             }
         }
-        let entries = (!refused.is_empty()).then(|| Rc::new(refused));
-        self.mixin_index
-            .unloadable_pools
-            .borrow_mut()
-            .insert(class.to_owned(), entries.clone());
+        let entries = (!refused.is_empty()).then(|| Arc::new(refused));
+        if let Ok(mut guard) = self.mixin_index.cache.unloadable_pools.write()
+            && guard.len() < 65_536
+        {
+            guard.insert(class.to_owned(), entries.clone());
+        }
         entries
     }
 

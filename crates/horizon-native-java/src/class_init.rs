@@ -83,20 +83,21 @@ const MAX_INITIALIZED_SUPERINTERFACES: usize = 256;
 /// a `ConstantValue` attribute whose constant fits the field's type. The value
 /// is `None` for a `String` constant over a lone surrogate (`Cp::LossyString`,
 /// #447): the field has that constant, which no value here can stand for.
-fn static_constant_values(raw: &[u8]) -> Result<Vec<(String, String, Option<Value>)>, NativeError> {
-    let mut reader = Reader::new(raw);
-    reader.skip(8)?;
-    let pool = read_pool(&mut reader)?;
+fn static_constant_values(
+    file: &ClassFile,
+) -> Result<Vec<(String, String, Option<Value>)>, NativeError> {
+    let mut reader = file.reader_after_pool().ok_or(NativeError::Truncated)?;
+    let pool = &file.pool;
     reader.skip(6)?; // access, this, super
     let interfaces = reader.u2()? as usize;
     reader.skip(interfaces * 2)?;
     let mut constants = Vec::new();
     for _ in 0..reader.u2()? {
         let access = reader.u2()?;
-        let name = utf8(&pool, reader.u2()?)?;
-        let descriptor = utf8(&pool, reader.u2()?)?;
+        let name = utf8(pool, reader.u2()?)?;
+        let descriptor = utf8(pool, reader.u2()?)?;
         for _ in 0..reader.u2()? {
-            let attribute = utf8(&pool, reader.u2()?)?;
+            let attribute = utf8(pool, reader.u2()?)?;
             let length = reader.u4()? as usize;
             if access & 0x0008 == 0 || attribute != "ConstantValue" || length != 2 {
                 reader.skip(length)?;
@@ -107,7 +108,7 @@ fn static_constant_values(raw: &[u8]) -> Result<Vec<(String, String, Option<Valu
                 && matches!(pool.get(index as usize), Some(Cp::LossyString))
             {
                 constants.push((name.clone(), descriptor.clone(), None));
-            } else if let Some(value) = constant_for_field(&pool, index, &descriptor) {
+            } else if let Some(value) = constant_for_field(pool, index, &descriptor) {
                 constants.push((name.clone(), descriptor.clone(), Some(value)));
             }
         }
@@ -190,9 +191,10 @@ impl<H: Host> Runtime<'_, H> {
         }
         // Done, or in progress on this (the only) thread: either way the JVM
         // returns at once.
-        if !self.initialized_classes.insert(class.to_owned()) {
+        if self.initialized_classes.contains(class) {
             return Ok(());
         }
+        std::sync::Arc::make_mut(&mut self.initialized_classes).insert(class.to_owned());
         // Step 6: the `ConstantValue` statics, before anything else runs.
         self.assign_constant_values(class)?;
         let supertypes = self.initialize_supertypes(class);
@@ -212,7 +214,8 @@ impl<H: Host> Runtime<'_, H> {
                 }),
         };
         if let Err(error) = &outcome {
-            self.initialized_classes.remove(class);
+            let initialized = std::sync::Arc::make_mut(&mut self.initialized_classes);
+            initialized.remove(class);
             let cause = match error {
                 NativeError::UncaughtException { .. } => JAVA_FAILURE.to_owned(),
                 refusal => {
@@ -224,8 +227,7 @@ impl<H: Host> Runtime<'_, H> {
                     format!("{REFUSED_FAILURE}{text}")
                 }
             };
-            self.initialized_classes
-                .insert(format!("{}{cause}", erroneous_class_prefix(class)));
+            initialized.insert(format!("{}{cause}", erroneous_class_prefix(class)));
         }
         outcome
     }
@@ -243,7 +245,7 @@ impl<H: Host> Runtime<'_, H> {
         };
         if !file.raw.is_empty() {
             // Validate the attributes now, as preparation would.
-            static_constant_values(&file.raw)?;
+            static_constant_values(file)?;
         }
         Ok(())
     }
@@ -274,7 +276,7 @@ impl<H: Host> Runtime<'_, H> {
         if file.raw.is_empty() {
             return Ok(None);
         }
-        match static_constant_values(&file.raw)?
+        match static_constant_values(file)?
             .into_iter()
             .find(|(field, desc, _)| field == name && desc == descriptor)
         {

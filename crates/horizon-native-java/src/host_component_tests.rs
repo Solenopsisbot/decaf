@@ -261,7 +261,7 @@ fn changed_components_are_collected_with_the_heap() {
         state.siblings.push(literal("u"))
     })
     .unwrap();
-    host.persistent_static_fields
+    std::sync::Arc::make_mut(&mut host.persistent_static_fields)
         .insert("demo/Main.TITLE".into(), kept.clone());
     let mut heap = crate::heap::JavaHeap::default();
     crate::heap::collect(&mut heap, &mut host, &[]);

@@ -1321,7 +1321,7 @@ impl NativeJar {
         budget: &ExecutionBudget,
         body: impl FnOnce(&mut Runtime<'_, StdHost>) -> R,
     ) -> Result<R, NativeError> {
-        let (static_fields, initialized_classes) = host.persistent_class_state();
+        let (static_fields, initialized_classes) = host.persistent_class_state_shared();
         let mut callback_infos = crate::CallbackInfos::new();
         let mut runtime = Runtime {
             classes: &self.classes,
@@ -1378,6 +1378,7 @@ impl NativeJar {
             next_frame_id: 0,
             shape_extraction: None,
             check_shape_probes: false,
+            heap_flags: 0,
             budget,
         };
         let resident = runtime.adopt_resident_heap();

@@ -792,17 +792,17 @@ pub(crate) fn member_annotations(
 pub(crate) fn member_annotation_values(
     class: &ClassFile,
 ) -> Result<(MemberAnnotationValues, MemberAnnotationValues), NativeError> {
-    let mut r = Reader::new(&class.raw);
-    if r.u4()? != 0xCAFE_BABE {
-        return Err(NativeError::InvalidClass("bad magic"));
-    }
-    r.skip(4)?;
-    let pool = read_pool(&mut r)?;
+    let mut r = match class.reader_after_pool() {
+        Some(r) => r,
+        None if class.raw.is_empty() => return Err(NativeError::Truncated),
+        None => return Err(NativeError::InvalidClass("bad magic")),
+    };
+    let pool = &class.pool;
     r.skip(6)?; // access, this, super
     let interfaces = r.u2()? as usize;
     r.skip(interfaces * 2)?;
-    let fields = read_member_annotations(&mut r, &pool)?;
-    let methods = read_member_annotations(&mut r, &pool)?;
+    let fields = read_member_annotations(&mut r, pool)?;
+    let methods = read_member_annotations(&mut r, pool)?;
     Ok((fields, methods))
 }
 
@@ -1525,6 +1525,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.host_iterator(marker)
     }
 
+    fn host_iterator_source(&self, marker: &str) -> Option<&str> {
+        self.inner.host_iterator_source(marker)
+    }
+
     fn host_iterator_next(&mut self, marker: &str) -> Result<Value, NativeError> {
         self.inner.host_iterator_next(marker)
     }
@@ -1911,6 +1915,10 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.models_class(name)
     }
 
+    fn class_precedence_key(&self) -> Option<crate::class_precedence::HostClassPrecedence> {
+        self.inner.class_precedence_key()
+    }
+
     fn throwable_message(&self, marker: &str) -> Option<Option<String>> {
         self.inner.throwable_message(marker)
     }
@@ -1995,12 +2003,27 @@ impl<H: Host> Host for GameHookHost<'_, H> {
         self.inner.persistent_class_state()
     }
 
+    fn persistent_class_state_shared(
+        &self,
+    ) -> (Arc<BTreeMap<String, Value>>, Arc<BTreeSet<String>>) {
+        self.inner.persistent_class_state_shared()
+    }
+
     fn store_persistent_class_state(
         &mut self,
         fields: BTreeMap<String, Value>,
         initialized: BTreeSet<String>,
     ) -> Result<(), NativeError> {
         self.inner.store_persistent_class_state(fields, initialized)
+    }
+
+    fn store_persistent_class_state_shared(
+        &mut self,
+        fields: Arc<BTreeMap<String, Value>>,
+        initialized: Arc<BTreeSet<String>>,
+    ) -> Result<(), NativeError> {
+        self.inner
+            .store_persistent_class_state_shared(fields, initialized)
     }
 
     fn persistent_io_state(
@@ -2405,7 +2428,7 @@ impl NativeJar {
             }
         };
         let (persistent_static_fields, persistent_initialized_classes) =
-            host.persistent_class_state();
+            host.persistent_class_state_shared();
         let (io_paths, io_files, io_file_bytes, io_dirs) = host.persistent_io_state();
         let mut initialized = state.initialized.clone();
         if let Some(host_initialized) = host.initialized_game_mixins() {
@@ -2431,7 +2454,9 @@ impl NativeJar {
             let mut callback_infos = CallbackInfos::new();
             let mut runtime = Runtime {
                 classes: &self.classes,
-                mixin_index: crate::interface_mixins::RuntimeMixinState::from_jar_side(self, side),
+                mixin_index: crate::interface_mixins::RuntimeMixinState::from_jar_side_host(
+                    self, side, &wrapped,
+                ),
                 linked,
                 host: &mut wrapped,
                 calls: 0,
@@ -2484,6 +2509,7 @@ impl NativeJar {
                 next_frame_id: 0,
                 shape_extraction: None,
                 check_shape_probes: false,
+                heap_flags: 0,
                 budget,
             };
             // `game_hook_callback_values` answers whether the callback is an

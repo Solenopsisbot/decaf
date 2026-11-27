@@ -327,7 +327,9 @@ impl<H: Host> Runtime<'_, H> {
         {
             return self.guava_immutable_map_copy(r, args);
         }
-        if let Some(receiver) = receiver {
+        if self.heap_flags & crate::runtime::heap::HEAP_FLAG_GUAVA_BIMAP != 0
+            && let Some(receiver) = receiver
+        {
             if self.bimap_entry_source(receiver).is_some() {
                 return self.invoke_bimap_entry(r, receiver, args);
             }
@@ -341,17 +343,22 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_guava_table(r, receiver, args)? {
             return Ok(Some(value));
         }
-        if let Some(result) = sized_factory_class(r, args) {
-            let class = result?;
-            return Ok(self.host.empty_mutable_collection(class));
-        }
-        if let Some(class) = empty_factory_class(r) {
-            return Ok(self.host.empty_mutable_collection(class));
+        let is_guava_owner = r.owner.starts_with("com/google/common/");
+        if is_guava_owner {
+            if let Some(result) = sized_factory_class(r, args) {
+                let class = result?;
+                return Ok(self.host.empty_mutable_collection(class));
+            }
+            if let Some(class) = empty_factory_class(r) {
+                return Ok(self.host.empty_mutable_collection(class));
+            }
         }
         if let Some(value) = crate::runtime::guava_multimap::invoke(self, r, receiver, args)? {
             return Ok(Some(value));
         }
-        if let Some((class, values, map)) = self.collection_factory_values(r, args)? {
+        if is_guava_owner
+            && let Some((class, values, map)) = self.collection_factory_values(r, args)?
+        {
             let collection = self.host.empty_mutable_collection(class).ok_or_else(|| {
                 NativeError::Metadata("Guava collection factory has no host collection".into())
             })?;
@@ -394,18 +401,20 @@ impl<H: Host> Runtime<'_, H> {
         if let Some(value) = self.invoke_memoized_supplier(r, receiver, args)? {
             return Ok(Some(value));
         }
-        if !r.owner.starts_with("com/google/common/")
+        if !is_guava_owner
             && !receiver.is_some_and(|token| crate::runtime::host_type_token::token_type(token).is_some())
         {
             // A jar `TypeToken` subclass object answers through its type even
             // when the call site names the subclass.
             // The receiver's own class decides: a member the subclass does
             // not declare is `TypeToken`'s (`toString` through `Object`).
-            if let Some(marker) = receiver.and_then(crate::runtime::jar_object::object_key)
+            if self.heap_flags & crate::runtime::heap::HEAP_FLAG_GUAVA_TYPE_TOKEN != 0
+                && let Some(marker) = receiver.and_then(crate::runtime::jar_object::instance_key)
+                && let Some(class) = crate::runtime::jar_object::key_class(marker)
+                && self.class_is_instance(class, TYPE_TOKEN)
                 && self
                     .fields
                     .contains_key(&format!("{marker}|{TYPE_TOKEN}{RUNTIME_TYPE}"))
-                && let Some(class) = crate::runtime::jar_object::key_class(marker)
                 && self
                     .member_owner(class, &r.name, &r.descriptor)
                     .is_some_and(|(owner, jar_owned)| !jar_owned && owner == TYPE_TOKEN)
@@ -820,6 +829,7 @@ impl<H: Host> Runtime<'_, H> {
                     format!("{inverse_marker}{BIMAP_INVERSE_FIELD}"),
                     map.clone(),
                 );
+                self.heap_flags |= crate::runtime::heap::HEAP_FLAG_GUAVA_BIMAP;
                 self.fields.insert(
                     format!("{map_marker}{BIMAP_KIND_FIELD}"),
                     Value::Int(BimapKind::Root.tag()),
@@ -1118,6 +1128,7 @@ impl<H: Host> Runtime<'_, H> {
                 .mint_map_entries(source, &pairs, crate::runtime::host_map_entry::EntryMade::Node);
         for entry in &entries {
             if let Value::Host(handle) = entry {
+                self.heap_flags |= crate::runtime::heap::HEAP_FLAG_GUAVA_BIMAP;
                 self.fields.insert(
                     format!("{}{}", handle.key(), BIMAP_ENTRY_FIELD),
                     source.clone(),
@@ -1397,7 +1408,7 @@ impl<H: Host> Runtime<'_, H> {
 
     fn bimap_iterator_source(&self, value: &Value) -> Option<(String, u64, bool)> {
         let marker = crate::runtime::host_iterator::marker(value)?;
-        let source = self.host.host_iterator(marker)?.2?;
+        let source = self.host.host_iterator_source(marker)?;
         let rest = source.strip_prefix(BIMAP_ITERATOR_PREFIX)?;
         let removed = rest.ends_with("|removed");
         let rest = rest.strip_suffix("|removed").unwrap_or(rest);
@@ -2149,6 +2160,7 @@ impl<H: Host> Runtime<'_, H> {
                     ));
                 };
                 // The `Type` itself, as Guava's `runtimeType` field holds it.
+                self.heap_flags |= crate::runtime::heap::HEAP_FLAG_GUAVA_TYPE_TOKEN;
                 self.fields.insert(
                     format!("{marker}|{TYPE_TOKEN}{RUNTIME_TYPE}"),
                     generic_type_value(&captured),

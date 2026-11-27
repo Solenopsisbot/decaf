@@ -843,7 +843,7 @@ impl<H: Host> Runtime<'_, H> {
 
     fn store(&mut self, field: &Target<'_>, object: &Value, value: Value) {
         if field.is_static() {
-            self.static_fields.insert(field.static_key(), value);
+            std::sync::Arc::make_mut(&mut self.static_fields).insert(field.static_key(), value);
         } else if let Some(object) = crate::runtime::jar_object::instance_key(object) {
             self.fields
                 .insert(format!("{object}|{}", field.static_key()), value);
@@ -865,28 +865,26 @@ impl<H: Host> Runtime<'_, H> {
         let Some(file) = self.class(field.declaring) else {
             return Ok(None);
         };
-        if file.raw.is_empty() {
+        let Some(mut reader) = file.reader_after_pool() else {
             return Ok(None);
-        }
-        let mut reader = Reader::new(&file.raw);
-        reader.skip(8)?;
-        let pool = read_pool(&mut reader)?;
+        };
+        let pool = &file.pool;
         reader.skip(6)?; // access, this, super
         let interfaces = reader.u2()? as usize;
         reader.skip(interfaces * 2)?;
         for _ in 0..reader.u2()? {
             reader.skip(2)?; // access
-            let name = utf8(&pool, reader.u2()?)?;
-            let descriptor = utf8(&pool, reader.u2()?)?;
+            let name = utf8(pool, reader.u2()?)?;
+            let descriptor = utf8(pool, reader.u2()?)?;
             let matches = name == field.name && descriptor == field.descriptor;
             for _ in 0..reader.u2()? {
-                let attribute = utf8(&pool, reader.u2()?)?;
+                let attribute = utf8(pool, reader.u2()?)?;
                 let length = reader.u4()? as usize;
                 if matches && attribute == "ConstantValue" {
                     let index = reader.u2()?;
                     return Ok(Some(match pool.get(index as usize) {
-                        Some(Cp::Double(_)) => constant_wide_value(&pool, index)?,
-                        _ => constant_value(&pool, index)?,
+                        Some(Cp::Double(_)) => constant_wide_value(pool, index)?,
+                        _ => constant_value(pool, index)?,
                     }));
                 }
                 reader.skip(length)?;

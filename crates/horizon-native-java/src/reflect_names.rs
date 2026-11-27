@@ -46,12 +46,8 @@ impl ClassFile {
     /// anonymous class) and its flags. `None` when the class is not nested
     /// (or the table is unreadable).
     fn own_inner_class_row(&self) -> Option<(Option<String>, u16)> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4().ok()? != 0xCAFE_BABE {
-            return None;
-        }
-        r.skip(4).ok()?;
-        let pool = read_pool(&mut r).ok()?;
+        let mut r = self.reader_after_pool()?;
+        let pool = &self.pool;
         r.skip(2).ok()?; // access
         let this = r.u2().ok()?;
         r.skip(2).ok()?; // super
@@ -62,12 +58,12 @@ impl ClassFile {
             let count = r.u2().ok()? as usize;
             for _ in 0..count {
                 r.skip(6).ok()?;
-                skip_attributes(&mut r, &pool).ok()?;
+                skip_attributes(&mut r, pool).ok()?;
             }
         }
         let attributes = r.u2().ok()? as usize;
         for _ in 0..attributes {
-            let name = utf8(&pool, r.u2().ok()?).ok()?;
+            let name = utf8(pool, r.u2().ok()?).ok()?;
             let length = r.u4().ok()? as usize;
             let bytes = r.bytes(length).ok()?;
             if name != "InnerClasses" {
@@ -84,7 +80,7 @@ impl ClassFile {
                     let simple = if simple == 0 {
                         None
                     } else {
-                        Some(utf8(&pool, simple).ok()?)
+                        Some(utf8(pool, simple).ok()?)
                     };
                     return Some((simple, flags));
                 }
@@ -99,14 +95,10 @@ impl ClassFile {
     /// `(inner, outer)` names (`outer` is `None` for a local or anonymous
     /// class). `None` when the class file is unreadable.
     fn nesting_attributes(&self) -> Option<Nesting> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4().ok()? != 0xCAFE_BABE {
-            return None;
-        }
-        r.skip(4).ok()?;
-        let pool = read_pool(&mut r).ok()?;
+        let mut r = self.reader_after_pool()?;
+        let pool = &self.pool;
         r.skip(2).ok()?; // access
-        let this = class_name(&pool, r.u2().ok()?).ok()?;
+        let this = class_name(pool, r.u2().ok()?).ok()?;
         r.skip(2).ok()?; // super
         let interfaces = r.u2().ok()? as usize;
         r.skip(interfaces.checked_mul(2)?).ok()?;
@@ -115,7 +107,7 @@ impl ClassFile {
             let count = r.u2().ok()? as usize;
             for _ in 0..count {
                 r.skip(6).ok()?;
-                skip_attributes(&mut r, &pool).ok()?;
+                skip_attributes(&mut r, pool).ok()?;
             }
         }
         let mut nesting = Nesting {
@@ -125,14 +117,13 @@ impl ClassFile {
         };
         let attributes = r.u2().ok()? as usize;
         for _ in 0..attributes {
-            let name = utf8(&pool, r.u2().ok()?).ok()?;
+            let name = utf8(pool, r.u2().ok()?).ok()?;
             let length = r.u4().ok()? as usize;
             let bytes = r.bytes(length).ok()?;
             let mut table = Reader::new(bytes);
             match name.as_str() {
                 "EnclosingMethod" => {
-                    nesting.enclosing_method_class =
-                        Some(class_name(&pool, table.u2().ok()?).ok()?);
+                    nesting.enclosing_method_class = Some(class_name(pool, table.u2().ok()?).ok()?);
                 }
                 "InnerClasses" => {
                     let entries = table.u2().ok()? as usize;
@@ -145,11 +136,11 @@ impl ClassFile {
                         }
                         let outer = match outer {
                             0 => None,
-                            index => Some(class_name(&pool, index).ok()?),
+                            index => Some(class_name(pool, index).ok()?),
                         };
                         nesting
                             .inner_classes
-                            .push((class_name(&pool, inner).ok()?, outer));
+                            .push((class_name(pool, inner).ok()?, outer));
                     }
                 }
                 _ => {}

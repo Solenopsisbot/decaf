@@ -101,8 +101,7 @@ fn state(runtime: &StdHost, kind: &str, key: &str) -> Option<serde_json::Value> 
 }
 
 fn save_state(runtime: &mut StdHost, kind: &str, key: &str, value: serde_json::Value) {
-    runtime
-        .persistent_static_fields
+    std::sync::Arc::make_mut(&mut runtime.persistent_static_fields)
         .insert(state_key(kind, key), Value::Ref(Some(value.to_string())));
 }
 
@@ -111,8 +110,7 @@ fn field_key(kind: &str, key: &str, field: &str) -> String {
 }
 
 fn save_field(runtime: &mut StdHost, kind: &str, key: &str, field: &str, value: Value) {
-    runtime
-        .persistent_static_fields
+    std::sync::Arc::make_mut(&mut runtime.persistent_static_fields)
         .insert(field_key(kind, key, field), value);
 }
 

@@ -1070,16 +1070,9 @@ pub(crate) fn adapt_to_primitive(value: &Value, descriptor: &str) -> Option<Valu
     })
 }
 
-/// A parsed class's `access_flags`, read back from its bytes (the parser
-/// keeps the raw class file and skips the field for every other use).
+/// A parsed class's `access_flags`, parsed once with the class file.
 pub(crate) fn class_access_flags(file: &crate::runtime::ClassFile) -> Option<u16> {
-    let mut reader = crate::runtime::Reader::new(&file.raw);
-    if reader.u4().ok()? != 0xCAFE_BABE {
-        return None;
-    }
-    reader.skip(4).ok()?;
-    crate::runtime::read_pool(&mut reader).ok()?;
-    reader.u2().ok()
+    file.access_flags()
 }
 
 impl<H: crate::runtime::Host> crate::runtime::Runtime<'_, H> {
