@@ -2132,6 +2132,228 @@ fn item_tooltip_passes_real_stack_components_and_tooltip_display() {
     });
 }
 
+/// A tooltip shows every frame, so Sunrise asks `appendHoverText` every frame. Each call's stack,
+/// `TooltipDisplay` and whatever the Java code makes must be garbage once its lines are Sunrise
+/// `Text`: none may stay a root of the client's heap (#609 round 6 bug G). Before the call ran
+/// in a transient scope, every frame left its stack and display rows behind as roots for good.
+/// In game that is 2 rows per hovered frame, every one walked by every later collection: after
+/// round 6's 15-minute soak the pause was ~110 ms, with one every ~5 s.
+///
+/// The bound is on work, not time: after warm-up, every collection over 2,000 tooltip frames
+/// keeps no more entries and starts from no more root texts than the first one did (plus a
+/// little slack for counters), and no recipe row outside a closed scope is added. Each frame's
+/// line equals case A of `item_tooltip_passes_real_stack_components_and_tooltip_display`, and
+/// nothing counts.
+#[test]
+fn item_tooltip_every_frame_roots_nothing_and_collections_stay_bounded() {
+    /// Entries or root texts a collection may exceed the first one by: counters and freed
+    /// ranges settle, they don't climb. On main each frame rooted 2 rows (a stack and a
+    /// display), so 2,000 frames rooted ~4,000.
+    const SLACK: usize = 32;
+    const FRAMES: usize = 2_000;
+
+    let mut sources = CLIENT_DISPATCH_STUBS.to_vec();
+    sources.push(("demo/TooltipRealStateMod.java", TOOLTIP_REAL_STATE_MOD));
+    let jar_bytes = build_javac_jar(
+        "client-tooltip-every-frame",
+        r#"{"schemaVersion":1,"id":"demo","version":"1.0","entrypoints":{"main":["demo.TooltipRealStateMod"]}}"#,
+        &sources,
+    );
+    let java = Arc::new(HorizonJava::default());
+    java.lock_client()
+        .set_fixture_files(vec![("demo-tooltip-frames.jar".to_owned(), jar_bytes)]);
+    let mods = vec![ModEntry::new(
+        "horizon_java",
+        Box::new(SharedHorizonJava(Arc::clone(&java))),
+    )];
+    // What one collection walked and kept, and the recipe rows that are roots, right now.
+    let measure = |java: &HorizonJava| {
+        java.lock_client().with_first_jar_mut(|_, host| {
+            let (rows, collectable) = host.recipe_row_counts();
+            (
+                host.collection_count(),
+                host.last_collection().cloned(),
+                rows - collectable,
+            )
+        })
+    };
+    mod_api::testing::with_mods(mods.into(), || {
+        mod_api::testing::rebuild_parts(|| {
+            let mut host = TestClientHost::new(&["demo:probe_item", "demo:opaque_probe_item"]);
+            mod_api::dispatch_client_setup(&mut host);
+            let mut rich = host.stack("demo:probe_item");
+            rich.set_damage(7);
+            rich.set_components(
+                [
+                    (
+                        "minecraft:unbreakable".into(),
+                        Tag::Compound(mod_api::Compound::new()),
+                    ),
+                    (
+                        "minecraft:custom_data".into(),
+                        Tag::compound(vec![("tier", Tag::Int(4))]),
+                    ),
+                    (
+                        "minecraft:tooltip_display".into(),
+                        Tag::compound(vec![(
+                            "hidden_components",
+                            Tag::List(vec![Tag::String("minecraft:lore".into())]),
+                        )]),
+                    ),
+                ]
+                .into(),
+            )
+            .unwrap();
+            let display = TooltipDisplay::for_stack(&rich);
+            let frame = || {
+                let mut lines = vec![(Text::literal("Probe"), 0xFFFF_FFFF)];
+                mod_api::dispatch_item_tooltip(
+                    &host,
+                    mod_api::__private::ItemTooltipCall {
+                        player: 0,
+                        player_entity_id: 1,
+                        stack: ItemStackView::from_stack(&rich),
+                        display: &display,
+                        advanced: false,
+                        creative: false,
+                        lines: TooltipLines::new(&mut VecLines(&mut lines)),
+                    },
+                );
+                assert_eq!(
+                    lines,
+                    vec![
+                        (Text::literal("Probe"), 0xFFFF_FFFF),
+                        (
+                            Text::literal(
+                                "dmg=7|unb=true|tier=4|hide=false|lore=false|dmgShow=true|banner=true"
+                            ),
+                            u32::MAX
+                        ),
+                    ]
+                );
+            };
+            // Warm up to the first collection: classes initialise and caches settle.
+            let start = measure(&java).0;
+            let mut warm = 0;
+            while measure(&java).0 == start {
+                frame();
+                warm += 1;
+                assert!(warm < FRAMES, "no collection in {FRAMES} tooltip frames");
+            }
+            let (mut seen, first, rooted) = measure(&java);
+            let first = first.expect("a collection ran");
+            let mut collections = Vec::new();
+            for _ in 0..FRAMES {
+                frame();
+                let (count, last, _) = measure(&java);
+                if count != seen {
+                    seen = count;
+                    collections.push(last.expect("a collection ran"));
+                }
+            }
+            let (_, _, rooted_after) = measure(&java);
+            assert!(
+                collections.len() >= 3,
+                "only {} collections in {FRAMES} frames",
+                collections.len()
+            );
+            for (i, stats) in collections.iter().enumerate() {
+                assert!(
+                    stats.entries_after <= first.entries_after + SLACK
+                        && stats.roots <= first.roots + SLACK,
+                    "collection {i} of {}: kept {} entries from {} root texts; the first kept {} \
+                     from {}",
+                    collections.len(),
+                    stats.entries_after,
+                    stats.roots,
+                    first.entries_after,
+                    first.roots
+                );
+            }
+            assert_eq!(
+                rooted_after, rooted,
+                "recipe rows outside a closed scope after {FRAMES} tooltip frames"
+            );
+            assert_eq!(report_row(&java)["unknown_host_call_count"], 0);
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    });
+}
+
+/// A creative tab's build seeds a runtime stack for every entry Sunrise already has, and the jar's
+/// listeners make more. All of them are garbage once the contents are Sunrise stacks: a build
+/// may root no recipe row. Before the build ran in a transient scope, every seeded and made
+/// stack stayed a root for good. Opening the creative inventory once in game rooted ~8,400
+/// stacks, and every later collection walked them (#609 round 6). The same build 100 times
+/// gives the first build's lists each time and leaves the rooted rows where the first build did.
+#[test]
+fn creative_tab_builds_root_no_recipe_rows() {
+    let mut sources = CLIENT_DISPATCH_STUBS.to_vec();
+    sources.push(("demo/CreativeComponentsMod.java", CREATIVE_COMPONENTS_MOD));
+    let jar_bytes = build_javac_jar(
+        "client-creative-rows",
+        r#"{"schemaVersion":1,"id":"demo","version":"1.0","entrypoints":{"main":["demo.CreativeComponentsMod"]}}"#,
+        &sources,
+    );
+    let java = Arc::new(HorizonJava::default());
+    java.lock_client()
+        .set_fixture_files(vec![("demo-creative-rows.jar".to_owned(), jar_bytes)]);
+    let mods = vec![ModEntry::new(
+        "horizon_java",
+        Box::new(SharedHorizonJava(Arc::clone(&java))),
+    )];
+    let rooted_rows = |java: &HorizonJava| {
+        java.lock_client().with_first_jar_mut(|_, host| {
+            let (rows, collectable) = host.recipe_row_counts();
+            rows - collectable
+        })
+    };
+    mod_api::testing::with_mods(mods.into(), || {
+        mod_api::testing::rebuild_parts(|| {
+            let mut host = TestClientHost::new(&[
+                "minecraft:stone",
+                "minecraft:diamond_sword",
+                "minecraft:apple",
+            ]);
+            mod_api::dispatch_client_setup(&mut host);
+            let rooted_at_setup = rooted_rows(&java);
+            let mut first: Option<(String, String)> = None;
+            for build in 0..100u64 {
+                let edit = host.begin_tab(100 + build, &["minecraft:stone"], &["minecraft:stone"]);
+                mod_api::dispatch_build_creative_mode_tab_contents(
+                    HostSide::Client(&mut host),
+                    "minecraft:combat",
+                    vec!["minecraft:vanilla".to_owned()],
+                    CreativeTabPermissions::Normal,
+                    edit,
+                );
+                // The seven entries of `creative_tab_preserves_custom_components_and_skips_
+                // unrepresentable_stacks` in each list, the same every build.
+                let lists = {
+                    let editor = host.editor.borrow();
+                    assert_eq!((editor.parent.len(), editor.search.len()), (7, 7));
+                    (
+                        format!("{:?}", editor.parent),
+                        format!("{:?}", editor.search),
+                    )
+                };
+                match &first {
+                    None => first = Some(lists),
+                    Some(first) => assert_eq!(&lists, first, "build {build}"),
+                }
+                assert_eq!(
+                    rooted_rows(&java),
+                    rooted_at_setup,
+                    "recipe rows rooted after build {build}"
+                );
+            }
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    });
+}
+
 const DUPLICATE_REORDER_MOD: &str = r#"package demo;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.creativetab.v1.CreativeModeTabEvents;

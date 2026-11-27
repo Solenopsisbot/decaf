@@ -375,7 +375,7 @@ use array_data::ArrayData;
 pub use boxed::Boxed;
 pub use class_precedence::RunLoader;
 pub use declarations_content::{ATTACHMENT_REGISTRY, ContentBuilderEvent, ContentBuilderKind};
-pub use heap::{CallLogMark, JavaHeap, TransientRows};
+pub use heap::{CallLogMark, CollectionStats, JavaHeap, TransientRows};
 pub use host_events::posted_event;
 pub use host_neoforge_loader::neoforge_mod_container;
 pub(crate) use host_optional::{

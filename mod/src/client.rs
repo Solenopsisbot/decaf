@@ -473,47 +473,64 @@ impl State {
                 loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
                 continue;
             };
-            // A stack whose item the host cannot name has no Java form: the tab's contents
-            // would be incomplete, so the jar's build is counted like unreadable entries.
-            let (Some(seeded_parent), Some(seeded_search)) = (
-                seed_creative_stacks(host, &mut loaded.host, &parent_entries),
-                seed_creative_stacks(host, &mut loaded.host, &search_entries),
-            ) else {
-                loaded.host.note_unknown_game_hook("creative tab entries");
-                loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
-                continue;
-            };
-            let context = runtime::CreativeTabBuildContext {
-                enabled_features,
-                has_permissions: permissions,
-                initial_display_stacks: seeded_parent.iter().map(|(v, _)| v.clone()).collect(),
-                initial_search_tab_stacks: seeded_search.iter().map(|(v, _)| v.clone()).collect(),
-                ..Default::default()
-            };
-            let contents =
-                match loaded
-                    .jar
-                    .creative_tab_contents_with(&mut loaded.host, &tab, context)
-                {
-                    Ok(contents) => contents,
-                    Err(error) => {
-                        loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
-                        log::warn!(
-                            "{LOG}: client {} creative tab {} failed: {error}",
-                            loaded.row.id,
-                            tab
-                        );
-                        continue;
-                    }
-                };
-            apply_creative_contents(
-                host,
-                event,
-                &mut loaded.host,
-                &contents,
-                &seeded_parent,
-                &seeded_search,
-            );
+            // A tab's build runs whenever Sunrise builds its contents (the creative screen opening,
+            // a feature or permission change). One transient scope covers it: the seeded stacks
+            // and every stack the jar's listeners make are garbage once the contents are Sunrise
+            // stacks, which `apply_creative_contents` makes them before the scope closes. Outside
+            // a scope every one stayed a root for the host's life: opening the creative inventory
+            // once rooted ~8,400 stacks, and every later collection walked them (#609 round 6).
+            let jar = &loaded.jar;
+            let built: Result<bool, runtime::NativeError> =
+                loaded.host.with_transient_rows(|jar_host| {
+                    // A stack whose item the host cannot name has no Java form: the tab's contents
+                    // would be incomplete, so the jar's build is counted like unreadable entries.
+                    let (Some(seeded_parent), Some(seeded_search)) = (
+                        seed_creative_stacks(host, jar_host, &parent_entries),
+                        seed_creative_stacks(host, jar_host, &search_entries),
+                    ) else {
+                        jar_host.note_unknown_game_hook("creative tab entries");
+                        return Ok(false);
+                    };
+                    let context = runtime::CreativeTabBuildContext {
+                        enabled_features,
+                        has_permissions: permissions,
+                        initial_display_stacks: seeded_parent
+                            .iter()
+                            .map(|(v, _)| v.clone())
+                            .collect(),
+                        initial_search_tab_stacks: seeded_search
+                            .iter()
+                            .map(|(v, _)| v.clone())
+                            .collect(),
+                        ..Default::default()
+                    };
+                    let contents = jar.creative_tab_contents_with(jar_host, &tab, context)?;
+                    apply_creative_contents(
+                        host,
+                        event,
+                        jar_host,
+                        &contents,
+                        &seeded_parent,
+                        &seeded_search,
+                    );
+                    Ok(true)
+                });
+            match built {
+                Ok(true) => {}
+                Ok(false) => {
+                    loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
+                    continue;
+                }
+                Err(error) => {
+                    loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
+                    log::warn!(
+                        "{LOG}: client {} creative tab {} failed: {error}",
+                        loaded.row.id,
+                        tab
+                    );
+                    continue;
+                }
+            }
             // Creative registrations are initially reported as unfired. Re-read the inventory
             // after this tab's hook so the JSON row reflects the actual registration state.
             let registered = loaded.host.game_listeners(&loaded.jar, false);
@@ -575,53 +592,61 @@ impl State {
                 loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
                 continue;
             };
-            let Some(stack) =
-                runtime_stack_from_api(host, &mut loaded.host, Some(item.clone()), api_stack)
-            else {
-                loaded
-                    .host
-                    .note_unknown_game_hook("tooltip stack item has no registry id");
-                loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
-                continue;
-            };
-            let (display, malformed_display) =
-                build_tooltip_display(&mut loaded.host, event, api_stack);
-            if malformed_display {
-                loaded
-                    .host
-                    .note_unknown_game_hook("tooltip display component");
-            }
-            let lines = match loaded.jar.run_item_tooltip(
-                &item,
-                stack,
-                runtime::client_surface::tooltip_context(),
-                display,
-                runtime::client_surface::tooltip_flag(event.advanced, event.creative),
-                &mut loaded.host,
-                &ExecutionBudget::within(JAR_BUDGET),
-            ) {
-                Ok(lines) => lines,
-                Err(error) => {
+            // Asked on every frame the tooltip shows. One transient scope covers the whole call:
+            // the stack, its `TooltipDisplay` and everything `appendHoverText` makes are garbage
+            // once its lines are Sunrise `Text`, which they all are before the scope closes.
+            // Outside a scope every row those calls mint (the stack, the display, whatever the
+            // Java code makes) is a root for the host's life: each hovered frame left 2 rows
+            // behind, and every collection walked them all, so the pause grew with hover time
+            // (to ~110 ms after a 15-minute soak, its period with it; #609 round 6 bug G).
+            let jar = &loaded.jar;
+            let ran = loaded.host.with_transient_rows(|jar_host| {
+                let Some(stack) =
+                    runtime_stack_from_api(host, jar_host, Some(item.clone()), api_stack)
+                else {
+                    jar_host.note_unknown_game_hook("tooltip stack item has no registry id");
+                    return None;
+                };
+                let (display, malformed_display) =
+                    build_tooltip_display(jar_host, event, api_stack);
+                if malformed_display {
+                    jar_host.note_unknown_game_hook("tooltip display component");
+                }
+                let lines = jar.run_item_tooltip(
+                    &item,
+                    stack,
+                    runtime::client_surface::tooltip_context(),
+                    display,
+                    runtime::client_surface::tooltip_flag(event.advanced, event.creative),
+                    jar_host,
+                    &ExecutionBudget::within(JAR_BUDGET),
+                );
+                Some(lines.map(|lines| {
+                    let mut texts = Vec::new();
+                    for line in lines {
+                        let (converted, refused) = convert_tooltip_component(host, jar_host, &line);
+                        if refused {
+                            jar_host.note_unknown_game_hook("tooltip component conversion");
+                        } else if let Some(text) = converted {
+                            texts.push(text);
+                        }
+                    }
+                    texts
+                }))
+            });
+            loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
+            match ran {
+                None => continue,
+                Some(Err(error)) => {
                     log::warn!(
                         "{LOG}: client {} item tooltip {} failed: {error}",
                         loaded.row.id,
                         id
                     );
-                    loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
                     continue;
                 }
-            };
-            for line in lines {
-                let (converted, refused) = convert_tooltip_component(host, &loaded.host, &line);
-                if refused {
-                    loaded
-                        .host
-                        .note_unknown_game_hook("tooltip component conversion");
-                } else if let Some(text) = converted {
-                    additions.push((index, text));
-                }
+                Some(Ok(texts)) => additions.extend(texts.into_iter().map(|text| (index, text))),
             }
-            loaded.row.unknown_host_calls = loaded.host.unknown_host_call_count();
         }
         // The first line is the item's name. Java appendHoverText runs immediately after it.
         // `TooltipLines` validates each line on its own: one Sunrise refuses is left out and
