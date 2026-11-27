@@ -52,6 +52,7 @@ const STUBS: &[(&str, &str)] = &[
          public final class BuiltInRegistries {\n\
            public static final Registry<Block> BLOCK = null;\n\
            public static final Registry<MenuType<?>> MENU = null;\n\
+           public static final Registry<net.minecraft.world.item.Item> ITEM = null;\n\
          }",
     ),
     (
@@ -95,7 +96,36 @@ const STUBS: &[(&str, &str)] = &[
     ),
     (
         "net/minecraft/world/item/Item.java",
-        "package net.minecraft.world.item; public class Item implements net.minecraft.world.level.ItemLike {}",
+        "package net.minecraft.world.item;\n\
+         import net.minecraft.resources.ResourceKey; import net.minecraft.world.entity.SlotAccess;\n\
+         import net.minecraft.world.entity.player.Player; import net.minecraft.world.inventory.*;\n\
+         public class Item implements net.minecraft.world.level.ItemLike {\n\
+           public static class Properties { public Properties setId(ResourceKey<Item> key) { return this; } }\n\
+           public Item(Properties p) {}\n\
+           public boolean overrideOtherStackedOnMe(ItemStack me, ItemStack other, Slot s, ClickAction a, Player p, SlotAccess c) { return false; }\n\
+           public boolean overrideStackedOnOther(ItemStack me, Slot s, ClickAction a, Player p) { return false; }\n\
+         }",
+    ),
+    (
+        "net/minecraft/world/inventory/ClickAction.java",
+        "package net.minecraft.world.inventory; public enum ClickAction { PRIMARY, SECONDARY }",
+    ),
+    (
+        "net/minecraft/world/entity/SlotAccess.java",
+        "package net.minecraft.world.entity;\n\
+         import net.minecraft.world.item.ItemStack;\n\
+         public interface SlotAccess { ItemStack get(); boolean set(ItemStack stack); }",
+    ),
+    (
+        "net/minecraft/resources/ResourceKey.java",
+        "package net.minecraft.resources;\n\
+         public final class ResourceKey<T> { public static <T> ResourceKey<T> create(ResourceKey<? extends net.minecraft.core.Registry<T>> r, Identifier id) { return null; } }",
+    ),
+    (
+        "net/minecraft/core/registries/Registries.java",
+        "package net.minecraft.core.registries;\n\
+         import net.minecraft.core.Registry; import net.minecraft.resources.ResourceKey; import net.minecraft.world.item.Item;\n\
+         public final class Registries { public static final ResourceKey<Registry<Item>> ITEM = null; }",
     ),
     (
         "net/minecraft/world/item/Items.java",
@@ -118,6 +148,7 @@ const STUBS: &[(&str, &str)] = &[
            public boolean isEmpty() { return true; }\n\
            public int getCount() { return 0; }\n\
            public void shrink(int amount) {}\n\
+           public void grow(int amount) {}\n\
            public boolean is(Item item) { return false; }\n\
            public void onCraftedBy(Player player, int amount) {}\n\
          }",
@@ -164,6 +195,7 @@ const STUBS: &[(&str, &str)] = &[
            public Slot(Container container, int index, int x, int y) {}\n\
            public ItemStack getItem() { return null; }\n\
            public void onTake(Player player, ItemStack stack) {}\n\
+           public ItemStack safeTake(int count, int limit, Player player) { return null; }\n\
          }",
     ),
     (
@@ -491,7 +523,53 @@ fn input(name: &str) -> ContainerInput {
 }
 
 fn run_script() -> Vec<String> {
-    let fixture = javac_fixture::Fixture::build("live_menu", &sources());
+    run_script_with(include_str!("fixtures/live_menu/script.txt"), false)
+}
+
+/// The bench sources with the grab item (`item_click/`), a jar item whose own click overrides
+/// the menu's `doClick` runs (`script_item_click.txt`).
+fn item_click_sources() -> Vec<(&'static str, &'static str)> {
+    let mut sources = sources();
+    sources.push((
+        "demo/GrabItem.java",
+        include_str!("fixtures/live_menu/item_click/GrabItem.java"),
+    ));
+    sources.push((
+        "demo/GrabProbe.java",
+        include_str!("fixtures/live_menu/item_click/GrabProbe.java"),
+    ));
+    sources
+}
+
+/// Register the grab item and put one in hotbar slot 3, as `LiveMenuOracle item_click` does.
+fn add_grab_item(fixture: &javac_fixture::Fixture, host: &mut StdHost, inventory: &mut [Value]) {
+    fixture
+        .jar
+        .invoke_method("demo/GrabProbe", "register", "()V", None, host)
+        .expect("register the grab item");
+    let item = host
+        .registrations()
+        .iter()
+        .find(|entry| entry.registry == "minecraft:item" && entry.id == "demo:grab")
+        .expect("the grab item is registered")
+        .value
+        .clone();
+    inventory[3] = host.make_host_item_stack_with_components(
+        Some(item),
+        "demo:grab",
+        1,
+        Vec::new(),
+        false,
+        Vec::new(),
+    );
+}
+
+fn run_script_with(script: &str, item_click: bool) -> Vec<String> {
+    let fixture = if item_click {
+        javac_fixture::Fixture::build("live_menu_item_click", &item_click_sources())
+    } else {
+        javac_fixture::Fixture::build("live_menu", &sources())
+    };
     let mut host = StdHost::new();
     fixture
         .jar
@@ -510,13 +588,16 @@ fn run_script() -> Vec<String> {
     inventory[0] = host.make_item_stack_for_id("minecraft:cobblestone", 10, false);
     inventory[1] = host.make_item_stack_for_id("minecraft:amethyst_shard", 3, false);
     inventory[2] = host.make_item_stack_for_id("minecraft:dirt", 5, false);
+    if item_click {
+        add_grab_item(&fixture, &mut host, &mut inventory);
+    }
     let mut z = 7.5;
     let mut creative = false;
     let mut window = 0;
     let budget = ExecutionBudget::UNBOUNDED;
     let mut out = Vec::new();
 
-    for raw in include_str!("fixtures/live_menu/script.txt").lines() {
+    for raw in script.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -663,6 +744,106 @@ fn live_combiner_menu_matches_java25() {
         );
     }
     assert_eq!(lines.len(), expected.len(), "Decaf:\n{}", lines.join("\n"));
+}
+
+/// A jar item's own `overrideOtherStackedOnMe` / `overrideStackedOnOther`, clicked inside the
+/// bench menu: `tryItemClickBehaviourOverride` runs them where vanilla does (before the plain
+/// pickup), so each click's slot, cursor and sync effects are Java 25's, in its order, with no
+/// counted call (`run_script_with` asserts the count stays put on every step).
+#[test]
+fn jar_item_click_overrides_in_a_live_menu_match_java25() {
+    let lines = std::thread::Builder::new()
+        .name("live-menu-item-click".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            run_script_with(
+                include_str!("fixtures/live_menu/script_item_click.txt"),
+                true,
+            )
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    let expected: Vec<&str> = include_str!("fixtures/live_menu/item_click_java25.txt")
+        .lines()
+        .collect();
+    for (index, (got, want)) in lines.iter().zip(&expected).enumerate() {
+        assert_eq!(
+            got,
+            want,
+            "line {} differs; Decaf so far:\n{}",
+            index + 1,
+            lines[..=index].join("\n")
+        );
+    }
+    assert_eq!(lines.len(), expected.len(), "Decaf:\n{}", lines.join("\n"));
+}
+
+/// A vanilla bundle's own `overrideOtherStackedOnMe` is not run by the live-menu bridge
+/// (`BundleItem`'s body isn't modelled): a pickup click on it counts instead of guessing.
+#[test]
+fn a_vanilla_bundle_click_in_a_live_menu_counts() {
+    std::thread::Builder::new()
+        .name("live-menu-bundle".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let fixture = javac_fixture::Fixture::build("live_menu_bundle", &sources());
+            let mut host = StdHost::new();
+            fixture
+                .jar
+                .execute("demo.Probe", None, "main", &mut host)
+                .unwrap();
+            host.server_player_created(UUID, 1, 0);
+            let mut inventory = vec![StdHost::empty_item_stack(); 43];
+            inventory[4] = host.make_item_stack_for_id("minecraft:bundle", 1, false);
+            host.set_player_menu_facts(UUID, Some(facts(inventory.clone(), 7.5, false)));
+            let context = BlockUseContext {
+                side: BlockUseSide::Server,
+                dimension: "minecraft:overworld".to_owned(),
+                block_id: "demo:bench".to_owned(),
+                state_properties: BTreeMap::new(),
+                pos: POS,
+                hit: BlockHitData::block(POS, "UP", [3.5, 65.0, 5.5], false),
+                player: player(),
+                hand: "MAIN_HAND".to_owned(),
+                stack: None,
+            };
+            let opened = fixture
+                .jar
+                .block_use_without_item(&mut host, &context)
+                .unwrap();
+            let window = opened.open_menus().next().expect("opened").container_id;
+            let inventory = opened.inventory.clone().expect("inventory");
+            let mut player = player();
+            player.container = PlayerContainer::Open(window);
+            let before = host.unknown_host_call_count();
+            let outcome = fixture
+                .jar
+                .click_player_menu(
+                    &mut host,
+                    &player,
+                    "minecraft:overworld",
+                    &facts(inventory, 7.5, false),
+                    &MenuClick {
+                        container_id: window,
+                        slot: 34,
+                        button: 0,
+                        input: ContainerInput::Pickup,
+                        state_id_matches: true,
+                    },
+                    &ExecutionBudget::UNBOUNDED,
+                )
+                .unwrap()
+                .expect("the menu is held");
+            assert!(
+                outcome.unknown_host_call_count > 0 && host.unknown_host_call_count() > before,
+                "{:?}",
+                outcome.unknown_host_calls
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 /// A drag over both combiner inputs: Java places it in `quickcraftSlots`' `HashSet` order,

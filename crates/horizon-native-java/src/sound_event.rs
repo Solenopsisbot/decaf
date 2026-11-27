@@ -195,3 +195,25 @@ pub(crate) fn instance_call(
         _ => host.unknown_host_call(r),
     })
 }
+
+/// `SoundEvents`' `SoundEvent` fields with their ids, read from `server-26.3.jar`'s
+/// `SoundEvents.<clinit>` (`javap -c`): each is `register(String)`, which is
+/// `Registry.register(BuiltInRegistries.SOUND_EVENT, id, SoundEvent.createVariableRangeEvent(id))`
+/// with `id = Identifier.withDefaultNamespace(name)`. The `Holder$Reference` fields
+/// (`registerForHolder`) are not here.
+const VANILLA_SOUND_EVENTS: &str = include_str!("vanilla_sound_events_26_3.tsv");
+
+/// `getstatic SoundEvents.<NAME>:SoundEvent`: the one variable-range event the field holds,
+/// the same object on every read (its key carries no allocation number).
+pub(crate) fn vanilla_static(r: &MethodRef) -> Option<Value> {
+    if r.owner != "net/minecraft/sounds/SoundEvents"
+        || r.descriptor != "Lnet/minecraft/sounds/SoundEvent;"
+    {
+        return None;
+    }
+    let id = VANILLA_SOUND_EVENTS
+        .lines()
+        .find_map(|line| line.split_once('\t').filter(|(name, _)| *name == r.name))?
+        .1;
+    Some(game_value(format!("{PREFIX}{id}/{VARIABLE}#static")))
+}

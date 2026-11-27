@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::runtime::host_ref::{ClassHierarchy, HostKind, HostRef, Methods, Nested};
-use crate::runtime::{Host, MethodRef, NativeError, Runtime, Value};
+use crate::runtime::{Host, MethodRef, NativeError, Nbt, Runtime, Value};
 
 const CODEC: &str = "com/mojang/serialization/Codec";
 const MAP_CODEC: &str = "com/mojang/serialization/MapCodec";
@@ -3673,6 +3673,203 @@ fn encode_value_depth<H: Host>(
             "unsupported Codec node kind for encode: {other}"
         )))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// NbtOps view of a modelled codec's JSON (jar data component values)
+// ---------------------------------------------------------------------------
+
+/// The NBT shape `NbtOps` gives a value a modelled codec encodes, read from the codec's node
+/// tree alone. A jar's data component value is stored as the NBT its own codec encodes with
+/// `NbtOps` (encoded by [`encode_value_nbt`]); Decaf decodes it with its JSON interpreter
+/// (`decode_value_json`) through this shape, which says which tag type each value must have
+/// for `NbtOps` and the JSON reading to agree (`server-26.3.jar`: `createBoolean` is a
+/// `ByteTag`, DFU's `ListCodec` builder a `ListTag` through `GenericListCollector`, a record a
+/// `CompoundTag` through `NbtRecordBuilder`).
+///
+/// A node kind with no shape here (a dispatch, an `either`, `orElse`, a codec Decaf runs but
+/// cannot type, an `ItemStackTemplate` with components) has none: the caller counts the value
+/// instead of guessing a tag type.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum NbtShape {
+    /// A `CompoundTag` of these fields (`fieldOf` / `optionalFieldOf`): a field may be absent.
+    Compound(Vec<(String, NbtShape)>),
+    /// A `ListTag` of elements of one shape.
+    List(Box<NbtShape>),
+    Bool,
+    Byte,
+    Short,
+    Int,
+    Long,
+    Float,
+    Double,
+    /// A `StringTag` (`Codec.STRING`, `Identifier.CODEC`, `Item.CODEC`'s holder id).
+    String,
+    /// A field the codec reads but Decaf cannot type: present, it refuses the whole value.
+    Untyped,
+}
+
+/// The NBT shape of `codec` (a modelled `Codec` node), or `None` when Decaf can't type it.
+pub(crate) fn codec_nbt_shape(codec: &Value) -> Option<NbtShape> {
+    value_shape(codec, 0)
+}
+
+fn value_shape(codec: &Value, depth: usize) -> Option<NbtShape> {
+    if depth > MAX_NODE_DEPTH {
+        return None;
+    }
+    let values = held_values(codec)?;
+    let Some(Value::Ref(Some(kind))) = values.first() else {
+        return None;
+    };
+    match kind.as_str() {
+        RECORD | MAP_TO_CODEC => {
+            let mut fields = Vec::new();
+            map_shape(values.get(2)?, &mut fields, depth + 1)?;
+            Some(NbtShape::Compound(fields))
+        }
+        UNIT_CODEC => Some(NbtShape::Compound(Vec::new())),
+        INT_RANGE => Some(NbtShape::Int),
+        LIST => Some(NbtShape::List(Box::new(value_shape(
+            values.get(2)?,
+            depth + 1,
+        )?))),
+        XMAP | FLAT_XMAP | COMAP_FLAT_MAP => value_shape(values.get(2)?, depth + 1),
+        CONSTANT => {
+            let (Some(Value::Ref(Some(owner))), Some(Value::Ref(Some(name)))) =
+                (values.get(2), values.get(3))
+            else {
+                return None;
+            };
+            Some(match (owner.as_str(), name.as_str()) {
+                (CODEC, "BOOL") => NbtShape::Bool,
+                (CODEC, "BYTE") => NbtShape::Byte,
+                (CODEC, "SHORT") => NbtShape::Short,
+                (CODEC, "INT")
+                | ("net/minecraft/util/ExtraCodecs", "POSITIVE_INT" | "NON_NEGATIVE_INT") => {
+                    NbtShape::Int
+                }
+                (CODEC, "LONG") => NbtShape::Long,
+                (CODEC, "FLOAT") => NbtShape::Float,
+                (CODEC, "DOUBLE") => NbtShape::Double,
+                (CODEC, "STRING")
+                | ("net/minecraft/resources/Identifier", "CODEC")
+                | ("net/minecraft/world/item/Item", "CODEC") => NbtShape::String,
+                // `ItemStackTemplate.CODEC`: `{id, count (omitted at 1), components}`. A
+                // template with components is refused by `template_fields` below.
+                ("net/minecraft/world/item/ItemStackTemplate", "CODEC") => {
+                    NbtShape::Compound(template_fields())
+                }
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `ItemStackTemplate.MAP_CODEC`'s fields Decaf types: `id` (the item holder's id) and `count`
+/// (`ExtraCodecs.intRange(1, 99)`). `components` (a `DataComponentPatch`, each value in its own
+/// type's codec) has no shape here, so a template that carries one is counted.
+fn template_fields() -> Vec<(String, NbtShape)> {
+    vec![
+        ("id".to_owned(), NbtShape::String),
+        ("count".to_owned(), NbtShape::Int),
+        ("components".to_owned(), NbtShape::Untyped),
+    ]
+}
+
+/// The fields of a `MapCodec` node (a record's `App`, a `fieldOf`, ...), appended to `fields`.
+fn map_shape(node: &Value, fields: &mut Vec<(String, NbtShape)>, depth: usize) -> Option<()> {
+    if depth > MAX_NODE_DEPTH || fields.len() > MAX_GRAPH_NODES {
+        return None;
+    }
+    let values = held_values(node)?;
+    let Some(Value::Ref(Some(kind))) = values.first() else {
+        return None;
+    };
+    match kind.as_str() {
+        RECORD_MAP => map_shape(values.get(2)?, fields, depth + 1),
+        POINT | UNIT => Some(()),
+        GETTER => map_shape(values.get(2)?, fields, depth + 1),
+        APPLIED => {
+            let (_, parts) = product_parts(values.get(2)?)?;
+            for part in &parts {
+                map_shape(part, fields, depth + 1)?;
+            }
+            Some(())
+        }
+        FIELD | OPTIONAL => {
+            let (Some(inner), Some(Value::Ref(Some(name)))) = (values.get(2), values.get(3)) else {
+                return None;
+            };
+            let shape = value_shape(inner, depth + 1)?;
+            if fields.iter().any(|(field, _)| field == name) {
+                // Two fields under one key: NbtOps' record builder would merge them.
+                return None;
+            }
+            fields.push((name.clone(), shape));
+            Some(())
+        }
+        MAP_XMAP | FLAT_XMAP | COMAP_FLAT_MAP => map_shape(values.get(2)?, fields, depth + 1),
+        CONSTANT => {
+            let (Some(Value::Ref(Some(owner))), Some(Value::Ref(Some(name)))) =
+                (values.get(2), values.get(3))
+            else {
+                return None;
+            };
+            if owner == "net/minecraft/world/item/ItemStackTemplate" && name == "MAP_CODEC" {
+                fields.extend(template_fields());
+                Some(())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The JSON the codec of `shape` decodes exactly as it would decode `nbt` with `NbtOps`, or
+/// `None` where `NbtOps` and the JSON interpreter could disagree (a tag of another type than
+/// the codec writes, a non-finite float, a list of mixed element kinds): the caller counts it.
+/// Keys a record does not read are left out: a `MapCodec` ignores them either way.
+pub(crate) fn codec_json_from_nbt(shape: &NbtShape, nbt: &Nbt) -> Option<serde_json::Value> {
+    json_from_nbt_depth(shape, nbt, 0)
+}
+
+fn json_from_nbt_depth(shape: &NbtShape, nbt: &Nbt, depth: usize) -> Option<serde_json::Value> {
+    if depth > crate::runtime::java_nbt::MAX_DEPTH {
+        return None;
+    }
+    Some(match (shape, nbt) {
+        (NbtShape::Compound(fields), Nbt::Compound(entries)) => {
+            let mut object = serde_json::Map::new();
+            for (name, field) in fields {
+                if let Some(tag) = entries.get(name) {
+                    object.insert(name.clone(), json_from_nbt_depth(field, tag, depth + 1)?);
+                }
+            }
+            serde_json::Value::Object(object)
+        }
+        (NbtShape::List(element), Nbt::List(items)) => serde_json::Value::Array(
+            items
+                .iter()
+                .map(|item| json_from_nbt_depth(element, item, depth + 1))
+                .collect::<Option<_>>()?,
+        ),
+        (NbtShape::Bool, Nbt::Byte(b)) => serde_json::Value::Bool(*b != 0),
+        (NbtShape::Byte, Nbt::Byte(n)) => serde_json::Value::from(*n),
+        (NbtShape::Short, Nbt::Short(n)) => serde_json::Value::from(*n),
+        (NbtShape::Int, Nbt::Int(n)) => serde_json::Value::from(*n),
+        (NbtShape::Long, Nbt::Long(n)) => serde_json::Value::from(*n),
+        (NbtShape::Float, Nbt::Float(bits)) => serde_json::Value::Number(
+            serde_json::Number::from_f64(f64::from(f32::from_bits(*bits)))?,
+        ),
+        (NbtShape::Double, Nbt::Double(bits)) => {
+            serde_json::Value::Number(serde_json::Number::from_f64(f64::from_bits(*bits))?)
+        }
+        (NbtShape::String, Nbt::String(s)) => serde_json::Value::String(s.clone()),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

@@ -346,6 +346,7 @@ mod client;
 mod content;
 pub mod game_dispatch;
 mod game_hooks;
+mod item_parts;
 mod level_random;
 mod live_menu;
 #[cfg(test)]
@@ -693,6 +694,7 @@ impl Hooks for HorizonJava {
         content::register_placement_parts(&mut state, context, registrar, Arc::clone(&self.state));
         drop(state);
         content::register_block_parts(&self.state, registrar, context, &self.client);
+        content::register_item_parts(&self.state, registrar, context, &self.client);
         self.refresh_game_hook_plan_bits();
     }
 

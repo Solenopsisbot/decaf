@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.protocol.Packet;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerInventoryPacket;
@@ -293,6 +294,26 @@ public final class LiveMenuOracle {
     inventory.setItem(0, new ItemStack(Items.COBBLESTONE, 10));
     inventory.setItem(1, new ItemStack(Items.AMETHYST_SHARD, 3));
     inventory.setItem(2, new ItemStack(Items.DIRT, 5));
+    if (args.length > 1 && args[1].equals("item_click")) {
+      // script_item_click.txt: the demo grab item in hotbar slot 3, registered as a mod's
+      // item is (the built-in item registry opened again), its components bound as the
+      // reload above binds every item's.
+      MappedRegistry<?> items = (MappedRegistry<?>) BuiltInRegistries.ITEM;
+      Field frozen = MappedRegistry.class.getDeclaredField("frozen");
+      frozen.setAccessible(true);
+      frozen.setBoolean(items, false);
+      Field intrusive = MappedRegistry.class.getDeclaredField("unregisteredIntrusiveHolders");
+      intrusive.setAccessible(true);
+      intrusive.set(items, new java.util.IdentityHashMap<>());
+      demo.GrabProbe.register();
+      for (var pending :
+          BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(
+              net.minecraft.data.registries.VanillaRegistries.createReloadableLookup(
+                  net.minecraft.data.registries.VanillaRegistries.createWorldLookup()))) {
+        pending.apply();
+      }
+      inventory.setItem(3, new ItemStack(demo.GrabProbe.GRAB, 1));
+    }
 
     for (String raw : Files.readAllLines(Path.of(args[0]))) {
       String line = raw.strip();

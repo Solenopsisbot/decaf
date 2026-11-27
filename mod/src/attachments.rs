@@ -72,7 +72,7 @@ pub(crate) fn to_runtime(compound: &Compound) -> Result<NbtCompound, String> {
         .collect()
 }
 
-fn tag_to_runtime(tag: &Tag, depth: usize) -> Result<Nbt, String> {
+pub(crate) fn tag_to_runtime(tag: &Tag, depth: usize) -> Result<Nbt, String> {
     if depth > crate::runtime::NBT_MAX_DEPTH {
         return Err("NBT nested too deep".into());
     }
@@ -117,7 +117,7 @@ pub(crate) fn to_game(compound: &NbtCompound) -> Compound {
         .collect()
 }
 
-fn tag_to_game(tag: &Nbt) -> Tag {
+pub(crate) fn tag_to_game(tag: &Nbt) -> Tag {
     match tag {
         Nbt::Byte(v) => Tag::Byte(*v),
         Nbt::Short(v) => Tag::Short(*v),

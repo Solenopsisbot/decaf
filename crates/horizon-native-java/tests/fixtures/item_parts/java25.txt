@@ -1,0 +1,14 @@
+click primary handled=false slot=1 demo:tally_item tally=none carried=10 minecraft:stone tally=none takes=0
+sound minecraft:item.bundle.insert PLAYERS 0.8 1.0 except=true
+click insert handled=true slot=1 demo:tally_item tally={ count=INT:3 last=STRING:"minecraft:stone" } carried=7 minecraft:stone tally=none takes=0
+click take handled=true slot=3 minecraft:diamond tally=none carried=1 demo:tally_item tally={ count=INT:5 last=STRING:"minecraft:diamond" } takes=1
+bar visible=true width=5 color=3394662
+stat minecraft:used demo:tally_item 1
+swing MAIN_HAND updateSelf=false
+spawn 1 demo:tally_item tally={ count=INT:5 last=STRING:"minecraft:diamond" } thrower=player
+stat minecraft:dropped demo:tally_item 1
+stat minecraft:custom minecraft:drop 1
+use result=SUCCESS_SERVER held=1 demo:tally_item tally=none
+spawn 1 demo:tally_item tally=none at 4.5 70.0 8.5
+spawn 3 demo:tally_item tally=none at 4.5 70.0 8.5
+destroyed held=1 demo:tally_item tally=none
