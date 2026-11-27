@@ -172,16 +172,10 @@ pub(crate) fn class_cast_exception(runtime_class: &str, target: &str) -> NativeE
     }
 }
 
-/// The class file's own access flags, read back from its bytes (the parsed
-/// model keeps none). `None` for a class built in memory without bytes.
+/// The class file's own access flags, parsed once with the class file.
+/// `None` for a class built in memory without bytes.
 pub(super) fn class_access(file: &ClassFile) -> Option<u16> {
-    if file.raw.is_empty() {
-        return None;
-    }
-    let mut reader = Reader::new(&file.raw);
-    reader.skip(8).ok()?;
-    read_pool(&mut reader).ok()?;
-    reader.u2().ok()
+    file.access_flags()
 }
 
 impl<H: Host> Runtime<'_, H> {
@@ -989,7 +983,7 @@ impl<H: Host> Runtime<'_, H> {
                 continue;
             }
             match self.class(&current) {
-                Some(file) => queue.extend(file.interface_names()),
+                Some(file) => queue.extend(file.interfaces().iter().cloned()),
                 // A JDK interface never extends a type outside the JDK, and
                 // Java 25's table decides a JDK target (#242).
                 None if current.starts_with("java/")
@@ -1021,7 +1015,7 @@ impl<H: Host> Runtime<'_, H> {
             .filter_map(|name| self.class(name))
             .any(|mixin| {
                 mixin.name == target
-                    || mixin.interface_names().iter().any(|interface| {
+                    || mixin.interfaces().iter().any(|interface| {
                         interface == target || self.interface_extends(interface, target)
                     })
             })

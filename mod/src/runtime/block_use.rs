@@ -544,14 +544,14 @@ impl BlockUseHostState {
         }
     }
 
-    pub(crate) fn keyed_text(&self, marker: &str) -> Option<String> {
+    pub(crate) fn keyed_root_texts<'a>(&'a self, marker: &str, out: &mut Vec<&'a str>) {
         if let Some(entry) = self.interaction_results.get(marker) {
-            return Some(format!("{entry:?}"));
+            crate::runtime::heap::visit_value_texts(&entry.swing_source, |t| out.push(t));
+            crate::runtime::heap::visit_value_texts(&entry.item_context, |t| out.push(t));
         }
         if let Some(entry) = self.interaction_item_contexts.get(marker) {
-            return Some(format!("{entry:?}"));
+            crate::runtime::heap::visit_value_texts(&entry.held_item_transformed_to, |t| out.push(t));
         }
-        None
     }
 
     pub(crate) fn keyed_table_keys(&self) -> impl Iterator<Item = &str> {

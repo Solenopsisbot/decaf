@@ -964,6 +964,43 @@ struct ActiveScreen {
     screen: Value,
 }
 
+impl ClientState {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for (marker, init) in &self.key_inits {
+            out.push(marker.as_str());
+            if let Some(category) = &init.category_value {
+                crate::runtime::heap::visit_value_texts(category, |t| out.push(t));
+            }
+        }
+        self.registrations.root_texts(out);
+        for (marker, id) in &self.categories {
+            out.push(marker.as_str());
+            out.push(id.as_str());
+        }
+        for mapping in &self.keys {
+            out.push(mapping.marker.as_str());
+        }
+        for (_, value, _) in &self.layers {
+            crate::runtime::heap::visit_value_texts(value, |t| out.push(t));
+        }
+        for marker in self.made_aliases.keys() {
+            out.push(marker.as_str());
+        }
+        for task in &self.tasks {
+            crate::runtime::heap::visit_value_texts(task, |t| out.push(t));
+        }
+        if let Some(active) = &self.active_screen {
+            crate::runtime::heap::visit_value_texts(&active.menu_type, |t| out.push(t));
+            crate::runtime::heap::visit_value_texts(&active.menu, |t| out.push(t));
+            crate::runtime::heap::visit_value_texts(&active.title, |t| out.push(t));
+            crate::runtime::heap::visit_value_texts(&active.screen, |t| out.push(t));
+        }
+        for marker in self.char_sequences.keys() {
+            out.push(marker.as_str());
+        }
+    }
+}
+
 /// A client object or value: a game handle (#156 P16d) for a `client/…` or
 /// `key-category/…` marker, the text itself for any other (an enum constant,
 /// a callback, a `String` answer).

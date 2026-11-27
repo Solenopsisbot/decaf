@@ -38,12 +38,8 @@ impl ClassFile {
     /// to one method's attributes, and read its `Signature`. A malformed file
     /// answers `None`, so the caller falls back to the erased type.
     fn read_signatures(&self, method: Option<(&str, &str)>) -> Option<String> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4().ok()? != 0xCAFE_BABE {
-            return None;
-        }
-        r.skip(4).ok()?;
-        let pool = read_pool(&mut r).ok()?;
+        let mut r = self.reader_after_pool()?;
+        let pool = &self.pool;
         r.skip(6).ok()?; // access, this, super
         let interfaces = r.u2().ok()? as usize;
         r.skip(interfaces.checked_mul(2)?).ok()?;
@@ -55,20 +51,20 @@ impl ClassFile {
         let methods = r.u2().ok()? as usize;
         for _ in 0..methods {
             r.skip(2).ok()?;
-            let name = utf8(&pool, r.u2().ok()?).ok()?;
-            let descriptor = utf8(&pool, r.u2().ok()?).ok()?;
+            let name = utf8(pool, r.u2().ok()?).ok()?;
+            let descriptor = utf8(pool, r.u2().ok()?).ok()?;
             let matching = method.is_some_and(|(wanted, wanted_descriptor)| {
                 name == wanted && descriptor == wanted_descriptor
             });
             if matching {
-                return read_signature_attribute(&mut r, &pool);
+                return read_signature_attribute(&mut r, pool);
             }
             skip_attributes(&mut r)?;
         }
         if method.is_some() {
             return None;
         }
-        read_signature_attribute(&mut r, &pool)
+        read_signature_attribute(&mut r, pool)
     }
 }
 
@@ -82,12 +78,8 @@ impl ClassFile {
         member: (&str, &str),
         attribute: &str,
     ) -> Option<bool> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4().ok()? != 0xCAFE_BABE {
-            return None;
-        }
-        r.skip(4).ok()?;
-        let pool = read_pool(&mut r).ok()?;
+        let mut r = self.reader_after_pool()?;
+        let pool = &self.pool;
         r.skip(6).ok()?; // access, this, super
         let interfaces = r.u2().ok()? as usize;
         r.skip(interfaces.checked_mul(2)?).ok()?;
@@ -95,8 +87,8 @@ impl ClassFile {
             let count = r.u2().ok()? as usize;
             for _ in 0..count {
                 r.skip(2).ok()?;
-                let name = utf8(&pool, r.u2().ok()?).ok()?;
-                let descriptor = utf8(&pool, r.u2().ok()?).ok()?;
+                let name = utf8(pool, r.u2().ok()?).ok()?;
+                let descriptor = utf8(pool, r.u2().ok()?).ok()?;
                 if table != field || (name.as_str(), descriptor.as_str()) != member {
                     skip_attributes(&mut r)?;
                     continue;
@@ -104,7 +96,7 @@ impl ClassFile {
                 let attributes = r.u2().ok()? as usize;
                 let mut found = false;
                 for _ in 0..attributes {
-                    found |= utf8(&pool, r.u2().ok()?).ok()? == attribute;
+                    found |= utf8(pool, r.u2().ok()?).ok()? == attribute;
                     let length = r.u4().ok()? as usize;
                     r.skip(length).ok()?;
                 }

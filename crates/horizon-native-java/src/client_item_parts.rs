@@ -174,6 +174,7 @@ impl NativeJar {
         let unknowns_before: BTreeMap<String, usize> =
             host.unknown_host_calls().into_iter().collect();
         let mark = host.call_log_mark();
+        host.suppress_call_log_depth += 1;
         let mut out = None;
         // The answer is handed back as the invocation's result, so the store that ends it keeps
         // what the answer names: the caller retains a value only after this returns, and a
@@ -183,6 +184,7 @@ impl NativeJar {
             out = run(rt)?;
             Ok(out.as_ref().map_or(Value::Void, AnswerRoot::root))
         });
+        host.suppress_call_log_depth -= 1;
         host.rewind_call_log(mark);
         let (unknown_host_calls, unknown_host_call_count) =
             block_use::unknown_calls_since(host, &unknowns_before);
@@ -345,14 +347,36 @@ impl NativeJar {
     /// The `@Inject(method = "create(...)", at = @At("HEAD"), cancellable = true)` callbacks
     /// into `ClientTooltipComponent.create` of this jar's mods (its own and the nested jars it
     /// selects on `host`'s side), in Mixin's apply order; `Err` names why they can't run exactly.
-    fn tooltip_create_callbacks(&self, host: &StdHost) -> Result<Vec<MixinInjectionPlan>, String> {
+    pub(crate) fn tooltip_create_callbacks(
+        &self,
+        host: &StdHost,
+    ) -> Result<Vec<MixinInjectionPlan>, String> {
         let side = host.mixin_side();
         if side != MixinSide::Client {
             return Err("ClientTooltipComponent is a client class".into());
         }
+        let env = host.environment_type.as_str();
+        if let Ok(guard) = self.meta_cache.tooltip_create_callbacks.read()
+            && let Some(cached) = guard.get(env)
+        {
+            return cached.clone();
+        }
+        let computed = self.compute_tooltip_create_callbacks(env, side);
+        if let Ok(mut guard) = self.meta_cache.tooltip_create_callbacks.write()
+            && guard.len() < 16
+        {
+            guard.insert(env.to_owned(), computed.clone());
+        }
+        computed
+    }
+
+    pub(crate) fn compute_tooltip_create_callbacks(
+        &self,
+        environment_type: &str,
+        side: MixinSide,
+    ) -> Result<Vec<MixinInjectionPlan>, String> {
         let nested =
-            crate::nested_jars::select_checked_for_side(self, host.environment_type.as_str())
-                .unwrap_or_default();
+            crate::nested_jars::select_checked_for_side(self, environment_type).unwrap_or_default();
         let jars: Vec<&NativeJar> = std::iter::once(self)
             .chain(nested.iter().map(|candidate| &candidate.jar))
             .collect();

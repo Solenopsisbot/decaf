@@ -70,9 +70,8 @@ fn nest_host_attribute(file: &ClassFile) -> Result<Option<String>, NativeError> 
 
 /// The classes a `NestHost` (one) or `NestMembers` (many) attribute lists.
 fn class_attribute_classes(file: &ClassFile, wanted: &str) -> Result<Vec<String>, NativeError> {
-    let mut reader = Reader::new(&file.raw);
-    reader.skip(8)?;
-    let pool = read_pool(&mut reader)?;
+    let mut reader = file.reader_after_pool().ok_or(NativeError::Truncated)?;
+    let pool = &file.pool;
     reader.skip(6)?; // access, this, super
     let interfaces = reader.u2()? as usize;
     reader.skip(interfaces * 2)?;
@@ -81,12 +80,12 @@ fn class_attribute_classes(file: &ClassFile, wanted: &str) -> Result<Vec<String>
         let members = reader.u2()?;
         for _ in 0..members {
             reader.skip(6)?;
-            skip_attributes(&mut reader, &pool)?;
+            skip_attributes(&mut reader, pool)?;
         }
     }
     let attributes = reader.u2()?;
     for _ in 0..attributes {
-        let name = utf8(&pool, reader.u2()?)?;
+        let name = utf8(pool, reader.u2()?)?;
         let length = reader.u4()? as usize;
         if name != wanted {
             reader.skip(length)?;
@@ -97,9 +96,7 @@ fn class_attribute_classes(file: &ClassFile, wanted: &str) -> Result<Vec<String>
         } else {
             reader.u2()?
         };
-        return (0..count)
-            .map(|_| class_name(&pool, reader.u2()?))
-            .collect();
+        return (0..count).map(|_| class_name(pool, reader.u2()?)).collect();
     }
     Ok(Vec::new())
 }

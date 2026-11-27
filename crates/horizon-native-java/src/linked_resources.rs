@@ -20,6 +20,7 @@ impl LinkedClassTable {
     /// Keep `jar`'s resources whose names no earlier jar in the table took (for classpath lookup),
     /// and record `jar`'s `data/` resources with its Fabric metadata for pack-ordered recipe/tag loading.
     pub(crate) fn link_resources(&mut self, id: &str, jar: &NativeJar) {
+        self.bump_cache_id();
         let mut data_layer = BTreeMap::new();
         for (name, bytes) in &jar.resource_bytes {
             if name.ends_with(".class") {

@@ -113,6 +113,15 @@ pub struct ImcHandle {
     jar: String,
 }
 
+impl ImcHandle {
+    pub(crate) fn root_texts_owned(&self, out: &mut Vec<String>) {
+        let state = lock(&self.bus);
+        for message in &state.messages {
+            crate::runtime::heap::visit_value_texts(&message.supplier, |t| out.push(t.to_owned()));
+        }
+    }
+}
+
 thread_local! {
     /// FML's `ModLoadingContext.context` active container. It is a
     /// `ThreadLocal`, so a parked Java thread or an unknown foreign thread

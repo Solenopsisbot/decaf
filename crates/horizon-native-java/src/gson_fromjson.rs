@@ -411,7 +411,7 @@ impl<H: Host> Runtime<'_, H> {
                 descriptor,
             };
             if access & 0x0008 != 0 {
-                self.static_fields
+                std::sync::Arc::make_mut(&mut self.static_fields)
                     .insert(Self::static_field_key(&field), field_value);
             } else if let Some(key) = instance_field_key(&value, &field) {
                 self.fields.insert(key, field_value);

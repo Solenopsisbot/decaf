@@ -332,13 +332,27 @@ fn row(class: &str) -> Option<(&'static str, &'static str)> {
     if class == "net/minecraft/world/level/block/state/BlockBehaviour" {
         return Some(("", ""));
     }
-    TABLE.lines().find_map(|line| {
-        let mut parts = line.split('|');
-        let name = parts.next()?;
-        let shape_decl = parts.next()?;
-        let collision_decl = parts.next()?;
-        (name == class).then_some((shape_decl, collision_decl))
-    })
+    if !class.starts_with("net/minecraft/world/level/block/") {
+        return None;
+    }
+    static INDEX: std::sync::OnceLock<
+        std::collections::HashMap<&'static str, (&'static str, &'static str)>,
+    > = std::sync::OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            TABLE
+                .lines()
+                .filter_map(|line| {
+                    let mut parts = line.split('|');
+                    let name = parts.next()?;
+                    let shape_decl = parts.next()?;
+                    let collision_decl = parts.next()?;
+                    Some((name, (shape_decl, collision_decl)))
+                })
+                .collect()
+        })
+        .get(class)
+        .copied()
 }
 
 /// Whether the vanilla block class `class` inherits `BlockBehaviour.getShape` directly

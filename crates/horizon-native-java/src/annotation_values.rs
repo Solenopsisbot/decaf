@@ -20,32 +20,28 @@ impl ClassFile {
     /// The `AnnotationDefault` value of one annotation member, read from the
     /// class bytes on demand like [`ClassFile::field_annotations`].
     pub(super) fn annotation_default(&self, member: &str) -> Option<AnnotationValue> {
-        let mut r = Reader::new(&self.raw);
-        if r.u4().ok()? != 0xCAFE_BABE {
-            return None;
-        }
-        r.skip(4).ok()?;
-        let pool = read_pool(&mut r).ok()?;
+        let mut r = self.reader_after_pool()?;
+        let pool = &self.pool;
         r.skip(6).ok()?; // access, this, super
         let interfaces = r.u2().ok()? as usize;
         r.skip(interfaces.checked_mul(2)?).ok()?;
         let fields = r.u2().ok()? as usize;
         for _ in 0..fields {
             r.skip(6).ok()?;
-            skip_attributes(&mut r, &pool).ok()?;
+            skip_attributes(&mut r, pool).ok()?;
         }
         let methods = r.u2().ok()? as usize;
         for _ in 0..methods {
             let _access = r.u2().ok()?;
-            let name = utf8(&pool, r.u2().ok()?).ok()?;
+            let name = utf8(pool, r.u2().ok()?).ok()?;
             let _descriptor = r.u2().ok()?;
             let attributes = r.u2().ok()? as usize;
             for _ in 0..attributes {
-                let attribute = utf8(&pool, r.u2().ok()?).ok()?;
+                let attribute = utf8(pool, r.u2().ok()?).ok()?;
                 let length = r.u4().ok()? as usize;
                 let bytes = r.bytes(length).ok()?;
                 if name == member && attribute == "AnnotationDefault" {
-                    return read_annotation_value(&mut Reader::new(bytes), &pool).ok();
+                    return read_annotation_value(&mut Reader::new(bytes), pool).ok();
                 }
             }
         }

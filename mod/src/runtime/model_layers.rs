@@ -74,6 +74,22 @@ pub(crate) struct State {
     static_values: BTreeMap<String, Value>,
 }
 
+impl State {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for builder in self.builders.values() {
+            for cube in &builder.cubes {
+                if let VisibleFaces::Set(value) = &cube.visible {
+                    crate::runtime::heap::visit_value_texts(value, |t| out.push(t));
+                }
+            }
+        }
+        for (key, value) in &self.static_values {
+            out.push(key.as_str());
+            crate::runtime::heap::visit_value_texts(value, |t| out.push(t));
+        }
+    }
+}
+
 fn value_f32(value: &Value) -> Option<f32> {
     match value {
         Value::Float(v) => Some(*v as f32),

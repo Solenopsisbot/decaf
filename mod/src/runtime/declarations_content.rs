@@ -109,6 +109,26 @@ pub(crate) struct ContentBuilders {
 }
 
 impl ContentBuilders {
+    pub(crate) fn root_texts<'a>(&'a self, out: &mut Vec<&'a str>) {
+        for (key, flags) in self.builders.iter().chain(self.components.iter()) {
+            out.push(key.as_str());
+            if let Some(codec) = &flags.codec {
+                out.push(codec.as_str());
+            }
+            if let Some(predicate) = &flags.predicate {
+                out.push(predicate.as_str());
+            }
+        }
+        for (key, codec) in self
+            .builder_codecs
+            .iter()
+            .chain(self.component_codecs.iter())
+        {
+            out.push(key.as_str());
+            crate::runtime::heap::visit_value_texts(codec, |t| out.push(t));
+        }
+    }
+
     /// Apply one event; an attachment registration answers the row to record.
     pub(crate) fn note(&mut self, event: ContentBuilderEvent) -> Option<RegistryEntry> {
         match event {

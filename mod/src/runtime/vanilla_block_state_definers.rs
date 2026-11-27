@@ -306,10 +306,20 @@ net/minecraft/world/level/block/piston/PistonHeadBlock|net/minecraft/world/level
 "#;
 
 fn row(class: &str) -> Option<&'static str> {
-    TABLE.lines().find_map(|line| {
-        let (name, declaring) = line.split_once('|')?;
-        (name == class).then_some(declaring)
-    })
+    if !class.starts_with("net/minecraft/world/level/block/") {
+        return None;
+    }
+    static INDEX: std::sync::OnceLock<std::collections::HashMap<&'static str, &'static str>> =
+        std::sync::OnceLock::new();
+    INDEX
+        .get_or_init(|| {
+            TABLE
+                .lines()
+                .filter_map(|line| line.split_once('|'))
+                .collect()
+        })
+        .get(class)
+        .copied()
 }
 
 /// Whether `class` (internal name) is a vanilla `Block` class: `Block` or one of its 26.3
