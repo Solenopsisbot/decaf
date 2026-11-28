@@ -154,6 +154,15 @@ pub(crate) fn is_tree(value: &Value) -> bool {
     value_kind(value).is_some()
 }
 
+/// Whether `value` is a `JsonObject`, `JsonArray`, `JsonPrimitive` or `JsonNull`
+/// this model built: the four classes `Gson.toJson(JsonElement)` can be handed.
+pub(crate) fn is_json_element(value: &Value) -> bool {
+    matches!(
+        value_kind(value),
+        Some(Kind::Object | Kind::Array | Kind::Primitive | Kind::Null)
+    )
+}
+
 fn kind_of(marker: &str) -> Option<Kind> {
     let class = crate::runtime::jar_object::key_class(marker)?;
     Some(match class {

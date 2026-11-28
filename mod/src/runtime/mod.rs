@@ -36175,7 +36175,22 @@ impl<H: Host> Runtime<'_, H> {
                 // custom naming/exclusion strategy, an adapter, a date format,
                 // ...): every write and read is a counted unknown instead of
                 // text that ignores it.
+                //
+                // `toJson(JsonElement, ..)` is the exception: Gson writes a tree
+                // with `JsonElement`'s own adapter (`Streams.write`), never through
+                // the adapter list, the naming and exclusion strategies, `@Expose`,
+                // the date format, the version or the number strategies, so none of
+                // those options can change its text (the oracle of
+                // `fixture_gson_tojson_element`, one row per option). Only the
+                // writer's own options apply, and `style` holds them. A value that
+                // is not a modelled tree (a null is `null`) stays counted.
+                let writes_tree = r.name == "toJson"
+                    && r.descriptor.starts_with("(Lcom/google/gson/JsonElement;")
+                    && args.first().is_some_and(|tree| {
+                        *tree == Value::Ref(None) || gson_tree::is_json_element(tree)
+                    });
                 if style.is_counted()
+                    && !writes_tree
                     && matches!(r.name.as_str(), "toJson" | "toJsonTree" | "fromJson")
                 {
                     return self
