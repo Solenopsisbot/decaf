@@ -703,8 +703,13 @@ impl<H: Host> Runtime<'_, H> {
                 {
                     return self.count_and_continue(r);
                 }
+                let counted = MethodRef {
+                    owner: "java/util/Collection".into(),
+                    name: "removeIf".into(),
+                    descriptor: "(Ljava/util/function/Predicate;)Z".into(),
+                };
                 return self
-                    .hash_remove_if(receiver, &marker, kind, &predicate)
+                    .hash_remove_if(receiver, &marker, kind, &predicate, &counted)
                     .map(Some);
             }
             ("replaceAll", "(Ljava/util/function/BiFunction;)V", [function]) if kind.map => {
@@ -789,6 +794,14 @@ impl<H: Host> Runtime<'_, H> {
                 Some(answer) => Ok(Some(Some(answer))),
                 None => Ok(None),
             };
+        }
+        // `HashMap.keySet().removeIf(..)` is modelled; any other view mutator is counted.
+        if self.host.is_view_copy(&marker)
+            && r.name == "removeIf"
+            && r.descriptor == "(Ljava/util/function/Predicate;)Z"
+            && let Some(answer) = self.key_set_remove_if(r, &marker, args)?
+        {
+            return Ok(Some(Some(answer)));
         }
         if self.host.is_view_copy(&marker) && java_immutable::is_mutator(&r.name) {
             return self.count_and_continue(r).map(Some);
@@ -1636,6 +1649,59 @@ impl<H: Host> Runtime<'_, H> {
         Ok(verdict)
     }
 
+    /// `removeIf` on the `keySet()` of a `HashMap` or `LinkedHashMap`: `Collection.removeIf`
+    /// (the key set does not override it), so the same walk as a set's: `test` per key in the
+    /// map's iteration order, `it.remove()` re-walking the key's bin, and a predicate that changes
+    /// the map makes the next step throw. The removal is the map's (`modCount`, the other views,
+    /// the live entry nodes). `None` leaves the call counted: another map class, a key order that
+    /// is unknown (identity hashes, an access-ordered map), or a lookup whose `equals` is unknown.
+    fn key_set_remove_if(
+        &mut self,
+        r: &MethodRef,
+        view: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if self.host.view_copy_kind(view).as_deref() != Some("keySet") {
+            return Ok(None);
+        }
+        let Some(source) = self.host.view_copy_source(view) else {
+            return Ok(None);
+        };
+        let map = crate::runtime::jar_object::stored_value(&source);
+        if !matches!(
+            self.host_collection_class(&map).as_deref(),
+            Some("java/util/HashMap" | "java/util/LinkedHashMap")
+        ) {
+            return Ok(None);
+        }
+        let Some(kind) = self.hash_table_kind(&map).filter(|kind| kind.map) else {
+            return Ok(None);
+        };
+        let [predicate] = args else {
+            return Ok(None);
+        };
+        self.resync_hash_table(&map)?;
+        let known = self
+            .host
+            .take_hash_table(&source)
+            .map(|table| {
+                let unknown = table.order_unknown();
+                if unknown {
+                    self.host
+                        .mark_nondeterministic("java-random-hash-collection-order");
+                }
+                let known = !unknown && !table.lookups_unknown();
+                self.host.store_hash_table(&source, table);
+                known
+            })
+            .unwrap_or(false);
+        if !known {
+            return Ok(None);
+        }
+        self.hash_remove_if(&map, &source, kind, predicate, r)
+            .map(Some)
+    }
+
     /// `Collection.removeIf` on a `HashSet`/`LinkedHashSet` (neither
     /// overrides it): the iterator walks the set, and `it.remove()` runs
     /// `removeNode(hash, key)`, which searches the bin again, calling
@@ -1648,6 +1714,7 @@ impl<H: Host> Runtime<'_, H> {
         marker: &str,
         kind: TableKind,
         predicate: &Value,
+        counted: &MethodRef,
     ) -> Result<Value, NativeError> {
         if *predicate == Value::Ref(None) {
             return Err(NativeError::UncaughtException {
@@ -1656,15 +1723,16 @@ impl<H: Host> Runtime<'_, H> {
                 frame: None,
             });
         }
-        let elements = self.collection_elements(receiver)?;
+        // A map's key set walks the keys (`step`: its list holds key, value pairs).
+        let step = if kind.map { 2 } else { 1 };
+        let elements: Vec<Value> = self
+            .collection_elements(receiver)?
+            .into_iter()
+            .step_by(step)
+            .collect();
         let mut expected = self.mod_stamp(marker);
         let mut signature = self.key_signature(receiver, kind)?;
         let mut removed = false;
-        let counted = MethodRef {
-            owner: "java/util/Collection".into(),
-            name: "removeIf".into(),
-            descriptor: "(Ljava/util/function/Predicate;)Z".into(),
-        };
         for (index, element) in elements.iter().enumerate() {
             // `each.next()` (after the first) checks `modCount`.
             if index > 0 {
@@ -1672,12 +1740,22 @@ impl<H: Host> Runtime<'_, H> {
                     ModVerdict::Same => {}
                     ModVerdict::Changed => return Err(concurrent_modification()),
                     ModVerdict::Unknown => {
-                        self.host.unknown_operand_call(&counted)?;
+                        self.host.unknown_operand_call(counted)?;
                         return Ok(Value::Int(i32::from(removed)));
                     }
                 }
             }
-            if !self.predicate_holds(predicate, element)? {
+            // A test the run cannot answer (a predicate it cannot run, or one whose body
+            // reached a counted call) is not "false": Java may have removed this key and
+            // every later one it selects. The whole `removeIf` is counted and the walk stops
+            // here. What the walk did before (each earlier test answered exactly, each
+            // removal done) is what Java did too; nothing past this key is modelled, so
+            // the map's state from here on is unknown to the run.
+            let Some(selected) = self.remove_if_test(predicate, element)? else {
+                self.host.unknown_operand_call(counted)?;
+                return Ok(Value::Int(i32::from(removed)));
+            };
+            if !selected {
                 continue;
             }
             // `each.remove()`: the check, then the re-walk.
@@ -1686,7 +1764,7 @@ impl<H: Host> Runtime<'_, H> {
                 ModVerdict::Same => {}
                 ModVerdict::Changed => return Err(concurrent_modification()),
                 ModVerdict::Unknown => {
-                    self.host.unknown_operand_call(&counted)?;
+                    self.host.unknown_operand_call(counted)?;
                     return Ok(Value::Int(i32::from(removed)));
                 }
             }
@@ -1708,19 +1786,70 @@ impl<H: Host> Runtime<'_, H> {
             };
             table.remove(&node);
             self.host.store_hash_table(marker, table);
+            if kind.map {
+                // The live entry nodes keep what the removed one held (`host_map_entry.rs`).
+                self.host.entries_before_call(
+                    marker,
+                    "iterator_remove",
+                    std::slice::from_ref(element),
+                );
+            }
             let kept: Vec<Value> = self
                 .collection_elements(receiver)?
-                .into_iter()
-                .filter(|value| collection_item_marker(value) != node)
+                .chunks(step)
+                .filter(|chunk| collection_item_marker(&chunk[0]) != node)
+                .flatten()
+                .cloned()
                 .collect();
             self.host.replace_mutable_collection(receiver, kept);
             // `removeNode` bumps `modCount`; the iterator takes it.
             self.bump_mod_count(marker, false);
+            if kind.map {
+                self.host.entries_after_call(marker);
+                // A `keySet()`/`values()`/`entrySet()` kept from the map follows it, as the
+                // JDK's views do, so the predicate reads the key set as it now is.
+                self.refresh_map_views(marker);
+            }
             expected = self.mod_stamp(marker);
             signature = self.key_signature(receiver, kind)?;
             removed = true;
         }
         Ok(Value::Int(i32::from(removed)))
+    }
+
+    /// `Predicate.test(element)` for `hash_remove_if`, `None` when the run has no answer:
+    /// the predicate is not something it can run (a host handle, a lambda it cannot reach),
+    /// or running it counted a call (its result is then the host's neutral value, not
+    /// what the JDK computed). `collection_callback.rs`'s `predicate_holds` reads both as
+    /// `false`, which for `removeIf` would keep a key Java may have removed.
+    fn remove_if_test(
+        &mut self,
+        predicate: &Value,
+        element: &Value,
+    ) -> Result<Option<bool>, NativeError> {
+        let counted = self.host.counted_unknown_calls();
+        let arguments = std::slice::from_ref(element);
+        let mut answer = self.invoke_callback(predicate, arguments)?;
+        if answer.is_none() {
+            let call = MethodRef {
+                owner: "java/util/function/Predicate".into(),
+                name: "test".into(),
+                descriptor: "(Ljava/lang/Object;)Z".into(),
+            };
+            if let Some((owner, true)) = self.dispatch_owner(&call, 0xb9, Some(predicate)) {
+                answer = Some(self.invoke(
+                    &owner,
+                    &call.name,
+                    &call.descriptor,
+                    Some(predicate.clone()),
+                    arguments,
+                )?);
+            }
+        }
+        if self.host.counted_unknown_calls() > counted {
+            return Ok(None);
+        }
+        Ok(answer.map(|answer| matches!(answer, Value::Int(flag) if flag != 0)))
     }
 
     /// `HashMap.forEach`/`HashSet.forEach` (and the linked ones): every

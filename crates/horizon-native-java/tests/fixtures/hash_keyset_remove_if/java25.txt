@@ -1,0 +1,28 @@
+hm_some	true|[k0,k2,k4,k6,k8,]|{k0=0,k2=2,k4=4,k6=6,k8=8,}|5,5|log=k0 k1 k2 k3 k4 k5 k6 k7 k8 k9 
+hm_some_resized	true|[k30,k10,k32,k12,k34,k14,k36,k16,k38,k18,k0,k2,k20,k4,k22,k6,k24,k8,k26,k28,]|{k30=30,k10=10,k32=32,k12=12,k34=34,k14=14,k36=36,k16=16,k38=38,k18=18,k0=0,k2=2,k20=20,k4=4,k22=22,k6=6,k24=24,k8=8,k26=26,k28=28,}|20,20|log=k31 k30 k11 k33 k10 k32 k13 k35 k12 k34 k15 k37 k14 k36 k17 k39 k16 k38 k19 k18 k0 k1 k2 k3 k20 k4 k5 k22 k6 k21 k7 k24 k8 k23 k9 k26 k25 k28 k27 k29 
+hm_all	true|{}|0|true|log=k0 k1 k2 k3 k4 k5 
+hm_none	false|{k0=0,k1=1,k2=2,k3=3,k4=4,k5=5,}|log=k0 k1 k2 k3 k4 k5 
+hm_empty	false|{}|log=
+hm_null_pred	threw:java.lang.NullPointerException:null|log=
+hm_null_pred_empty	threw:java.lang.NullPointerException:null|log=
+lhm_null_pred	threw:java.lang.NullPointerException:null|log=
+hm_throw	threw:java.lang.IllegalStateException:boom k3|{k1=1,k3=3,k4=4,k5=5,k6=6,k7=7,k8=8,k9=9,}|8|log=k0 k1 k2 k3 
+hm_null_key	true|{a=2,}|false|log=null a b 
+hm_int_keys	true|{128=v19,65=v10,2=v1,-5=v0,142=v21,79=v12,16=v3,149=v22,86=v13,23=v4,163=v24,100=v15,37=v6,170=v25,107=v16,44=v7,184=v27,121=v18,58=v9,191=v28,}|log=128 65 2 -5 198 135 72 9 142 79 16 149 86 23 156 93 30 163 100 37 170 107 44 177 114 51 184 121 58 191 
+hm_view_live	true|8/8/true 7/7/true 6/6/true 5/5/true 4/4/true 4/4/true 4/4/true 4/4/true |[k4,k5,k6,k7,]|4|{k4=4,k5=5,k6=6,k7=7,}
+hm_pred_reads	true|{k0=0,k1=1,k2=2,}|log=k0:0:true:6 k1:1:true:6 k2:2:true:6 k3:3:true:6 k4:4:true:5 k5:5:true:4 
+hm_pred_put_new	threw:java.util.ConcurrentModificationException:null|{zz=9,k0=0,k1=1,k2=2,k3=3,k4=4,}|log=k0 
+hm_pred_put_new_removing	threw:java.util.ConcurrentModificationException:null|{zz=9,k0=0,k1=1,k2=2,k3=3,k4=4,}|log=k0 
+hm_pred_remove_other	threw:java.util.ConcurrentModificationException:null|{k0=0,k1=1,k2=2,k3=3,}|log=k0 
+hm_pred_removes_self	threw:java.util.ConcurrentModificationException:null|{k1=1,k2=2,k3=3,k4=4,}|log=k0 
+hm_pred_put_at_last	false|{zz=9,k0=0,k1=1,k2=2,k3=3,k4=4,}|log=k0 k1 k2 k3 k4 
+hm_pred_put_at_last_removing	threw:java.util.ConcurrentModificationException:null|{zz=9,k0=0,k1=1,k2=2,k3=3,k4=4,}|log=k0 k1 k2 k3 k4 
+hm_pred_replaces_value	true|{k0=99,k1=1,k3=3,k5=5,}|log=k0 k1 k2 k3 k4 k5 
+hm_after	{new=1,k1=1,k2=2,k3=33,k4=4,k5=5,k11=11,k10=10,k7=7,k8=8,}|1|33|false|4|9|[1, 1, 2, 33, 5, 11, 10, 7, 8]
+hm_loop_after	threw:java.util.ConcurrentModificationException:null
+hm_loop_none	false|k1|k2
+hm_jar_keys	true[K3,K6,K1,K7,K2,K5,]|{K3=v3,K6=v6,K1=v1,K7=v7,K2=v2,K5=v5,}|e4:1 
+lhm_some	true|[k0,k2,k4,k6,k8,]|{k0=0,k2=2,k4=4,k6=6,k8=8,}|5,5|log=k0 k1 k2 k3 k4 k5 k6 k7 k8 k9 
+lhm_jar_keys	true[K0,K2,K4,]|{K0=v0,K2=v2,K4=v4,}|e1:0 e3:0 e3:2 e5:0 e5:2 e5:4 
+lhm_pred_put_new	threw:java.util.ConcurrentModificationException:null|{k0=0,k1=1,k2=2,k3=3,k4=4,zz=9,}|log=k0 
+hm_values_entries	[1, 3, 5, 7]|[k1=1, k3=3, k5=5, k7=7]|4,4
